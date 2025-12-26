@@ -33,11 +33,12 @@ class SafeExprParser {
   }
 
   // Main API: compile expression to evaluator function
+  // Signature matches Reflex._fn: (state, context, $event, $el) => result
   compile(exp, reflex) {
     const ast = this.parse(exp);
-    return (state, context, $event) => {
+    return (state, context, $event, $el) => {
       try {
-        return this._evaluate(ast, state, context, $event, reflex);
+        return this._evaluate(ast, state, context, $event, $el, reflex);
       } catch (err) {
         console.warn("Reflex: Expression evaluation error:", exp, err);
         return undefined;
@@ -374,7 +375,7 @@ class SafeExprParser {
   isIdentPart(c) { return c && /[\w$]/.test(c); }
 
   // AST Evaluator
-  _evaluate(node, state, context, $event, reflex) {
+  _evaluate(node, state, context, $event, $el, reflex) {
     if (!node) return undefined;
 
     switch (node.type) {
@@ -387,7 +388,12 @@ class SafeExprParser {
           console.warn("Reflex: Blocked access to unsafe property:", name);
           return undefined;
         }
+        // Magic properties - must match Reflex.js behavior
         if (name === '$event') return $event;
+        if (name === '$el') return $el;
+        if (name === '$refs') return reflex._refs;
+        if (name === '$dispatch') return reflex._dispatch.bind(reflex);
+        if (name === '$nextTick') return reflex.nextTick.bind(reflex);
         if (context && name in context) {
           const meta = context[M] || reflex._mf.get(context);
           if (meta) reflex._tk(meta, name);
@@ -401,10 +407,10 @@ class SafeExprParser {
       }
 
       case 'member': {
-        const obj = this._evaluate(node.object, state, context, $event, reflex);
+        const obj = this._evaluate(node.object, state, context, $event, $el, reflex);
         if (obj == null) return undefined;
         const prop = node.computed
-          ? this._evaluate(node.property, state, context, $event, reflex)
+          ? this._evaluate(node.property, state, context, $event, $el, reflex)
           : node.property;
         if (UNSAFE_PROPS[prop]) {
           console.warn("Reflex: Blocked access to unsafe property:", prop);
@@ -418,24 +424,24 @@ class SafeExprParser {
       case 'call': {
         let callee, thisArg;
         if (node.callee.type === 'member') {
-          thisArg = this._evaluate(node.callee.object, state, context, $event, reflex);
+          thisArg = this._evaluate(node.callee.object, state, context, $event, $el, reflex);
           if (thisArg == null) return undefined;
           const prop = node.callee.computed
-            ? this._evaluate(node.callee.property, state, context, $event, reflex)
+            ? this._evaluate(node.callee.property, state, context, $event, $el, reflex)
             : node.callee.property;
           callee = thisArg[prop];
         } else {
-          callee = this._evaluate(node.callee, state, context, $event, reflex);
+          callee = this._evaluate(node.callee, state, context, $event, $el, reflex);
           thisArg = undefined;
         }
         if (typeof callee !== 'function') return undefined;
-        const args = node.arguments.map(a => this._evaluate(a, state, context, $event, reflex));
+        const args = node.arguments.map(a => this._evaluate(a, state, context, $event, $el, reflex));
         return callee.apply(thisArg, args);
       }
 
       case 'binary': {
-        const left = () => this._evaluate(node.left, state, context, $event, reflex);
-        const right = () => this._evaluate(node.right, state, context, $event, reflex);
+        const left = () => this._evaluate(node.left, state, context, $event, $el, reflex);
+        const right = () => this._evaluate(node.right, state, context, $event, $el, reflex);
         switch (node.op) {
           case '+': return left() + right();
           case '-': return left() - right();
@@ -458,7 +464,7 @@ class SafeExprParser {
       }
 
       case 'unary': {
-        const arg = this._evaluate(node.arg, state, context, $event, reflex);
+        const arg = this._evaluate(node.arg, state, context, $event, $el, reflex);
         switch (node.op) {
           case '!': return !arg;
           case '-': return -arg;
@@ -468,22 +474,22 @@ class SafeExprParser {
       }
 
       case 'ternary': {
-        const cond = this._evaluate(node.condition, state, context, $event, reflex);
+        const cond = this._evaluate(node.condition, state, context, $event, $el, reflex);
         return cond
-          ? this._evaluate(node.consequent, state, context, $event, reflex)
-          : this._evaluate(node.alternate, state, context, $event, reflex);
+          ? this._evaluate(node.consequent, state, context, $event, $el, reflex)
+          : this._evaluate(node.alternate, state, context, $event, $el, reflex);
       }
 
       case 'array':
-        return node.elements.map(e => this._evaluate(e, state, context, $event, reflex));
+        return node.elements.map(e => this._evaluate(e, state, context, $event, $el, reflex));
 
       case 'object': {
         const obj = {};
         for (const prop of node.properties) {
           const key = prop.computed
-            ? this._evaluate(prop.key, state, context, $event, reflex)
+            ? this._evaluate(prop.key, state, context, $event, $el, reflex)
             : prop.key;
-          obj[key] = this._evaluate(prop.value, state, context, $event, reflex);
+          obj[key] = this._evaluate(prop.value, state, context, $event, $el, reflex);
         }
         return obj;
       }
