@@ -1,8 +1,9 @@
 /**
- * Reflex v1.0 - The Direct Reactive Engine
+ * Reflex v1.1 - The Direct Reactive Engine
  * - Zero Dependencies, Zero Build, Zero VDOM
  * - Powered by the Meta-Pattern & Protoscopes
  * - Gauntlet Verified: Leak-free, NaN-safe, Strict Scoping
+ * - CSP-Safe Mode Available
  */
 
 const M = Symbol();
@@ -27,6 +28,14 @@ const RES = {
   $event: 1
 };
 
+// Safe globals for CSP mode
+const SAFE_GLOBALS = {
+  __proto__: null,
+  Math, Date, Array, Object, Number, String, Boolean, JSON,
+  parseInt, parseFloat, isNaN, isFinite, NaN, Infinity,
+  true: true, false: false, null: null, undefined: undefined
+};
+
 const AM = { __proto__: null, push: 1, pop: 1, shift: 1, unshift: 1, splice: 1, sort: 1, reverse: 1, fill: 1, copyWithin: 1 };
 const REORDER = { __proto__: null, splice: 1, sort: 1, reverse: 1, shift: 1, unshift: 1, fill: 1, copyWithin: 1 };
 const CM = { __proto__: null, get: 1, has: 1, forEach: 1, keys: 1, values: 1, entries: 1, set: 1, add: 1, delete: 1, clear: 1 };
@@ -44,6 +53,504 @@ const UNSAFE_EXPR_RE = /\[(["'`])constructor\1\]|\[(["'`])__proto__\1\]|\.constr
 // Basic HTML entity escaping for when DOMPurify is unavailable
 const escapeHTML = s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// === LRU CACHE FOR EXPRESSION CACHING (Fixes Memory Leak) ===
+class LRUCache {
+  constructor(maxSize = 1000) {
+    this.max = maxSize;
+    this.cache = new Map();
+  }
+
+  get(key) {
+    if (!this.cache.has(key)) return undefined;
+    // Move to end (most recently used)
+    const value = this.cache.get(key);
+    this.cache.delete(key);
+    this.cache.set(key, value);
+    return value;
+  }
+
+  set(key, value) {
+    if (this.cache.has(key)) {
+      this.cache.delete(key);
+    } else if (this.cache.size >= this.max) {
+      // Delete oldest (first) entry
+      const firstKey = this.cache.keys().next().value;
+      this.cache.delete(firstKey);
+    }
+    this.cache.set(key, value);
+    return value;
+  }
+
+  has(key) {
+    return this.cache.has(key);
+  }
+
+  clear() {
+    this.cache.clear();
+  }
+}
+
+// === CSP-SAFE EXPRESSION PARSER ===
+// A simple expression parser that doesn't require new Function or eval
+class SafeExprParser {
+  constructor() {
+    this.pos = 0;
+    this.expr = "";
+  }
+
+  parse(expr) {
+    this.expr = expr.trim();
+    this.pos = 0;
+    return this.parseExpression();
+  }
+
+  parseExpression() {
+    return this.parseTernary();
+  }
+
+  parseTernary() {
+    const condition = this.parseOr();
+    this.skipWhitespace();
+    if (this.peek() === '?') {
+      this.pos++;
+      this.skipWhitespace();
+      const consequent = this.parseExpression();
+      this.skipWhitespace();
+      if (this.peek() !== ':') throw new Error("Expected ':' in ternary");
+      this.pos++;
+      this.skipWhitespace();
+      const alternate = this.parseExpression();
+      return { type: 'ternary', condition, consequent, alternate };
+    }
+    return condition;
+  }
+
+  parseOr() {
+    let left = this.parseAnd();
+    while (this.matchStr('||')) {
+      left = { type: 'binary', op: '||', left, right: this.parseAnd() };
+    }
+    return left;
+  }
+
+  parseAnd() {
+    let left = this.parseNullishCoalescing();
+    while (this.matchStr('&&')) {
+      left = { type: 'binary', op: '&&', left, right: this.parseNullishCoalescing() };
+    }
+    return left;
+  }
+
+  parseNullishCoalescing() {
+    let left = this.parseEquality();
+    while (this.matchStr('??')) {
+      left = { type: 'binary', op: '??', left, right: this.parseEquality() };
+    }
+    return left;
+  }
+
+  parseEquality() {
+    let left = this.parseComparison();
+    while (true) {
+      this.skipWhitespace();
+      if (this.matchStr('===')) left = { type: 'binary', op: '===', left, right: this.parseComparison() };
+      else if (this.matchStr('!==')) left = { type: 'binary', op: '!==', left, right: this.parseComparison() };
+      else if (this.matchStr('==')) left = { type: 'binary', op: '==', left, right: this.parseComparison() };
+      else if (this.matchStr('!=')) left = { type: 'binary', op: '!=', left, right: this.parseComparison() };
+      else break;
+    }
+    return left;
+  }
+
+  parseComparison() {
+    let left = this.parseAdditive();
+    while (true) {
+      this.skipWhitespace();
+      if (this.matchStr('<=')) left = { type: 'binary', op: '<=', left, right: this.parseAdditive() };
+      else if (this.matchStr('>=')) left = { type: 'binary', op: '>=', left, right: this.parseAdditive() };
+      else if (this.peek() === '<' && this.expr[this.pos + 1] !== '<') {
+        this.pos++;
+        left = { type: 'binary', op: '<', left, right: this.parseAdditive() };
+      }
+      else if (this.peek() === '>' && this.expr[this.pos + 1] !== '>') {
+        this.pos++;
+        left = { type: 'binary', op: '>', left, right: this.parseAdditive() };
+      }
+      else break;
+    }
+    return left;
+  }
+
+  parseAdditive() {
+    let left = this.parseMultiplicative();
+    while (true) {
+      this.skipWhitespace();
+      if (this.peek() === '+') { this.pos++; left = { type: 'binary', op: '+', left, right: this.parseMultiplicative() }; }
+      else if (this.peek() === '-') { this.pos++; left = { type: 'binary', op: '-', left, right: this.parseMultiplicative() }; }
+      else break;
+    }
+    return left;
+  }
+
+  parseMultiplicative() {
+    let left = this.parseUnary();
+    while (true) {
+      this.skipWhitespace();
+      if (this.peek() === '*') { this.pos++; left = { type: 'binary', op: '*', left, right: this.parseUnary() }; }
+      else if (this.peek() === '/') { this.pos++; left = { type: 'binary', op: '/', left, right: this.parseUnary() }; }
+      else if (this.peek() === '%') { this.pos++; left = { type: 'binary', op: '%', left, right: this.parseUnary() }; }
+      else break;
+    }
+    return left;
+  }
+
+  parseUnary() {
+    this.skipWhitespace();
+    if (this.peek() === '!') { this.pos++; return { type: 'unary', op: '!', arg: this.parseUnary() }; }
+    if (this.peek() === '-' && !this.isDigit(this.expr[this.pos + 1])) { this.pos++; return { type: 'unary', op: '-', arg: this.parseUnary() }; }
+    if (this.matchStr('typeof ')) { return { type: 'unary', op: 'typeof', arg: this.parseUnary() }; }
+    return this.parsePostfix();
+  }
+
+  parsePostfix() {
+    let obj = this.parsePrimary();
+    while (true) {
+      this.skipWhitespace();
+      if (this.peek() === '.') {
+        this.pos++;
+        this.skipWhitespace();
+        const prop = this.parseIdentifier();
+        if (!prop) throw new Error("Expected property name after '.'");
+        obj = { type: 'member', object: obj, property: prop, computed: false };
+      } else if (this.peek() === '[') {
+        this.pos++;
+        const prop = this.parseExpression();
+        this.skipWhitespace();
+        if (this.peek() !== ']') throw new Error("Expected ']'");
+        this.pos++;
+        obj = { type: 'member', object: obj, property: prop, computed: true };
+      } else if (this.peek() === '(') {
+        this.pos++;
+        const args = this.parseArguments();
+        obj = { type: 'call', callee: obj, arguments: args };
+      } else {
+        break;
+      }
+    }
+    return obj;
+  }
+
+  parseArguments() {
+    const args = [];
+    this.skipWhitespace();
+    if (this.peek() !== ')') {
+      args.push(this.parseExpression());
+      while (this.peek() === ',') {
+        this.pos++;
+        args.push(this.parseExpression());
+      }
+    }
+    if (this.peek() !== ')') throw new Error("Expected ')'");
+    this.pos++;
+    return args;
+  }
+
+  parsePrimary() {
+    this.skipWhitespace();
+    const c = this.peek();
+
+    // Parenthesized expression
+    if (c === '(') {
+      this.pos++;
+      const expr = this.parseExpression();
+      this.skipWhitespace();
+      if (this.peek() !== ')') throw new Error("Expected ')'");
+      this.pos++;
+      return expr;
+    }
+
+    // Array literal
+    if (c === '[') {
+      this.pos++;
+      const elements = [];
+      this.skipWhitespace();
+      if (this.peek() !== ']') {
+        elements.push(this.parseExpression());
+        while (this.peek() === ',') {
+          this.pos++;
+          this.skipWhitespace();
+          if (this.peek() === ']') break; // trailing comma
+          elements.push(this.parseExpression());
+        }
+      }
+      if (this.peek() !== ']') throw new Error("Expected ']'");
+      this.pos++;
+      return { type: 'array', elements };
+    }
+
+    // Object literal
+    if (c === '{') {
+      this.pos++;
+      const properties = [];
+      this.skipWhitespace();
+      if (this.peek() !== '}') {
+        properties.push(this.parseObjectProperty());
+        while (this.peek() === ',') {
+          this.pos++;
+          this.skipWhitespace();
+          if (this.peek() === '}') break;
+          properties.push(this.parseObjectProperty());
+        }
+      }
+      if (this.peek() !== '}') throw new Error("Expected '}'");
+      this.pos++;
+      return { type: 'object', properties };
+    }
+
+    // String literal
+    if (c === '"' || c === "'" || c === '`') {
+      return this.parseString();
+    }
+
+    // Number literal
+    if (this.isDigit(c) || (c === '-' && this.isDigit(this.expr[this.pos + 1]))) {
+      return this.parseNumber();
+    }
+
+    // Identifier or keyword
+    const id = this.parseIdentifier();
+    if (id) {
+      if (id === 'true') return { type: 'literal', value: true };
+      if (id === 'false') return { type: 'literal', value: false };
+      if (id === 'null') return { type: 'literal', value: null };
+      if (id === 'undefined') return { type: 'literal', value: undefined };
+      if (id === 'NaN') return { type: 'literal', value: NaN };
+      if (id === 'Infinity') return { type: 'literal', value: Infinity };
+      return { type: 'identifier', name: id };
+    }
+
+    throw new Error("Unexpected token: " + c);
+  }
+
+  parseObjectProperty() {
+    this.skipWhitespace();
+    let key;
+    if (this.peek() === '"' || this.peek() === "'") {
+      key = this.parseString().value;
+    } else if (this.peek() === '[') {
+      this.pos++;
+      key = this.parseExpression();
+      this.skipWhitespace();
+      if (this.peek() !== ']') throw new Error("Expected ']'");
+      this.pos++;
+      this.skipWhitespace();
+      if (this.peek() !== ':') throw new Error("Expected ':'");
+      this.pos++;
+      const value = this.parseExpression();
+      return { computed: true, key, value };
+    } else {
+      key = this.parseIdentifier();
+    }
+    this.skipWhitespace();
+    if (this.peek() === ':') {
+      this.pos++;
+      const value = this.parseExpression();
+      return { computed: false, key, value };
+    }
+    // Shorthand property
+    return { computed: false, key, value: { type: 'identifier', name: key }, shorthand: true };
+  }
+
+  parseString() {
+    const quote = this.peek();
+    this.pos++;
+    let value = '';
+    while (this.pos < this.expr.length && this.peek() !== quote) {
+      if (this.peek() === '\\') {
+        this.pos++;
+        const esc = this.peek();
+        if (esc === 'n') value += '\n';
+        else if (esc === 't') value += '\t';
+        else if (esc === 'r') value += '\r';
+        else if (esc === '\\') value += '\\';
+        else if (esc === quote) value += quote;
+        else value += esc;
+        this.pos++;
+      } else {
+        value += this.peek();
+        this.pos++;
+      }
+    }
+    if (this.peek() !== quote) throw new Error("Unterminated string");
+    this.pos++;
+    return { type: 'literal', value };
+  }
+
+  parseNumber() {
+    let num = '';
+    if (this.peek() === '-') { num += '-'; this.pos++; }
+    while (this.isDigit(this.peek())) { num += this.peek(); this.pos++; }
+    if (this.peek() === '.') {
+      num += '.'; this.pos++;
+      while (this.isDigit(this.peek())) { num += this.peek(); this.pos++; }
+    }
+    if (this.peek() === 'e' || this.peek() === 'E') {
+      num += this.peek(); this.pos++;
+      if (this.peek() === '+' || this.peek() === '-') { num += this.peek(); this.pos++; }
+      while (this.isDigit(this.peek())) { num += this.peek(); this.pos++; }
+    }
+    return { type: 'literal', value: parseFloat(num) };
+  }
+
+  parseIdentifier() {
+    const start = this.pos;
+    if (!this.isIdentStart(this.peek())) return null;
+    while (this.isIdentPart(this.peek())) this.pos++;
+    return this.expr.slice(start, this.pos);
+  }
+
+  skipWhitespace() {
+    while (this.pos < this.expr.length && /\s/.test(this.peek())) this.pos++;
+  }
+
+  peek() { return this.expr[this.pos]; }
+  matchStr(s) {
+    this.skipWhitespace();
+    if (this.expr.slice(this.pos, this.pos + s.length) === s) {
+      this.pos += s.length;
+      return true;
+    }
+    return false;
+  }
+  isDigit(c) { return c >= '0' && c <= '9'; }
+  isIdentStart(c) { return c && /[a-zA-Z_$]/.test(c); }
+  isIdentPart(c) { return c && /[\w$]/.test(c); }
+}
+
+// AST evaluator for CSP-safe mode
+function evaluateAST(node, state, context, $event, reflex) {
+  if (!node) return undefined;
+
+  switch (node.type) {
+    case 'literal':
+      return node.value;
+
+    case 'identifier': {
+      const name = node.name;
+      // Check unsafe props
+      if (UNSAFE_PROPS[name]) {
+        console.warn("Reflex: Blocked access to unsafe property:", name);
+        return undefined;
+      }
+      // Check context first, then state, then safe globals
+      if (name === '$event') return $event;
+      if (context && name in context) {
+        // Track dependency
+        const meta = context[M] || reflex._mf.get(context);
+        if (meta) reflex._tk(meta, name);
+        return context[name];
+      }
+      if (state && name in state) {
+        return state[name];
+      }
+      if (name in SAFE_GLOBALS) return SAFE_GLOBALS[name];
+      return undefined;
+    }
+
+    case 'member': {
+      const obj = evaluateAST(node.object, state, context, $event, reflex);
+      if (obj == null) return undefined;
+      const prop = node.computed
+        ? evaluateAST(node.property, state, context, $event, reflex)
+        : node.property;
+      if (UNSAFE_PROPS[prop]) {
+        console.warn("Reflex: Blocked access to unsafe property:", prop);
+        return undefined;
+      }
+      // Track dependency for reactive objects
+      const meta = obj[M] || reflex._mf.get(obj);
+      if (meta) reflex._tk(meta, prop);
+      return obj[prop];
+    }
+
+    case 'call': {
+      let callee, thisArg;
+      if (node.callee.type === 'member') {
+        thisArg = evaluateAST(node.callee.object, state, context, $event, reflex);
+        if (thisArg == null) return undefined;
+        const prop = node.callee.computed
+          ? evaluateAST(node.callee.property, state, context, $event, reflex)
+          : node.callee.property;
+        callee = thisArg[prop];
+      } else {
+        callee = evaluateAST(node.callee, state, context, $event, reflex);
+        thisArg = undefined;
+      }
+      if (typeof callee !== 'function') return undefined;
+      const args = node.arguments.map(a => evaluateAST(a, state, context, $event, reflex));
+      return callee.apply(thisArg, args);
+    }
+
+    case 'binary': {
+      const left = () => evaluateAST(node.left, state, context, $event, reflex);
+      const right = () => evaluateAST(node.right, state, context, $event, reflex);
+      switch (node.op) {
+        case '+': return left() + right();
+        case '-': return left() - right();
+        case '*': return left() * right();
+        case '/': return left() / right();
+        case '%': return left() % right();
+        case '===': return left() === right();
+        case '!==': return left() !== right();
+        case '==': return left() == right();
+        case '!=': return left() != right();
+        case '<': return left() < right();
+        case '>': return left() > right();
+        case '<=': return left() <= right();
+        case '>=': return left() >= right();
+        case '&&': return left() && right();
+        case '||': return left() || right();
+        case '??': { const l = left(); return l != null ? l : right(); }
+        default: return undefined;
+      }
+    }
+
+    case 'unary': {
+      const arg = evaluateAST(node.arg, state, context, $event, reflex);
+      switch (node.op) {
+        case '!': return !arg;
+        case '-': return -arg;
+        case 'typeof': return typeof arg;
+        default: return undefined;
+      }
+    }
+
+    case 'ternary': {
+      const cond = evaluateAST(node.condition, state, context, $event, reflex);
+      return cond
+        ? evaluateAST(node.consequent, state, context, $event, reflex)
+        : evaluateAST(node.alternate, state, context, $event, reflex);
+    }
+
+    case 'array':
+      return node.elements.map(e => evaluateAST(e, state, context, $event, reflex));
+
+    case 'object': {
+      const obj = {};
+      for (const prop of node.properties) {
+        const key = prop.computed
+          ? evaluateAST(prop.key, state, context, $event, reflex)
+          : prop.key;
+        obj[key] = evaluateAST(prop.value, state, context, $event, reflex);
+      }
+      return obj;
+    }
+
+    default:
+      return undefined;
+  }
+}
+
 class Reflex {
   constructor(init = {}) {
     this.s = null;      // State
@@ -54,18 +561,34 @@ class Reflex {
     this._p = false;    // Flush Pending
     this._b = 0;        // Batch Depth
     this._pt = new Map(); // Pending Triggers (Batching)
-    this._ec = Object.create(null); // Expression Cache
+    this._ec = new LRUCache(1000); // Expression Cache (LRU to prevent memory leak)
     this._mf = new WeakMap(); // Meta Fallback (for non-extensible objects)
     this._dh = new Map(); // Delegated Handlers
     this._dr = null;    // DOM Root
     this._cp = new Map(); // Component Definitions
-    this.cfg = { sanitize: true };
+    this._parser = new SafeExprParser(); // CSP-safe parser
+    this.cfg = {
+      sanitize: true,
+      cspSafe: false,        // Enable CSP-safe mode (no new Function)
+      cacheSize: 1000        // Expression cache size
+    };
 
     this.s = this._r(init);
 
     const r = document.readyState;
     if (r === "loading") document.addEventListener("DOMContentLoaded", () => this.mount(), { once: true });
     else queueMicrotask(() => this.mount());
+  }
+
+  // Configure after construction
+  configure(opts) {
+    if (opts.sanitize !== undefined) this.cfg.sanitize = opts.sanitize;
+    if (opts.cspSafe !== undefined) this.cfg.cspSafe = opts.cspSafe;
+    if (opts.cacheSize !== undefined) {
+      this.cfg.cacheSize = opts.cacheSize;
+      this._ec = new LRUCache(opts.cacheSize);
+    }
+    return this;
   }
 
   mount(el = document.body) {
@@ -160,7 +683,13 @@ class Reflex {
   batch(fn) {
     this._b++;
     try { fn(); }
-    finally { if (--this._b === 0) this._fpt(); }
+    finally {
+      if (--this._b === 0) {
+        // FIX: Wrap _fpt in try-catch to prevent state inconsistency
+        try { this._fpt(); }
+        catch (err) { console.error("Reflex: Error during batch flush:", err); }
+      }
+    }
   }
 
   nextTick(fn) {
@@ -173,6 +702,12 @@ class Reflex {
     return m ? m.r : o;
   }
 
+  // Clear expression cache (useful for long-running apps)
+  clearCache() {
+    this._ec.clear();
+    return this;
+  }
+
   // === REACTIVITY ENGINE ===
   _r(t) {
     if (t === null || typeof t !== "object") return t;
@@ -183,7 +718,7 @@ class Reflex {
     if (existing) return existing.p;
 
     const self = this;
-    const meta = { p: null, r: t, d: new Map(), ai: false };
+    const meta = { p: null, r: t, d: new Map(), ai: false, _am: null };
     const isArr = Array.isArray(t);
     const isMap = t instanceof Map;
     const isSet = t instanceof Set;
@@ -194,10 +729,23 @@ class Reflex {
         if (k === M) return meta;
         if (k === S) return o[S];
 
+        // Fast path for symbols (except iterator)
+        if (typeof k === 'symbol' && k !== Symbol.iterator) {
+          return Reflect.get(o, k, rec);
+        }
+
         if (isCol && k === "size") { self._tk(meta, I); return o.size; }
 
-        if (isArr && AM[k]) return self._am(o, k, meta);
-        if (isCol && (k === Symbol.iterator || CM[k]) && typeof o[k] === "function") return self._cm(o, k, meta, isMap);
+        // FIX: Cache array method wrappers to prevent closure factory bug
+        if (isArr && AM[k]) {
+          if (!meta._am) meta._am = Object.create(null);
+          if (!meta._am[k]) meta._am[k] = self._am(o, k, meta);
+          return meta._am[k];
+        }
+
+        if (isCol && (k === Symbol.iterator || CM[k]) && typeof o[k] === "function") {
+          return self._cm(o, k, meta, isMap);
+        }
 
         self._tk(meta, k);
         const v = Reflect.get(o, k, rec);
@@ -305,32 +853,43 @@ class Reflex {
     const pt = this._pt;
     this._pt = new Map();
     for (const [m, ks] of pt) {
-      for (const k of ks) this._tr(m, k);
+      for (const k of ks) {
+        // FIX: Wrap each trigger in try-catch to prevent partial state updates
+        try { this._tr(m, k); }
+        catch (err) { console.error("Reflex: Error triggering update for key:", k, err); }
+      }
     }
   }
 
-  // === MONOMORPHIC OPTIMIZATIONS ===
+  // === CACHED ARRAY METHOD WRAPPER (Fixes Closure Factory Bug) ===
   _am(t, m, meta) {
     const self = this;
     return function(...args) {
       self._b++;
-      const res = Array.prototype[m].apply(t, args);
+      let res;
+      try {
+        res = Array.prototype[m].apply(t, args);
 
-      let ks = self._pt.get(meta);
-      if (!ks) self._pt.set(meta, ks = new Set());
-      ks.add(I);
-      ks.add("length");
+        let ks = self._pt.get(meta);
+        if (!ks) self._pt.set(meta, ks = new Set());
+        ks.add(I);
+        ks.add("length");
 
-      if (meta.ai && REORDER[m]) {
-        for (const [k, depSet] of meta.d) {
-          if (!depSet.size) { meta.d.delete(k); continue; }
-          if (typeof k === "string") {
-            const n = Number(k);
-            if (n >= 0 && Number.isInteger(n) && String(n) === k) ks.add(k);
+        if (meta.ai && REORDER[m]) {
+          for (const [k, depSet] of meta.d) {
+            if (!depSet.size) { meta.d.delete(k); continue; }
+            if (typeof k === "string") {
+              const n = Number(k);
+              if (n >= 0 && Number.isInteger(n) && String(n) === k) ks.add(k);
+            }
           }
         }
+      } finally {
+        if (--self._b === 0) {
+          try { self._fpt(); }
+          catch (err) { console.error("Reflex: Error flushing pending triggers:", err); }
+        }
       }
-      if (--self._b === 0) self._fpt();
       return res;
     };
   }
@@ -371,10 +930,16 @@ class Reflex {
       fn.call(t, rk, rv);
       if (!had || !Object.is(old, rv)) {
         self._b++;
-        let ks = self._pt.get(meta);
-        if (!ks) self._pt.set(meta, ks = new Set());
-        ks.add(rk); ks.add(I);
-        if (--self._b === 0) self._fpt();
+        try {
+          let ks = self._pt.get(meta);
+          if (!ks) self._pt.set(meta, ks = new Set());
+          ks.add(rk); ks.add(I);
+        } finally {
+          if (--self._b === 0) {
+            try { self._fpt(); }
+            catch (err) { console.error("Reflex: Error flushing pending triggers:", err); }
+          }
+        }
       }
       return meta.p;
     };
@@ -384,10 +949,16 @@ class Reflex {
       if (!t.has(rv)) {
         fn.call(t, rv);
         self._b++;
-        let ks = self._pt.get(meta);
-        if (!ks) self._pt.set(meta, ks = new Set());
-        ks.add(rv); ks.add(I);
-        if (--self._b === 0) self._fpt();
+        try {
+          let ks = self._pt.get(meta);
+          if (!ks) self._pt.set(meta, ks = new Set());
+          ks.add(rv); ks.add(I);
+        } finally {
+          if (--self._b === 0) {
+            try { self._fpt(); }
+            catch (err) { console.error("Reflex: Error flushing pending triggers:", err); }
+          }
+        }
       }
       return meta.p;
     };
@@ -396,10 +967,16 @@ class Reflex {
       const rk = self.toRaw(k), had = t.has(rk), res = fn.call(t, rk);
       if (had) {
         self._b++;
-        let ks = self._pt.get(meta);
-        if (!ks) self._pt.set(meta, ks = new Set());
-        ks.add(rk); ks.add(I);
-        if (--self._b === 0) self._fpt();
+        try {
+          let ks = self._pt.get(meta);
+          if (!ks) self._pt.set(meta, ks = new Set());
+          ks.add(rk); ks.add(I);
+        } finally {
+          if (--self._b === 0) {
+            try { self._fpt(); }
+            catch (err) { console.error("Reflex: Error flushing pending triggers:", err); }
+          }
+        }
       }
       return res;
     };
@@ -407,11 +984,17 @@ class Reflex {
     if (m === "clear") return meta[m] = () => {
       if (!t.size) return;
       self._b++;
-      let ks = self._pt.get(meta);
-      if (!ks) self._pt.set(meta, ks = new Set());
-      t.forEach((_, k) => ks.add(k)); ks.add(I);
-      fn.call(t);
-      if (--self._b === 0) self._fpt();
+      try {
+        let ks = self._pt.get(meta);
+        if (!ks) self._pt.set(meta, ks = new Set());
+        t.forEach((_, k) => ks.add(k)); ks.add(I);
+        fn.call(t);
+      } finally {
+        if (--self._b === 0) {
+          try { self._fpt(); }
+          catch (err) { console.error("Reflex: Error flushing pending triggers:", err); }
+        }
+      }
     };
 
     return meta[m] = function() { self._tk(meta, I); return fn.call(t); };
@@ -452,7 +1035,10 @@ class Reflex {
     const q = this._q;
     this._q = [];
     this._qs.clear();
-    for (let i = 0; i < q.length; i++) q[i]();
+    for (let i = 0; i < q.length; i++) {
+      try { q[i](); }
+      catch (err) { console.error("Reflex: Error during flush:", err); }
+    }
   }
 
   // === LIFECYCLE ===
@@ -740,32 +1326,54 @@ class Reflex {
 
   _fn(exp, isH) {
     const k = (isH ? "H:" : "") + exp;
-    if (this._ec[k]) return this._ec[k];
+    const cached = this._ec.get(k);
+    if (cached) return cached;
 
     // FIX #4: Block dangerous expression patterns that could bypass reserved word checks
     if (UNSAFE_EXPR_RE.test(exp)) {
       console.warn("Reflex: Blocked potentially unsafe expression:", exp);
-      return this._ec[k] = () => undefined;
+      return this._ec.set(k, () => undefined);
     }
 
+    // Simple property path - optimize without new Function
     if (!isH && /^[a-z_$][\w$.]*$/i.test(exp)) {
       const p = exp.split(".");
       // FIX #4: Also check path segments for unsafe properties
       for (const seg of p) {
         if (UNSAFE_PROPS[seg]) {
           console.warn("Reflex: Blocked access to unsafe property:", seg);
-          return this._ec[k] = () => undefined;
+          return this._ec.set(k, () => undefined);
         }
       }
       const self = this;
-      return this._ec[k] = (s, o) => {
+      return this._ec.set(k, (s, o) => {
         if (o) { const meta = o[M] || self._mf.get(o); if (meta) self._tk(meta, p[0]); }
         let v = (o && p[0] in o) ? o : s;
         for (const k of p) { if (v == null) return; v = v[k]; }
         return v;
-      };
+      });
     }
 
+    // CSP-safe mode: use parser instead of new Function
+    if (this.cfg.cspSafe) {
+      try {
+        const ast = this._parser.parse(exp);
+        const self = this;
+        return this._ec.set(k, (s, o, $event) => {
+          try {
+            return evaluateAST(ast, s, o, $event, self);
+          } catch (err) {
+            console.warn("Reflex: Expression evaluation error:", exp, err);
+            return undefined;
+          }
+        });
+      } catch (err) {
+        console.warn("Reflex: CSP-safe parse error:", exp, err);
+        return this._ec.set(k, () => undefined);
+      }
+    }
+
+    // Standard mode: use new Function (faster but requires unsafe-eval CSP)
     const vars = new Set();
     let m; ID_RE.lastIndex = 0;
     while ((m = ID_RE.exec(exp))) !RES[m[1]] && vars.add(m[1]);
@@ -775,8 +1383,8 @@ class Reflex {
     ).join("");
     const body = isH ? `${arg}${exp};` : `${arg}return(${exp});`;
 
-    try { return this._ec[k] = new Function("s", "c", "$event", body); }
-    catch (err) { console.warn("Reflex compile error:", exp, err); return this._ec[k] = () => undefined; }
+    try { return this._ec.set(k, new Function("s", "c", "$event", body)); }
+    catch (err) { console.warn("Reflex compile error:", exp, err); return this._ec.set(k, () => undefined); }
   }
 
   _trv(v, s = new Set()) {
