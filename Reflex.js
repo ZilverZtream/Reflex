@@ -28,13 +28,6 @@ const RES = {
   $event: 1
 };
 
-// Safe globals for CSP mode
-const SAFE_GLOBALS = {
-  __proto__: null,
-  Math, Date, Array, Object, Number, String, Boolean, JSON,
-  parseInt, parseFloat, isNaN, isFinite, NaN, Infinity,
-  true: true, false: false, null: null, undefined: undefined
-};
 
 const AM = { __proto__: null, push: 1, pop: 1, shift: 1, unshift: 1, splice: 1, sort: 1, reverse: 1, fill: 1, copyWithin: 1 };
 const REORDER = { __proto__: null, splice: 1, sort: 1, reverse: 1, shift: 1, unshift: 1, fill: 1, copyWithin: 1 };
@@ -53,6 +46,187 @@ const UNSAFE_EXPR_RE = /\[(["'`])constructor\1\]|\[(["'`])__proto__\1\]|\.constr
 
 // Basic HTML entity escaping for when DOMPurify is unavailable
 const escapeHTML = s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// === STATIC PROXY HANDLERS ===
+// Optimization: Define handlers ONCE outside the class to eliminate per-object allocation.
+// Each reactive object reuses the same handler object, reducing memory by ~3 closures per object.
+// The engine (Reflex instance) is stored on meta.engine, retrieved via target[M].
+
+const ArrayHandler = {
+  get(o, k, rec) {
+    const meta = o[M];
+    if (k === M) return meta;
+    if (k === S) return o[S];
+
+    // Fast path for symbols
+    if (typeof k === 'symbol') return Reflect.get(o, k, rec);
+
+    const engine = meta.engine;
+
+    // Cache array method wrappers to prevent closure factory bug
+    if (AM[k]) {
+      if (!meta._am) meta._am = Object.create(null);
+      if (!meta._am[k]) meta._am[k] = engine._am(o, k, meta);
+      return meta._am[k];
+    }
+
+    engine._tk(meta, k);
+    const v = Reflect.get(o, k, rec);
+    return engine._wrap(v);
+  },
+
+  set(o, k, v, rec) {
+    const meta = o[M];
+    const engine = meta.engine;
+    const raw = engine.toRaw(v);
+    const old = o[k];
+    if (Object.is(old, raw) && k !== "length") return true;
+
+    let had, isIdx = false, n = -1;
+    if (typeof k === "string") {
+      n = Number(k);
+      isIdx = n >= 0 && Number.isInteger(n) && String(n) === k;
+    }
+    if (k === "length") had = true;
+    else if (isIdx) had = n < o.length;
+    else had = k in o;
+
+    const ok = Reflect.set(o, k, raw, rec);
+    if (!ok) return false;
+
+    engine._tr(meta, k);
+    if (k === "length") {
+      engine._tr(meta, I);
+    } else if (isIdx) {
+      engine._tr(meta, I);
+      if (!had) engine._tr(meta, "length");
+    }
+    return true;
+  },
+
+  deleteProperty(o, k) {
+    const meta = o[M];
+    if (!(k in o)) return true;
+    const res = Reflect.deleteProperty(o, k);
+    if (res) {
+      const engine = meta.engine;
+      engine._tr(meta, k);
+      engine._tr(meta, I);
+      engine._tr(meta, "length");
+    }
+    return res;
+  }
+};
+
+const ObjectHandler = {
+  get(o, k, rec) {
+    const meta = o[M];
+    if (k === M) return meta;
+    if (k === S) return o[S];
+
+    // Fast path for symbols
+    if (typeof k === 'symbol') return Reflect.get(o, k, rec);
+
+    const engine = meta.engine;
+    engine._tk(meta, k);
+    const v = Reflect.get(o, k, rec);
+    return engine._wrap(v);
+  },
+
+  set(o, k, v, rec) {
+    const meta = o[M];
+    const engine = meta.engine;
+    const raw = engine.toRaw(v);
+    const old = o[k];
+    if (Object.is(old, raw)) return true;
+
+    const had = k in o;
+    const ok = Reflect.set(o, k, raw, rec);
+    if (!ok) return false;
+
+    engine._tr(meta, k);
+    if (!had) engine._tr(meta, I);
+    return true;
+  },
+
+  deleteProperty(o, k) {
+    const meta = o[M];
+    if (!(k in o)) return true;
+    const res = Reflect.deleteProperty(o, k);
+    if (res) {
+      const engine = meta.engine;
+      engine._tr(meta, k);
+      engine._tr(meta, I);
+    }
+    return res;
+  }
+};
+
+// Collection handlers need isMap flag, so we use a factory that returns static-ish handlers
+// These are still created once per type (Map vs Set), not per instance
+const MapHandler = {
+  get(o, k, rec) {
+    const meta = o[M];
+    if (k === M) return meta;
+    if (k === S) return o[S];
+
+    // Fast path for symbols (except iterator)
+    if (typeof k === 'symbol' && k !== Symbol.iterator) {
+      return Reflect.get(o, k, rec);
+    }
+
+    const engine = meta.engine;
+
+    if (k === "size") { engine._tk(meta, I); return o.size; }
+
+    if ((k === Symbol.iterator || CM[k]) && typeof o[k] === "function") {
+      return engine._cm(o, k, meta, true);
+    }
+
+    engine._tk(meta, k);
+    return Reflect.get(o, k, rec);
+  },
+
+  set(o, k, v, rec) {
+    return Reflect.set(o, k, v, rec);
+  },
+
+  deleteProperty(o, k) {
+    return Reflect.deleteProperty(o, k);
+  }
+};
+
+const SetHandler = {
+  get(o, k, rec) {
+    const meta = o[M];
+    if (k === M) return meta;
+    if (k === S) return o[S];
+
+    // Fast path for symbols (except iterator)
+    if (typeof k === 'symbol' && k !== Symbol.iterator) {
+      return Reflect.get(o, k, rec);
+    }
+
+    const engine = meta.engine;
+
+    if (k === "size") { engine._tk(meta, I); return o.size; }
+
+    if ((k === Symbol.iterator || CM[k]) && typeof o[k] === "function") {
+      return engine._cm(o, k, meta, false);
+    }
+
+    engine._tk(meta, k);
+    return Reflect.get(o, k, rec);
+  },
+
+  set(o, k, v, rec) {
+    return Reflect.set(o, k, v, rec);
+  },
+
+  deleteProperty(o, k) {
+    return Reflect.deleteProperty(o, k);
+  }
+};
 
 // === SIMPLE EXPRESSION CACHE WITH WIPE STRATEGY ===
 // Optimization: Instead of complex LRU, use simple Map with hard limit wipe
@@ -86,466 +260,11 @@ class SimpleCache {
   }
 }
 
-// === CSP-SAFE EXPRESSION PARSER ===
-// A simple expression parser that doesn't require new Function or eval
-class SafeExprParser {
-  constructor() {
-    this.pos = 0;
-    this.expr = "";
-  }
-
-  parse(expr) {
-    this.expr = expr.trim();
-    this.pos = 0;
-    return this.parseExpression();
-  }
-
-  parseExpression() {
-    return this.parseTernary();
-  }
-
-  parseTernary() {
-    const condition = this.parseOr();
-    this.skipWhitespace();
-    if (this.peek() === '?') {
-      this.pos++;
-      this.skipWhitespace();
-      const consequent = this.parseExpression();
-      this.skipWhitespace();
-      if (this.peek() !== ':') throw new Error("Expected ':' in ternary");
-      this.pos++;
-      this.skipWhitespace();
-      const alternate = this.parseExpression();
-      return { type: 'ternary', condition, consequent, alternate };
-    }
-    return condition;
-  }
-
-  parseOr() {
-    let left = this.parseAnd();
-    while (this.matchStr('||')) {
-      left = { type: 'binary', op: '||', left, right: this.parseAnd() };
-    }
-    return left;
-  }
-
-  parseAnd() {
-    let left = this.parseNullishCoalescing();
-    while (this.matchStr('&&')) {
-      left = { type: 'binary', op: '&&', left, right: this.parseNullishCoalescing() };
-    }
-    return left;
-  }
-
-  parseNullishCoalescing() {
-    let left = this.parseEquality();
-    while (this.matchStr('??')) {
-      left = { type: 'binary', op: '??', left, right: this.parseEquality() };
-    }
-    return left;
-  }
-
-  parseEquality() {
-    let left = this.parseComparison();
-    while (true) {
-      this.skipWhitespace();
-      if (this.matchStr('===')) left = { type: 'binary', op: '===', left, right: this.parseComparison() };
-      else if (this.matchStr('!==')) left = { type: 'binary', op: '!==', left, right: this.parseComparison() };
-      else if (this.matchStr('==')) left = { type: 'binary', op: '==', left, right: this.parseComparison() };
-      else if (this.matchStr('!=')) left = { type: 'binary', op: '!=', left, right: this.parseComparison() };
-      else break;
-    }
-    return left;
-  }
-
-  parseComparison() {
-    let left = this.parseAdditive();
-    while (true) {
-      this.skipWhitespace();
-      if (this.matchStr('<=')) left = { type: 'binary', op: '<=', left, right: this.parseAdditive() };
-      else if (this.matchStr('>=')) left = { type: 'binary', op: '>=', left, right: this.parseAdditive() };
-      else if (this.peek() === '<' && this.expr[this.pos + 1] !== '<') {
-        this.pos++;
-        left = { type: 'binary', op: '<', left, right: this.parseAdditive() };
-      }
-      else if (this.peek() === '>' && this.expr[this.pos + 1] !== '>') {
-        this.pos++;
-        left = { type: 'binary', op: '>', left, right: this.parseAdditive() };
-      }
-      else break;
-    }
-    return left;
-  }
-
-  parseAdditive() {
-    let left = this.parseMultiplicative();
-    while (true) {
-      this.skipWhitespace();
-      if (this.peek() === '+') { this.pos++; left = { type: 'binary', op: '+', left, right: this.parseMultiplicative() }; }
-      else if (this.peek() === '-') { this.pos++; left = { type: 'binary', op: '-', left, right: this.parseMultiplicative() }; }
-      else break;
-    }
-    return left;
-  }
-
-  parseMultiplicative() {
-    let left = this.parseUnary();
-    while (true) {
-      this.skipWhitespace();
-      if (this.peek() === '*') { this.pos++; left = { type: 'binary', op: '*', left, right: this.parseUnary() }; }
-      else if (this.peek() === '/') { this.pos++; left = { type: 'binary', op: '/', left, right: this.parseUnary() }; }
-      else if (this.peek() === '%') { this.pos++; left = { type: 'binary', op: '%', left, right: this.parseUnary() }; }
-      else break;
-    }
-    return left;
-  }
-
-  parseUnary() {
-    this.skipWhitespace();
-    if (this.peek() === '!') { this.pos++; return { type: 'unary', op: '!', arg: this.parseUnary() }; }
-    if (this.peek() === '-' && !this.isDigit(this.expr[this.pos + 1])) { this.pos++; return { type: 'unary', op: '-', arg: this.parseUnary() }; }
-    if (this.matchStr('typeof ')) { return { type: 'unary', op: 'typeof', arg: this.parseUnary() }; }
-    return this.parsePostfix();
-  }
-
-  parsePostfix() {
-    let obj = this.parsePrimary();
-    while (true) {
-      this.skipWhitespace();
-      if (this.peek() === '.') {
-        this.pos++;
-        this.skipWhitespace();
-        const prop = this.parseIdentifier();
-        if (!prop) throw new Error("Expected property name after '.'");
-        obj = { type: 'member', object: obj, property: prop, computed: false };
-      } else if (this.peek() === '[') {
-        this.pos++;
-        const prop = this.parseExpression();
-        this.skipWhitespace();
-        if (this.peek() !== ']') throw new Error("Expected ']'");
-        this.pos++;
-        obj = { type: 'member', object: obj, property: prop, computed: true };
-      } else if (this.peek() === '(') {
-        this.pos++;
-        const args = this.parseArguments();
-        obj = { type: 'call', callee: obj, arguments: args };
-      } else {
-        break;
-      }
-    }
-    return obj;
-  }
-
-  parseArguments() {
-    const args = [];
-    this.skipWhitespace();
-    if (this.peek() !== ')') {
-      args.push(this.parseExpression());
-      while (this.peek() === ',') {
-        this.pos++;
-        args.push(this.parseExpression());
-      }
-    }
-    if (this.peek() !== ')') throw new Error("Expected ')'");
-    this.pos++;
-    return args;
-  }
-
-  parsePrimary() {
-    this.skipWhitespace();
-    const c = this.peek();
-
-    // Parenthesized expression
-    if (c === '(') {
-      this.pos++;
-      const expr = this.parseExpression();
-      this.skipWhitespace();
-      if (this.peek() !== ')') throw new Error("Expected ')'");
-      this.pos++;
-      return expr;
-    }
-
-    // Array literal
-    if (c === '[') {
-      this.pos++;
-      const elements = [];
-      this.skipWhitespace();
-      if (this.peek() !== ']') {
-        elements.push(this.parseExpression());
-        while (this.peek() === ',') {
-          this.pos++;
-          this.skipWhitespace();
-          if (this.peek() === ']') break; // trailing comma
-          elements.push(this.parseExpression());
-        }
-      }
-      if (this.peek() !== ']') throw new Error("Expected ']'");
-      this.pos++;
-      return { type: 'array', elements };
-    }
-
-    // Object literal
-    if (c === '{') {
-      this.pos++;
-      const properties = [];
-      this.skipWhitespace();
-      if (this.peek() !== '}') {
-        properties.push(this.parseObjectProperty());
-        while (this.peek() === ',') {
-          this.pos++;
-          this.skipWhitespace();
-          if (this.peek() === '}') break;
-          properties.push(this.parseObjectProperty());
-        }
-      }
-      if (this.peek() !== '}') throw new Error("Expected '}'");
-      this.pos++;
-      return { type: 'object', properties };
-    }
-
-    // String literal
-    if (c === '"' || c === "'" || c === '`') {
-      return this.parseString();
-    }
-
-    // Number literal
-    if (this.isDigit(c) || (c === '-' && this.isDigit(this.expr[this.pos + 1]))) {
-      return this.parseNumber();
-    }
-
-    // Identifier or keyword
-    const id = this.parseIdentifier();
-    if (id) {
-      if (id === 'true') return { type: 'literal', value: true };
-      if (id === 'false') return { type: 'literal', value: false };
-      if (id === 'null') return { type: 'literal', value: null };
-      if (id === 'undefined') return { type: 'literal', value: undefined };
-      if (id === 'NaN') return { type: 'literal', value: NaN };
-      if (id === 'Infinity') return { type: 'literal', value: Infinity };
-      return { type: 'identifier', name: id };
-    }
-
-    throw new Error("Unexpected token: " + c);
-  }
-
-  parseObjectProperty() {
-    this.skipWhitespace();
-    let key;
-    if (this.peek() === '"' || this.peek() === "'") {
-      key = this.parseString().value;
-    } else if (this.peek() === '[') {
-      this.pos++;
-      key = this.parseExpression();
-      this.skipWhitespace();
-      if (this.peek() !== ']') throw new Error("Expected ']'");
-      this.pos++;
-      this.skipWhitespace();
-      if (this.peek() !== ':') throw new Error("Expected ':'");
-      this.pos++;
-      const value = this.parseExpression();
-      return { computed: true, key, value };
-    } else {
-      key = this.parseIdentifier();
-    }
-    this.skipWhitespace();
-    if (this.peek() === ':') {
-      this.pos++;
-      const value = this.parseExpression();
-      return { computed: false, key, value };
-    }
-    // Shorthand property
-    return { computed: false, key, value: { type: 'identifier', name: key }, shorthand: true };
-  }
-
-  parseString() {
-    const quote = this.peek();
-    this.pos++;
-    let value = '';
-    while (this.pos < this.expr.length && this.peek() !== quote) {
-      if (this.peek() === '\\') {
-        this.pos++;
-        const esc = this.peek();
-        if (esc === 'n') value += '\n';
-        else if (esc === 't') value += '\t';
-        else if (esc === 'r') value += '\r';
-        else if (esc === '\\') value += '\\';
-        else if (esc === quote) value += quote;
-        else value += esc;
-        this.pos++;
-      } else {
-        value += this.peek();
-        this.pos++;
-      }
-    }
-    if (this.peek() !== quote) throw new Error("Unterminated string");
-    this.pos++;
-    return { type: 'literal', value };
-  }
-
-  parseNumber() {
-    let num = '';
-    if (this.peek() === '-') { num += '-'; this.pos++; }
-    while (this.isDigit(this.peek())) { num += this.peek(); this.pos++; }
-    if (this.peek() === '.') {
-      num += '.'; this.pos++;
-      while (this.isDigit(this.peek())) { num += this.peek(); this.pos++; }
-    }
-    if (this.peek() === 'e' || this.peek() === 'E') {
-      num += this.peek(); this.pos++;
-      if (this.peek() === '+' || this.peek() === '-') { num += this.peek(); this.pos++; }
-      while (this.isDigit(this.peek())) { num += this.peek(); this.pos++; }
-    }
-    return { type: 'literal', value: parseFloat(num) };
-  }
-
-  parseIdentifier() {
-    const start = this.pos;
-    if (!this.isIdentStart(this.peek())) return null;
-    while (this.isIdentPart(this.peek())) this.pos++;
-    return this.expr.slice(start, this.pos);
-  }
-
-  skipWhitespace() {
-    while (this.pos < this.expr.length && /\s/.test(this.peek())) this.pos++;
-  }
-
-  peek() { return this.expr[this.pos]; }
-  matchStr(s) {
-    this.skipWhitespace();
-    if (this.expr.slice(this.pos, this.pos + s.length) === s) {
-      this.pos += s.length;
-      return true;
-    }
-    return false;
-  }
-  isDigit(c) { return c >= '0' && c <= '9'; }
-  isIdentStart(c) { return c && /[a-zA-Z_$]/.test(c); }
-  isIdentPart(c) { return c && /[\w$]/.test(c); }
-}
-
-// AST evaluator for CSP-safe mode
-function evaluateAST(node, state, context, $event, reflex) {
-  if (!node) return undefined;
-
-  switch (node.type) {
-    case 'literal':
-      return node.value;
-
-    case 'identifier': {
-      const name = node.name;
-      // Check unsafe props
-      if (UNSAFE_PROPS[name]) {
-        console.warn("Reflex: Blocked access to unsafe property:", name);
-        return undefined;
-      }
-      // Check context first, then state, then safe globals
-      if (name === '$event') return $event;
-      if (context && name in context) {
-        // Track dependency
-        const meta = context[M] || reflex._mf.get(context);
-        if (meta) reflex._tk(meta, name);
-        return context[name];
-      }
-      if (state && name in state) {
-        return state[name];
-      }
-      if (name in SAFE_GLOBALS) return SAFE_GLOBALS[name];
-      return undefined;
-    }
-
-    case 'member': {
-      const obj = evaluateAST(node.object, state, context, $event, reflex);
-      if (obj == null) return undefined;
-      const prop = node.computed
-        ? evaluateAST(node.property, state, context, $event, reflex)
-        : node.property;
-      if (UNSAFE_PROPS[prop]) {
-        console.warn("Reflex: Blocked access to unsafe property:", prop);
-        return undefined;
-      }
-      // Track dependency for reactive objects
-      const meta = obj[M] || reflex._mf.get(obj);
-      if (meta) reflex._tk(meta, prop);
-      return obj[prop];
-    }
-
-    case 'call': {
-      let callee, thisArg;
-      if (node.callee.type === 'member') {
-        thisArg = evaluateAST(node.callee.object, state, context, $event, reflex);
-        if (thisArg == null) return undefined;
-        const prop = node.callee.computed
-          ? evaluateAST(node.callee.property, state, context, $event, reflex)
-          : node.callee.property;
-        callee = thisArg[prop];
-      } else {
-        callee = evaluateAST(node.callee, state, context, $event, reflex);
-        thisArg = undefined;
-      }
-      if (typeof callee !== 'function') return undefined;
-      const args = node.arguments.map(a => evaluateAST(a, state, context, $event, reflex));
-      return callee.apply(thisArg, args);
-    }
-
-    case 'binary': {
-      const left = () => evaluateAST(node.left, state, context, $event, reflex);
-      const right = () => evaluateAST(node.right, state, context, $event, reflex);
-      switch (node.op) {
-        case '+': return left() + right();
-        case '-': return left() - right();
-        case '*': return left() * right();
-        case '/': return left() / right();
-        case '%': return left() % right();
-        case '===': return left() === right();
-        case '!==': return left() !== right();
-        case '==': return left() == right();
-        case '!=': return left() != right();
-        case '<': return left() < right();
-        case '>': return left() > right();
-        case '<=': return left() <= right();
-        case '>=': return left() >= right();
-        case '&&': return left() && right();
-        case '||': return left() || right();
-        case '??': { const l = left(); return l != null ? l : right(); }
-        default: return undefined;
-      }
-    }
-
-    case 'unary': {
-      const arg = evaluateAST(node.arg, state, context, $event, reflex);
-      switch (node.op) {
-        case '!': return !arg;
-        case '-': return -arg;
-        case 'typeof': return typeof arg;
-        default: return undefined;
-      }
-    }
-
-    case 'ternary': {
-      const cond = evaluateAST(node.condition, state, context, $event, reflex);
-      return cond
-        ? evaluateAST(node.consequent, state, context, $event, reflex)
-        : evaluateAST(node.alternate, state, context, $event, reflex);
-    }
-
-    case 'array':
-      return node.elements.map(e => evaluateAST(e, state, context, $event, reflex));
-
-    case 'object': {
-      const obj = {};
-      for (const prop of node.properties) {
-        const key = prop.computed
-          ? evaluateAST(prop.key, state, context, $event, reflex)
-          : prop.key;
-        obj[key] = evaluateAST(prop.value, state, context, $event, reflex);
-      }
-      return obj;
-    }
-
-    default:
-      return undefined;
-  }
-}
+// === CSP-SAFE MODE ===
+// CSP parser is NOT bundled in core to reduce bundle size (~2KB savings).
+// To use CSP mode, inject a parser via configure():
+//   const app = new Reflex().configure({ parser: new SafeExprParser() });
+// The parser must implement: compile(expression, reflex) => (state, context, $event) => result
 
 class Reflex {
   constructor(init = {}) {
@@ -588,10 +307,11 @@ class Reflex {
     return this;
   }
 
-  // Lazy-load CSP parser only when needed (reduces startup cost for non-CSP mode)
+  // Get CSP parser - must be injected via configure() for CSP mode
   _getParser() {
     if (!this._parser) {
-      this._parser = new SafeExprParser();
+      throw new Error("Reflex: CSP mode requires a parser. Use configure({ parser: new SafeExprParser() }). " +
+        "Import SafeExprParser from 'reflex/csp' or provide a custom parser with compile(exp, reflex) method.");
     }
     return this._parser;
   }
@@ -714,145 +434,9 @@ class Reflex {
   }
 
   // === REACTIVITY ENGINE ===
-  // Optimization: Monomorphic handlers - V8 optimizes better when handlers don't branch on type
-
-  // Array-specific proxy handler (monomorphic for better JIT optimization)
-  _arrHandler(meta) {
-    const self = this;
-    return {
-      get(o, k, rec) {
-        if (k === M) return meta;
-        if (k === S) return o[S];
-
-        // Fast path for symbols
-        if (typeof k === 'symbol') return Reflect.get(o, k, rec);
-
-        // Cache array method wrappers to prevent closure factory bug
-        if (AM[k]) {
-          if (!meta._am) meta._am = Object.create(null);
-          if (!meta._am[k]) meta._am[k] = self._am(o, k, meta);
-          return meta._am[k];
-        }
-
-        self._tk(meta, k);
-        const v = Reflect.get(o, k, rec);
-        return self._wrap(v);
-      },
-
-      set(o, k, v, rec) {
-        const raw = self.toRaw(v);
-        const old = o[k];
-        if (Object.is(old, raw) && k !== "length") return true;
-
-        let had, isIdx = false, n = -1;
-        if (typeof k === "string") {
-          n = Number(k);
-          isIdx = n >= 0 && Number.isInteger(n) && String(n) === k;
-        }
-        if (k === "length") had = true;
-        else if (isIdx) had = n < o.length;
-        else had = k in o;
-
-        const ok = Reflect.set(o, k, raw, rec);
-        if (!ok) return false;
-
-        self._tr(meta, k);
-        if (k === "length") {
-          self._tr(meta, I);
-        } else if (isIdx) {
-          self._tr(meta, I);
-          if (!had) self._tr(meta, "length");
-        }
-        return true;
-      },
-
-      deleteProperty(o, k) {
-        if (!(k in o)) return true;
-        const res = Reflect.deleteProperty(o, k);
-        if (res) {
-          self._tr(meta, k);
-          self._tr(meta, I);
-          self._tr(meta, "length");
-        }
-        return res;
-      }
-    };
-  }
-
-  // Object-specific proxy handler (monomorphic)
-  _objHandler(meta) {
-    const self = this;
-    return {
-      get(o, k, rec) {
-        if (k === M) return meta;
-        if (k === S) return o[S];
-
-        // Fast path for symbols
-        if (typeof k === 'symbol') return Reflect.get(o, k, rec);
-
-        self._tk(meta, k);
-        const v = Reflect.get(o, k, rec);
-        return self._wrap(v);
-      },
-
-      set(o, k, v, rec) {
-        const raw = self.toRaw(v);
-        const old = o[k];
-        if (Object.is(old, raw)) return true;
-
-        const had = k in o;
-        const ok = Reflect.set(o, k, raw, rec);
-        if (!ok) return false;
-
-        self._tr(meta, k);
-        if (!had) self._tr(meta, I);
-        return true;
-      },
-
-      deleteProperty(o, k) {
-        if (!(k in o)) return true;
-        const res = Reflect.deleteProperty(o, k);
-        if (res) {
-          self._tr(meta, k);
-          self._tr(meta, I);
-        }
-        return res;
-      }
-    };
-  }
-
-  // Collection (Map/Set) handler
-  _colHandler(meta, isMap) {
-    const self = this;
-    return {
-      get(o, k, rec) {
-        if (k === M) return meta;
-        if (k === S) return o[S];
-
-        // Fast path for symbols (except iterator)
-        if (typeof k === 'symbol' && k !== Symbol.iterator) {
-          return Reflect.get(o, k, rec);
-        }
-
-        if (k === "size") { self._tk(meta, I); return o.size; }
-
-        if ((k === Symbol.iterator || CM[k]) && typeof o[k] === "function") {
-          return self._cm(o, k, meta, isMap);
-        }
-
-        self._tk(meta, k);
-        return Reflect.get(o, k, rec);
-      },
-
-      set(o, k, v, rec) {
-        return Reflect.set(o, k, v, rec);
-      },
-
-      deleteProperty(o, k) {
-        return Reflect.deleteProperty(o, k);
-      }
-    };
-  }
+  // Optimization: Static handlers are defined ONCE outside the class (see top of file).
+  // Each reactive object reuses the same handler, eliminating per-object closure allocation.
+  // The engine reference is stored on meta.engine for handler access.
 
   _r(t) {
     if (t === null || typeof t !== "object") return t;
@@ -862,19 +446,22 @@ class Reflex {
     const existing = t[M] || this._mf.get(t);
     if (existing) return existing.p;
 
-    const meta = { p: null, r: t, d: new Map(), ai: false, _am: null };
+    // Store engine reference on meta for static handler access
+    const meta = { p: null, r: t, d: new Map(), ai: false, _am: null, engine: this };
     const isArr = Array.isArray(t);
     const isMap = t instanceof Map;
     const isSet = t instanceof Set;
 
-    // Use monomorphic handlers for better V8 optimization
+    // Use static handlers - ZERO allocation per reactive object
     let h;
     if (isArr) {
-      h = this._arrHandler(meta);
-    } else if (isMap || isSet) {
-      h = this._colHandler(meta, isMap);
+      h = ArrayHandler;
+    } else if (isMap) {
+      h = MapHandler;
+    } else if (isSet) {
+      h = SetHandler;
     } else {
-      h = this._objHandler(meta);
+      h = ObjectHandler;
     }
 
     meta.p = new Proxy(t, h);
@@ -1515,21 +1102,14 @@ class Reflex {
       });
     }
 
-    // CSP-safe mode: use parser instead of new Function (lazy-loaded)
+    // CSP-safe mode: use external parser (must be injected via configure)
     if (this.cfg.cspSafe) {
       try {
-        const ast = this._getParser().parse(exp);
-        const self = this;
-        return this._ec.set(k, (s, o, $event) => {
-          try {
-            return evaluateAST(ast, s, o, $event, self);
-          } catch (err) {
-            console.warn("Reflex: Expression evaluation error:", exp, err);
-            return undefined;
-          }
-        });
+        // Parser must implement compile(exp, reflex) => (state, context, $event) => result
+        const fn = this._getParser().compile(exp, this);
+        return this._ec.set(k, fn);
       } catch (err) {
-        console.warn("Reflex: CSP-safe parse error:", exp, err);
+        console.warn("Reflex: CSP-safe compile error:", exp, err);
         return this._ec.set(k, () => undefined);
       }
     }
