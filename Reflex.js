@@ -1,15 +1,21 @@
 /**
- * Reflex v1.1 - The Direct Reactive Engine
+ * Reflex v1.2 - The Direct Reactive Engine
  * - Zero Dependencies, Zero Build, Zero VDOM
  * - Powered by the Meta-Pattern & Protoscopes
  * - Gauntlet Verified: Leak-free, NaN-safe, Strict Scoping
  * - CSP-Safe Mode Available
+ *
+ * v1.2 Enhancements:
+ * - Performance: Double-buffered scheduler, LIS-based m-for reconciliation, FIFO cache eviction
+ * - Memory: WeakMap for lifecycle hooks (avoids modifying DOM nodes)
+ * - Features: m-trans (transitions), event modifiers (.window, .document, .debounce, .throttle, .outside)
+ * - Features: Custom directives API, magic properties ($refs, $dispatch, $nextTick, $el), m-effect
  */
 
 const M = Symbol();
 const I = Symbol.for("rx.i"); // Reflex Iterate
 const S = Symbol.for("rx.s"); // Reflex Skip
-const CLEAN = Symbol();
+// CLEAN symbol removed - using WeakMap for lifecycle hooks instead of DOM property
 
 const A = 1, R = 2, Q = 4; // Active, Running, Queued (bitwise flags)
 
@@ -25,7 +31,9 @@ const RES = {
   Array: 1, Object: 1, Number: 1, String: 1, Boolean: 1, JSON: 1,
   Promise: 1, Symbol: 1, BigInt: 1, Map: 1, Set: 1, RegExp: 1, Error: 1,
   parseInt: 1, parseFloat: 1, isNaN: 1, isFinite: 1,
-  $event: 1
+  $event: 1,
+  // Magic properties (available in all expressions)
+  $refs: 1, $dispatch: 1, $nextTick: 1, $el: 1
 };
 
 
@@ -46,6 +54,98 @@ const UNSAFE_EXPR_RE = /\[(["'`])constructor\1\]|\[(["'`])__proto__\1\]|\.constr
 
 // Basic HTML entity escaping for when DOMPurify is unavailable
 const escapeHTML = s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// CSS Transition helper for enter/leave animations
+// Follows Vue/Alpine naming convention: {name}-enter-from, {name}-enter-active, {name}-enter-to
+function runTransition(el, name, type, done) {
+  const from = `${name}-${type}-from`;
+  const active = `${name}-${type}-active`;
+  const to = `${name}-${type}-to`;
+
+  // Add initial classes
+  el.classList.add(from, active);
+
+  // Force reflow to ensure initial state is applied
+  el.offsetHeight;
+
+  // Next frame: start transition
+  requestAnimationFrame(() => {
+    el.classList.remove(from);
+    el.classList.add(to);
+
+    // Listen for transition end
+    const onEnd = (e) => {
+      if (e.target !== el) return;
+      el.removeEventListener("transitionend", onEnd);
+      el.removeEventListener("animationend", onEnd);
+      el.classList.remove(active, to);
+      if (done) done();
+    };
+
+    el.addEventListener("transitionend", onEnd);
+    el.addEventListener("animationend", onEnd);
+
+    // Fallback timeout (in case transitionend doesn't fire)
+    const style = getComputedStyle(el);
+    const duration = parseFloat(style.transitionDuration) || parseFloat(style.animationDuration) || 0;
+    const delay = parseFloat(style.transitionDelay) || parseFloat(style.animationDelay) || 0;
+    const timeout = (duration + delay) * 1000 + 50; // Add 50ms buffer
+
+    if (timeout > 50) {
+      setTimeout(() => {
+        el.removeEventListener("transitionend", onEnd);
+        el.removeEventListener("animationend", onEnd);
+        el.classList.remove(active, to);
+        if (done) done();
+      }, timeout);
+    } else {
+      // No transition defined, complete immediately
+      el.classList.remove(active, to);
+      if (done) done();
+    }
+  });
+}
+
+// Longest Increasing Subsequence (LIS) algorithm for optimal DOM moves
+// Returns indices of items that form the LIS - these nodes don't need to move
+// Based on Vue 3 / Inferno algorithm using binary search for O(n log n) complexity
+function computeLIS(arr) {
+  const n = arr.length;
+  if (n === 0) return [];
+
+  // result[i] = index in arr of smallest tail of LIS of length i+1
+  const result = [];
+  // predecessors for each index to reconstruct the sequence
+  const p = new Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const val = arr[i];
+    if (val < 0) continue; // Skip -1 (new nodes)
+
+    // Binary search for insertion position
+    let lo = 0, hi = result.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arr[result[mid]] < val) lo = mid + 1;
+      else hi = mid;
+    }
+
+    // Update predecessor
+    if (lo > 0) p[i] = result[lo - 1];
+    result[lo] = i;
+  }
+
+  // Reconstruct the LIS
+  let len = result.length;
+  const lis = new Array(len);
+  let idx = result[len - 1];
+  while (len-- > 0) {
+    lis[len] = idx;
+    idx = p[idx];
+  }
+
+  return lis;
+}
 
 // === STATIC PROXY HANDLERS ===
 // Optimization: Define handlers ONCE outside the class to eliminate per-object allocation.
@@ -228,13 +328,15 @@ const SetHandler = {
   }
 };
 
-// === SIMPLE EXPRESSION CACHE WITH WIPE STRATEGY ===
-// Optimization: Instead of complex LRU, use simple Map with hard limit wipe
-// O(1) operations, zero overhead, prevents memory leaks
+// === EXPRESSION CACHE WITH FIFO EVICTION ===
+// Optimization: FIFO eviction removes oldest 10% of entries when at capacity
+// This prevents "cache thrashing" where wipe strategy would clear all hot expressions
+// causing a compilation storm from re-parsing via `new Function`
 class SimpleCache {
   constructor(maxSize = 1000) {
     this.max = maxSize;
     this.cache = new Map();
+    this._evictCount = Math.max(1, Math.floor(maxSize * 0.1)); // Evict 10% at a time
   }
 
   get(key) {
@@ -242,10 +344,15 @@ class SimpleCache {
   }
 
   set(key, value) {
-    // Wipe strategy: if at capacity, clear everything and start fresh
-    // This is O(1) and handles the crash risk with zero complexity
+    // FIFO eviction: remove oldest entries when at capacity
+    // Map maintains insertion order, so first entries are oldest
     if (this.cache.size >= this.max) {
-      this.cache.clear();
+      let removed = 0;
+      for (const k of this.cache.keys()) {
+        if (removed >= this._evictCount) break;
+        this.cache.delete(k);
+        removed++;
+      }
     }
     this.cache.set(key, value);
     return value;
@@ -272,14 +379,19 @@ class Reflex {
     this._e = null;     // Active Effect
     this._es = [];      // Effect Stack
     this._q = [];       // Job Queue (uses Q flag for dedup instead of Set)
+    this._qb = [];      // Secondary Job Queue (double-buffer for GC reduction)
+    this._qf = false;   // Which queue is active (false = _q, true = _qb)
     this._p = false;    // Flush Pending
     this._b = 0;        // Batch Depth
     this._pt = new Map(); // Pending Triggers (Batching)
     this._ec = new SimpleCache(1000); // Expression Cache (wipe strategy to prevent memory leak)
     this._mf = new WeakMap(); // Meta Fallback (for non-extensible objects)
+    this._cl = new WeakMap(); // Cleanup registry (lifecycle hooks) - avoids modifying DOM nodes
     this._dh = new Map(); // Delegated Handlers
     this._dr = null;    // DOM Root
     this._cp = new Map(); // Component Definitions
+    this._cd = new Map(); // Custom Directives
+    this._refs = {};      // $refs registry
     this._parser = null;  // CSP parser (lazy-loaded only when needed)
     this.cfg = {
       sanitize: true,
@@ -337,6 +449,39 @@ class Reflex {
     t.innerHTML = template;
     this._cp.set(n.toLowerCase(), { _t: t.content.firstElementChild, p: def.props || [], s: def.setup });
     return this;
+  }
+
+  // Custom Directives API: Reflex.directive('name', callback)
+  // callback(el, binding, reflex) where binding = { value, expression, modifiers }
+  // Return a cleanup function if needed
+  directive(name, callback) {
+    this._cd.set(name.toLowerCase(), callback);
+    return this;
+  }
+
+  // Apply a custom directive
+  _applyDir(el, name, value, mods, o) {
+    const dir = this._cd.get(name);
+    if (!dir) return false;
+
+    const fn = this._fn(value);
+    const self = this;
+
+    // Create reactive effect for the directive
+    const e = this._ef(() => {
+      const binding = {
+        value: fn(self.s, o),
+        expression: value,
+        modifiers: mods
+      };
+      const cleanup = dir(el, binding, self);
+      if (typeof cleanup === "function") {
+        // Store cleanup for later
+        self._reg(el, cleanup);
+      }
+    });
+    this._reg(el, e.kill);
+    return true;
   }
 
   computed(fn) {
@@ -687,30 +832,45 @@ class Reflex {
   _qj(j) {
     if (j.f & Q) return; // Already queued
     j.f |= Q;            // Mark as queued
-    this._q.push(j);
+    // Push to the active queue (double-buffering for GC reduction)
+    (this._qf ? this._qb : this._q).push(j);
     if (!this._p) { this._p = true; queueMicrotask(() => this._fl()); }
   }
 
+  // Optimization: Double-buffering reduces GC pressure by reusing arrays
+  // Instead of allocating a new array each flush, we swap between two buffers
+  // and clear the processed buffer using .length = 0 (no deallocation)
   _fl() {
     this._p = false;
-    const q = this._q;
-    this._q = [];
+    // Swap buffers: process current, new jobs go to other
+    const q = this._qf ? this._qb : this._q;
+    this._qf = !this._qf; // Toggle active buffer
+
     for (let i = 0; i < q.length; i++) {
       const j = q[i];
       j.f &= ~Q; // Clear queued flag before running
       try { j(); }
       catch (err) { console.error("Reflex: Error during flush:", err); }
     }
+
+    // Clear without deallocation - reuses the same memory
+    q.length = 0;
   }
 
   // === LIFECYCLE ===
-  _reg(node, fn) { (node[CLEAN] || (node[CLEAN] = [])).push(fn); }
+  // Optimization: Use WeakMap instead of node property to keep DOM objects "clean"
+  // This prevents de-optimizing browser internal hidden classes for DOM nodes
+  _reg(node, fn) {
+    let arr = this._cl.get(node);
+    if (!arr) this._cl.set(node, arr = []);
+    arr.push(fn);
+  }
 
   _kill(node) {
-    const c = node[CLEAN];
+    const c = this._cl.get(node);
     if (c) {
       for (let i = 0; i < c.length; i++) try { c[i](); } catch {}
-      node[CLEAN] = null;
+      this._cl.delete(node);
     }
     for (let ch = node.firstChild; ch; ch = ch.nextSibling) this._kill(ch);
   }
@@ -768,6 +928,7 @@ class Reflex {
   _bnd(n, o) {
     const atts = n.attributes;
     if (!atts) return;
+    const trans = n.getAttribute("m-trans"); // For m-show transitions
     for (let i = atts.length - 1; i >= 0; i--) {
       const a = atts[i], nm = a.name, v = a.value;
       if (nm.startsWith(":")) this._at(n, nm.slice(1), v, o);
@@ -776,29 +937,65 @@ class Reflex {
         if (nm === "m-model") this._mod(n, v, o);
         else if (nm === "m-text") this._at(n, "textContent", v, o);
         else if (nm === "m-html") this._html(n, v, o);
-        else if (nm === "m-show") this._show(n, v, o);
+        else if (nm === "m-show") this._show(n, v, o, trans);
+        else if (nm === "m-effect") this._effect(n, v, o);
+        else if (nm === "m-ref") {
+          // Register element in $refs
+          this._refs[v] = n;
+          this._reg(n, () => { delete this._refs[v]; });
+        }
+        else {
+          // Check for custom directives: m-name.mod1.mod2="value"
+          const parts = nm.slice(2).split(".");
+          const dirName = parts[0];
+          const mods = parts.slice(1);
+          this._applyDir(n, dirName, v, mods, o);
+        }
       }
     }
   }
 
   _dir_if(el, o) {
     const fn = this._fn(el.getAttribute("m-if"));
+    const trans = el.getAttribute("m-trans"); // Transition name (e.g., "fade")
     const cm = document.createComment("if");
     el.replaceWith(cm);
-    let cur;
+    let cur, leaving = false;
 
     const e = this._ef(() => {
       const ok = !!fn(this.s, o);
-      if (ok && !cur) {
-        cur = el.cloneNode(true); cur.removeAttribute("m-if");
-        cm.after(cur); this._bnd(cur, o); this._w(cur, o);
-      } else if (!ok && cur) {
-        this._kill(cur); cur.remove(); cur = null;
+      if (ok && !cur && !leaving) {
+        cur = el.cloneNode(true);
+        cur.removeAttribute("m-if");
+        cur.removeAttribute("m-trans");
+        cm.after(cur);
+        this._bnd(cur, o);
+        this._w(cur, o);
+        // Run enter transition
+        if (trans) runTransition(cur, trans, "enter", null);
+      } else if (!ok && cur && !leaving) {
+        if (trans) {
+          // Run leave transition before removing
+          leaving = true;
+          const node = cur;
+          runTransition(node, trans, "leave", () => {
+            this._kill(node);
+            node.remove();
+            leaving = false;
+          });
+          cur = null;
+        } else {
+          this._kill(cur);
+          cur.remove();
+          cur = null;
+        }
       }
     });
     this._reg(cm, e.kill);
   }
 
+  // Optimized m-for using LIS (Longest Increasing Subsequence) algorithm
+  // Calculates minimum DOM moves required, similar to Vue 3 / Inferno
   _dir_for(el, o) {
     const ex = el.getAttribute("m-for");
     const kAttr = el.getAttribute("m-key");
@@ -817,7 +1014,8 @@ class Reflex {
     const tpl = el.cloneNode(true);
     tpl.removeAttribute("m-for"); tpl.removeAttribute("m-key");
 
-    let rows = new Map();
+    let rows = new Map();     // key -> { node, oldIdx }
+    let oldKeys = [];         // Track key order for LIS
 
     const eff = this._ef(() => {
       const list = listFn(this.s, o) || [];
@@ -825,10 +1023,20 @@ class Reflex {
       if (listMeta) this._tk(listMeta, I);
 
       const raw = Array.isArray(list) ? this.toRaw(list) : Array.from(list);
-      const next = new Map();
-      let after = cm;
+      const newLen = raw.length;
 
-      for (let i = 0; i < raw.length; i++) {
+      // Build key-to-oldIndex map for LIS calculation
+      const keyToOldIdx = new Map();
+      for (let i = 0; i < oldKeys.length; i++) {
+        keyToOldIdx.set(oldKeys[i], i);
+      }
+
+      // Prepare new nodes and collect old indices for LIS
+      const newNodes = new Array(newLen);
+      const newKeys = new Array(newLen);
+      const oldIndices = new Array(newLen);  // For LIS: old index or -1 if new
+
+      for (let i = 0; i < newLen; i++) {
         let item = raw[i];
         if (item !== null && typeof item === "object" && !item[S]) item = this._r(item);
         const sc = Object.create(o || {});
@@ -836,25 +1044,64 @@ class Reflex {
         if (idxAlias) sc[idxAlias] = i;
 
         const key = kAttr ? (keyIsProp ? (item && item[kAttr]) : keyFn(this.s, sc)) : i;
-        let node = rows.get(key);
+        newKeys[i] = key;
 
-        if (!node) {
-          node = tpl.cloneNode(true);
-          node._sc = this._r(sc);
-          this._bnd(node, node._sc); this._w(node, node._sc);
-        } else {
-          const p = node._sc;
+        const existing = rows.get(key);
+        if (existing) {
+          // Reuse existing node, update scope
+          const p = existing.node._sc;
           p[alias] = item;
           if (idxAlias) p[idxAlias] = i;
+          newNodes[i] = existing.node;
+          oldIndices[i] = keyToOldIdx.get(key) ?? -1;
           rows.delete(key);
+        } else {
+          // Create new node
+          const node = tpl.cloneNode(true);
+          node._sc = this._r(sc);
+          this._bnd(node, node._sc);
+          this._w(node, node._sc);
+          newNodes[i] = node;
+          oldIndices[i] = -1;  // New node
         }
-        if (after.nextSibling !== node) after.after(node);
-        next.set(key, node); after = node;
       }
-      rows.forEach(n => { this._kill(n); n.remove(); });
-      rows = next;
+
+      // Remove stale nodes
+      rows.forEach(({ node }) => { this._kill(node); node.remove(); });
+
+      // Compute LIS for optimal moves - nodes in LIS don't need to move
+      const lis = computeLIS(oldIndices);
+      const lisSet = new Set(lis);
+
+      // Insert nodes - only move nodes NOT in LIS
+      // We iterate backwards and insert before the next sibling
+      let nextSibling = null;
+      for (let i = newLen - 1; i >= 0; i--) {
+        const node = newNodes[i];
+        if (!lisSet.has(i)) {
+          // Node needs to be moved/inserted
+          if (nextSibling) {
+            cm.parentNode.insertBefore(node, nextSibling);
+          } else {
+            // Insert at end (after last sibling or after comment marker)
+            let lastNode = cm;
+            for (let j = 0; j < i; j++) {
+              if (newNodes[j].parentNode) lastNode = newNodes[j];
+            }
+            lastNode.after(node);
+          }
+        }
+        nextSibling = node;
+      }
+
+      // Rebuild rows map
+      rows = new Map();
+      for (let i = 0; i < newLen; i++) {
+        rows.set(newKeys[i], { node: newNodes[i], oldIdx: i });
+      }
+      oldKeys = newKeys;
     });
-    this._reg(cm, () => { rows.forEach(n => this._kill(n)); eff.kill(); });
+    this._reg(cm, () => { rows.forEach(({ node }) => this._kill(node)); eff.kill(); });
   }
 
   _txt(n, o) {
@@ -932,13 +1179,33 @@ class Reflex {
     this._reg(el, e.kill);
   }
 
-  _show(el, exp, o) {
+  _show(el, exp, o, trans) {
     const fn = this._fn(exp);
     const d = el.style.display === "none" ? "" : el.style.display;
-    let prev;
+    let prev, transitioning = false;
     const e = this._ef(() => {
-      const next = fn(this.s, o) ? d : "none";
-      if (next !== prev) { prev = next; el.style.display = next; }
+      const show = !!fn(this.s, o);
+      const next = show ? d : "none";
+      if (next !== prev && !transitioning) {
+        if (trans && prev !== undefined) {
+          // Run transition (skip on initial render when prev is undefined)
+          transitioning = true;
+          if (show) {
+            // Entering: first make visible, then run enter transition
+            el.style.display = d;
+            runTransition(el, trans, "enter", () => { transitioning = false; });
+          } else {
+            // Leaving: run leave transition, then hide
+            runTransition(el, trans, "leave", () => {
+              el.style.display = "none";
+              transitioning = false;
+            });
+          }
+        } else {
+          el.style.display = next;
+        }
+        prev = next;
+      }
     });
     this._reg(el, e.kill);
   }
@@ -989,11 +1256,81 @@ class Reflex {
 
   _ev(el, evt, exp, o) {
     const [nm, ...mod] = evt.split(".");
+    let fn = this._fn(exp, true);
+
+    // Parse debounce/throttle timing from modifiers (e.g., "debounce.300ms" or "debounce.300")
+    const getDelay = (prefix) => {
+      for (const m of mod) {
+        if (m.startsWith(prefix)) return parseInt(m.slice(prefix.length), 10) || 300;
+        const match = m.match(/^(\d+)(ms)?$/);
+        if (match && mod.includes(prefix.slice(0, -1))) return parseInt(match[1], 10);
+      }
+      return mod.includes(prefix.slice(0, -1)) ? 300 : 0;
+    };
+
+    // Debounce modifier: @input.debounce.300ms="search"
+    const debounceDelay = getDelay("debounce.");
+    if (debounceDelay || mod.includes("debounce")) {
+      const delay = debounceDelay || 300;
+      const origFn = fn;
+      let timer = null;
+      fn = (s, c, e) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => origFn(s, c, e), delay);
+      };
+    }
+
+    // Throttle modifier: @scroll.throttle.100ms="onScroll"
+    const throttleDelay = getDelay("throttle.");
+    if (throttleDelay || mod.includes("throttle")) {
+      const delay = throttleDelay || 300;
+      const origFn = fn;
+      let last = 0;
+      fn = (s, c, e) => {
+        const now = Date.now();
+        if (now - last >= delay) {
+          last = now;
+          origFn(s, c, e);
+        }
+      };
+    }
+
+    // Window/Document modifiers: @keydown.window="handleKey"
+    if (mod.includes("window") || mod.includes("document")) {
+      const target = mod.includes("window") ? window : document;
+      const self = this;
+      const handler = (e) => {
+        if (mod.includes("prevent")) e.preventDefault();
+        if (mod.includes("stop")) e.stopPropagation();
+        fn(self.s, o, e, el); // Pass element for $el magic property
+      };
+      const opts = mod.includes("once") ? { once: true } : undefined;
+      target.addEventListener(nm, handler, opts);
+      this._reg(el, () => target.removeEventListener(nm, handler, opts));
+      return;
+    }
+
+    // Outside modifier: @click.outside="closeModal"
+    if (mod.includes("outside")) {
+      const self = this;
+      const handler = (e) => {
+        if (!el.contains(e.target) && e.target !== el) {
+          if (mod.includes("prevent")) e.preventDefault();
+          if (mod.includes("stop")) e.stopPropagation();
+          fn(self.s, o, e, el); // Pass element for $el magic property
+        }
+      };
+      document.addEventListener(nm, handler);
+      this._reg(el, () => document.removeEventListener(nm, handler));
+      return;
+    }
+
+    // Default: use event delegation
     if (!this._dh.has(nm)) {
       this._dh.set(nm, new WeakMap());
       this._dr.addEventListener(nm, e => this._hdl(e, nm));
     }
-    this._dh.get(nm).set(el, { f: this._fn(exp, true), o, m: mod });
+    this._dh.get(nm).set(el, { f: fn, o, m: mod });
   }
 
   _hdl(e, nm) {
@@ -1005,7 +1342,7 @@ class Reflex {
         if (m.includes("self") && e.target !== t) { t = t.parentNode; continue; }
         if (m.includes("prevent")) e.preventDefault();
         if (m.includes("stop")) e.stopPropagation();
-        f(this.s, o, e);
+        f(this.s, o, e, t); // Pass element for $el magic property
         if (m.includes("once")) this._dh.get(nm).delete(t);
         if (e.cancelBubble) return;
       }
@@ -1122,10 +1459,42 @@ class Reflex {
     const arg = Array.from(vars).map(v =>
       `var ${v}=(c&&(${JSON.stringify(v)} in c))?c.${v}:s.${v};`
     ).join("");
-    const body = isH ? `${arg}${exp};` : `${arg}return(${exp});`;
 
-    try { return this._ec.set(k, new Function("s", "c", "$event", body)); }
+    // Inject magic properties: $refs, $dispatch, $nextTick, $el
+    const magicArgs = `var $refs=_r,$dispatch=_d,$nextTick=_n,$el=_el;`;
+    const body = isH ? `${magicArgs}${arg}${exp};` : `${magicArgs}${arg}return(${exp});`;
+
+    const self = this;
+    try {
+      const rawFn = new Function("s", "c", "$event", "_r", "_d", "_n", "_el", body);
+      // Wrap to inject magic properties
+      return this._ec.set(k, (s, c, e, el) => rawFn(
+        s, c, e,
+        self._refs,
+        self._dispatch.bind(self),
+        self.nextTick.bind(self),
+        el
+      ));
+    }
     catch (err) { console.warn("Reflex compile error:", exp, err); return this._ec.set(k, () => undefined); }
+  }
+
+  // $dispatch helper: dispatch custom event from element
+  _dispatch(event, detail, el) {
+    const e = new CustomEvent(event, { detail, bubbles: true, cancelable: true });
+    (el || this._dr).dispatchEvent(e);
+    return e;
+  }
+
+  // m-effect directive: run side effects when dependencies change
+  // Usage: <div m-effect="console.log(count)"></div>
+  _effect(el, exp, o) {
+    const fn = this._fn(exp, true); // Use handler mode (no return value expected)
+    const e = this._ef(() => {
+      try { fn(this.s, o, null, el); }
+      catch (err) { console.error("Reflex: Error in m-effect:", err); }
+    });
+    this._reg(el, e.kill);
   }
 
   _trv(v, s = new Set()) {
