@@ -32,6 +32,18 @@ const REORDER = { __proto__: null, splice: 1, sort: 1, reverse: 1, shift: 1, uns
 const CM = { __proto__: null, get: 1, has: 1, forEach: 1, keys: 1, values: 1, entries: 1, set: 1, add: 1, delete: 1, clear: 1 };
 const ID_RE = /(?:^|[^.\w$])([a-zA-Z_$][\w$]*)/g;
 
+// Dangerous property names that could lead to prototype pollution
+const UNSAFE_PROPS = { __proto__: null, __proto__: 1, constructor: 1, prototype: 1, __defineGetter__: 1, __defineSetter__: 1, __lookupGetter__: 1, __lookupSetter__: 1 };
+
+// Dangerous URL protocols
+const UNSAFE_URL_RE = /^\s*(javascript|vbscript|data):/i;
+
+// Dangerous patterns in expressions that could bypass reserved word checks
+const UNSAFE_EXPR_RE = /\[(["'`])constructor\1\]|\[(["'`])__proto__\1\]|\.constructor\s*\(|Function\s*\(/i;
+
+// Basic HTML entity escaping for when DOMPurify is unavailable
+const escapeHTML = s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
 class Reflex {
   constructor(init = {}) {
     this.s = null;      // State
@@ -65,7 +77,16 @@ class Reflex {
 
   component(n, def) {
     const t = document.createElement("template");
-    t.innerHTML = def.template;
+    // FIX #1: Sanitize component templates to prevent XSS
+    let template = def.template;
+    if (this.cfg.sanitize) {
+      if (typeof DOMPurify !== "undefined") {
+        template = DOMPurify.sanitize(template, { RETURN_DOM_FRAGMENT: false, WHOLE_DOCUMENT: false });
+      } else {
+        console.warn("Reflex: DOMPurify not loaded. Component templates should be trusted or load DOMPurify for sanitization.");
+      }
+    }
+    t.innerHTML = template;
     this._cp.set(n.toLowerCase(), { _t: t.content.firstElementChild, p: def.props || [], s: def.setup });
     return this;
   }
@@ -590,8 +611,15 @@ class Reflex {
   _at(el, att, exp, o) {
     const fn = this._fn(exp);
     let prev;
+    // FIX #5: Attributes that can execute JavaScript via protocol handlers
+    const isUrlAttr = att === "href" || att === "src" || att === "action" || att === "formaction" || att === "xlink:href";
     const e = this._ef(() => {
-      const v = fn(this.s, o);
+      let v = fn(this.s, o);
+      // FIX #5: Validate URL protocols to prevent javascript:, vbscript:, data: XSS
+      if (isUrlAttr && v != null && typeof v === "string" && UNSAFE_URL_RE.test(v)) {
+        console.warn("Reflex: Blocked unsafe URL protocol in", att + ":", v);
+        v = "about:blank";
+      }
       if (att === "class") {
         const next = this._cls(v);
         if (next !== prev) { prev = next; el.className = next; }
@@ -614,7 +642,16 @@ class Reflex {
     const e = this._ef(() => {
       const v = fn(this.s, o);
       let html = v == null ? "" : String(v);
-      if (this.cfg.sanitize && typeof DOMPurify !== "undefined") html = DOMPurify.sanitize(html);
+      // FIX #2: Always sanitize when cfg.sanitize is true; escape HTML if DOMPurify unavailable
+      if (this.cfg.sanitize) {
+        if (typeof DOMPurify !== "undefined") {
+          html = DOMPurify.sanitize(html);
+        } else {
+          // Fallback: escape HTML entities to prevent XSS when DOMPurify is not available
+          html = escapeHTML(html);
+          console.warn("Reflex: DOMPurify not loaded. HTML content escaped for safety. Load DOMPurify for proper sanitization.");
+        }
+      }
       if (html !== prev) { prev = html; el.innerHTML = html; }
     });
     this._reg(el, e.kill);
@@ -647,8 +684,26 @@ class Reflex {
       else if (isNum) v = el.value === "" ? null : parseFloat(el.value);
       else v = el.value;
       const paths = exp.split("."), end = paths.pop();
+      // FIX #3: Prevent prototype pollution by blocking dangerous property names
+      if (UNSAFE_PROPS[end]) {
+        console.warn("Reflex: Blocked attempt to set unsafe property:", end);
+        return;
+      }
       let t = o && paths[0] in o ? o : this.s;
-      for (const p of paths) { if (t[p] == null) t[p] = {}; t = t[p]; }
+      for (const p of paths) {
+        // FIX #3: Block prototype pollution via path segments
+        if (UNSAFE_PROPS[p]) {
+          console.warn("Reflex: Blocked attempt to traverse unsafe property:", p);
+          return;
+        }
+        // FIX #6: Check if intermediate value is an object before traversing
+        if (t[p] == null) t[p] = {};
+        else if (typeof t[p] !== "object") {
+          console.warn("Reflex: Cannot set nested property on non-object value at path:", p);
+          return;
+        }
+        t = t[p];
+      }
       t[end] = v;
     };
     const evt = isChk || el.tagName === "SELECT" ? "change" : "input";
@@ -687,8 +742,21 @@ class Reflex {
     const k = (isH ? "H:" : "") + exp;
     if (this._ec[k]) return this._ec[k];
 
+    // FIX #4: Block dangerous expression patterns that could bypass reserved word checks
+    if (UNSAFE_EXPR_RE.test(exp)) {
+      console.warn("Reflex: Blocked potentially unsafe expression:", exp);
+      return this._ec[k] = () => undefined;
+    }
+
     if (!isH && /^[a-z_$][\w$.]*$/i.test(exp)) {
       const p = exp.split(".");
+      // FIX #4: Also check path segments for unsafe properties
+      for (const seg of p) {
+        if (UNSAFE_PROPS[seg]) {
+          console.warn("Reflex: Blocked access to unsafe property:", seg);
+          return this._ec[k] = () => undefined;
+        }
+      }
       const self = this;
       return this._ec[k] = (s, o) => {
         if (o) { const meta = o[M] || self._mf.get(o); if (meta) self._tk(meta, p[0]); }
