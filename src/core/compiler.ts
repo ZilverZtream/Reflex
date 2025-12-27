@@ -210,9 +210,27 @@ export const CompilerMixin = {
           // The marker is now at cloned's position (cm.nextSibling)
           cur = cm.nextSibling;
         } else {
-          cur = cloned;
-          this._bnd(cur, o);
-          this._w(cur, o);
+          // Check if cloned element has m-for directive
+          const hasMFor = cloned.getAttribute('m-for');
+
+          if (hasMFor) {
+            // CRITICAL FIX: Handle m-if + m-for composition
+            // When an element has both m-if and m-for, we've removed m-if
+            // but the clone still has m-for. We need to process m-for directly
+            // on this element, not just walk its children.
+            cur = cloned;
+            this._bnd(cur, o);
+            // Process m-for directive directly
+            this._dir_for(cloned, o);
+            // After _dir_for, the element is replaced with a comment + list
+            // Update cur to point to the m-for comment marker
+            cur = cm.nextSibling;
+          } else {
+            // Normal case: no structural directives on the clone
+            cur = cloned;
+            this._bnd(cur, o);
+            this._w(cur, o);
+          }
         }
         // Run enter transition
         if (trans && cur) runTransition(cur, trans, 'enter', null);
@@ -559,11 +577,20 @@ export const CompilerMixin = {
     const type = (el.type || '').toLowerCase();
     const isChk = type === 'checkbox';
     const isNum = type === 'number' || type === 'range';
+    const isMultiSelect = type === 'select-multiple';
 
     const e = this._ef(() => {
       const v = fn(this.s, o);
       if (isChk) el.checked = !!v;
-      else {
+      else if (isMultiSelect) {
+        // For multi-select, v should be an array of selected values
+        const selectedValues = Array.isArray(v) ? v : [];
+        // Update the selected options
+        const options = el.options;
+        for (let i = 0; i < options.length; i++) {
+          options[i].selected = selectedValues.includes(options[i].value);
+        }
+      } else {
         const next = v == null ? '' : String(v);
         if (el.value !== next) el.value = next;
       }
@@ -575,7 +602,17 @@ export const CompilerMixin = {
       let v;
       if (isChk) v = el.checked;
       else if (isNum) v = el.value === '' ? null : parseFloat(el.value);
-      else v = el.value;
+      else if (isMultiSelect) {
+        // For multi-select, return array of selected values
+        // Fallback for environments without selectedOptions (e.g., happy-dom)
+        if (el.selectedOptions) {
+          v = Array.from(el.selectedOptions).map(opt => opt.value);
+        } else {
+          v = Array.from(el.options)
+            .filter(opt => opt.selected)
+            .map(opt => opt.value);
+        }
+      } else v = el.value;
 
       const paths = exp.split('.'), end = paths.pop();
 

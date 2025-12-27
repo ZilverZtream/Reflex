@@ -69,6 +69,100 @@ describe('Directives', () => {
     });
   });
 
+  describe('m-if + m-for composition', () => {
+    it('should properly clean up list when m-if becomes false', async () => {
+      document.body.innerHTML = '<ul><li m-if="open" m-for="user in users" m-text="user"></li></ul>';
+      const app = new Reflex({ open: true, users: ['Alice', 'Bob', 'Charlie'] });
+      await app.nextTick();
+
+      // Verify list is rendered
+      let lis = document.querySelectorAll('li');
+      expect(lis.length).toBe(3);
+      expect(lis[0].textContent).toBe('Alice');
+      expect(lis[1].textContent).toBe('Bob');
+      expect(lis[2].textContent).toBe('Charlie');
+
+      // Toggle m-if to false - this is where the "zombie list" bug would occur
+      app.s.open = false;
+      await app.nextTick();
+
+      // CRITICAL: Verify that ALL list items are actually removed from the DOM
+      lis = document.querySelectorAll('li');
+      expect(lis.length).toBe(0);
+
+      // Also verify that no orphaned nodes exist in the document body
+      // (checking for common scenarios where nodes might be left behind)
+      const allElements = document.body.querySelectorAll('*');
+      const hasOrphanedListItems = Array.from(allElements).some(el =>
+        el.tagName === 'LI' && el.textContent.match(/Alice|Bob|Charlie/)
+      );
+      expect(hasOrphanedListItems).toBe(false);
+    });
+
+    it('should re-render list when m-if becomes true again', async () => {
+      document.body.innerHTML = '<ul><li m-if="show" m-for="item in items" m-text="item"></li></ul>';
+      const app = new Reflex({ show: true, items: ['X', 'Y'] });
+      await app.nextTick();
+
+      let lis = document.querySelectorAll('li');
+      expect(lis.length).toBe(2);
+
+      // Toggle off
+      app.s.show = false;
+      await app.nextTick();
+      lis = document.querySelectorAll('li');
+      expect(lis.length).toBe(0);
+
+      // Toggle back on
+      app.s.show = true;
+      await app.nextTick();
+      lis = document.querySelectorAll('li');
+      expect(lis.length).toBe(2);
+      expect(lis[0].textContent).toBe('X');
+      expect(lis[1].textContent).toBe('Y');
+    });
+
+    it('should handle empty list with m-if + m-for', async () => {
+      document.body.innerHTML = '<ul><li m-if="show" m-for="item in items" m-text="item"></li></ul>';
+      const app = new Reflex({ show: true, items: [] });
+      await app.nextTick();
+
+      // With empty list, no items should be rendered
+      let lis = document.querySelectorAll('li');
+      expect(lis.length).toBe(0);
+
+      // Toggle m-if should not cause issues
+      app.s.show = false;
+      await app.nextTick();
+      lis = document.querySelectorAll('li');
+      expect(lis.length).toBe(0);
+    });
+
+    it('should update list items when m-if is true', async () => {
+      document.body.innerHTML = '<ul><li m-if="active" m-for="num in numbers" m-text="num"></li></ul>';
+      const app = new Reflex({ active: true, numbers: [1, 2, 3] });
+      await app.nextTick();
+
+      let lis = document.querySelectorAll('li');
+      expect(lis.length).toBe(3);
+
+      // Update the list while m-if is still true
+      app.s.numbers.push(4);
+      await app.nextTick();
+
+      lis = document.querySelectorAll('li');
+      expect(lis.length).toBe(4);
+      expect(lis[3].textContent).toBe('4');
+
+      // Now toggle m-if off - all 4 items should be removed
+      app.s.active = false;
+      await app.nextTick();
+
+      lis = document.querySelectorAll('li');
+      expect(lis.length).toBe(0);
+    });
+  });
+
   describe('m-for', () => {
     it('should render list items', async () => {
       document.body.innerHTML = '<ul><li m-for="item in items" m-text="item"></li></ul>';
@@ -246,6 +340,111 @@ describe('Directives', () => {
       input.dispatchEvent(new Event('input'));
 
       expect(app.s.user.name).toBe('Jane');
+    });
+
+    it('should handle select multiple - initial binding', async () => {
+      document.body.innerHTML = `
+        <select multiple m-model="selected">
+          <option value="a">Option A</option>
+          <option value="b">Option B</option>
+          <option value="c">Option C</option>
+        </select>
+      `;
+      const app = new Reflex({ selected: ['a', 'c'] });
+      await app.nextTick();
+
+      const select = document.querySelector('select');
+      const options = select.options;
+
+      // Verify that options 'a' and 'c' are selected
+      expect(options[0].selected).toBe(true);  // 'a'
+      expect(options[1].selected).toBe(false); // 'b'
+      expect(options[2].selected).toBe(true);  // 'c'
+    });
+
+    it('should handle select multiple - user selection updates state', async () => {
+      document.body.innerHTML = `
+        <select multiple m-model="selected">
+          <option value="a">Option A</option>
+          <option value="b">Option B</option>
+          <option value="c">Option C</option>
+        </select>
+      `;
+      const app = new Reflex({ selected: [] });
+      await app.nextTick();
+
+      const select = document.querySelector('select');
+      const options = select.options;
+
+      // Simulate user selecting options 'a' and 'b'
+      options[0].selected = true;
+      options[1].selected = true;
+      options[2].selected = false;
+
+      select.dispatchEvent(new Event('change'));
+
+      // Verify state is updated to array ['a', 'b']
+      expect(app.s.selected).toEqual(['a', 'b']);
+    });
+
+    it('should handle select multiple - programmatic state change', async () => {
+      document.body.innerHTML = `
+        <select multiple m-model="choices">
+          <option value="x">X</option>
+          <option value="y">Y</option>
+          <option value="z">Z</option>
+        </select>
+      `;
+      const app = new Reflex({ choices: ['x'] });
+      await app.nextTick();
+
+      const select = document.querySelector('select');
+      let options = select.options;
+
+      expect(options[0].selected).toBe(true);
+      expect(options[1].selected).toBe(false);
+      expect(options[2].selected).toBe(false);
+
+      // Change state programmatically
+      app.s.choices = ['y', 'z'];
+      await app.nextTick();
+
+      expect(options[0].selected).toBe(false);
+      expect(options[1].selected).toBe(true);
+      expect(options[2].selected).toBe(true);
+    });
+
+    it('should handle select multiple - empty selection', async () => {
+      document.body.innerHTML = `
+        <select multiple m-model="items">
+          <option value="1">One</option>
+          <option value="2">Two</option>
+        </select>
+      `;
+      const app = new Reflex({ items: ['1', '2'] });
+      await app.nextTick();
+
+      const select = document.querySelector('select');
+      const options = select.options;
+
+      // Initially both selected
+      expect(options[0].selected).toBe(true);
+      expect(options[1].selected).toBe(true);
+
+      // Deselect all
+      options[0].selected = false;
+      options[1].selected = false;
+      select.dispatchEvent(new Event('change'));
+
+      // Should result in empty array
+      expect(app.s.items).toEqual([]);
+
+      // Setting to empty array should deselect all
+      app.s.items = ['2'];
+      await app.nextTick();
+
+      expect(options[0].selected).toBe(false);
+      expect(options[1].selected).toBe(true);
     });
   });
 
