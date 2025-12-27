@@ -16,6 +16,7 @@ type EffectRunner = (() => any) & {
   d: Array<Set<EffectRunner>>;
   s: ((effect: EffectRunner) => void) | null;
   kill: () => void;
+  o?: any;
 };
 
 interface EffectOptions {
@@ -89,11 +90,31 @@ export const SchedulerMixin = {
     for (let i = 0; i < q.length; i++) {
       const j = q[i];
       j.f &= ~QUEUED; // Clear queued flag before running
-      try { j(); } catch (err) { console.error('Reflex: Error during flush:', err); }
+      try { j(); } catch (err) { this._handleError(err, j.o); }
     }
 
     // Clear without deallocation - reuses the same memory
     q.length = 0;
+  },
+
+  /**
+   * Handle errors from scheduled jobs.
+   */
+  _handleError(err, scope) {
+    let cur = scope;
+    while (cur) {
+      const handler = cur.catchError;
+      if (typeof handler === 'function') {
+        try { handler.call(cur, err); return; } catch (nextErr) { err = nextErr; }
+      }
+      cur = Object.getPrototypeOf(cur);
+    }
+    const onError = this.cfg?.onError;
+    if (typeof onError === 'function') {
+      onError(err);
+      return;
+    }
+    console.error('Reflex: Error during flush:', err);
   },
 
   /**
