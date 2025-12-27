@@ -22,6 +22,11 @@
       "import": "./dist/hydration/index.esm.js",
       "require": "./dist/hydration/index.cjs",
       "types": "./dist/hydration/index.d.ts"
+    },
+    "./observer": {
+      "import": "./dist/observer/index.esm.js",
+      "require": "./dist/observer/index.cjs",
+      "types": "./dist/observer/index.d.ts"
     }
   },
   "files": [
