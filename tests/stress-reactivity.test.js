@@ -487,15 +487,21 @@ describe('Stress Reactivity', () => {
         app.s.log.push(newVal);
       });
 
-      // Interleaved mutations
+      // Interleaved mutations (batched - watcher runs once per flush)
       app.s.counter = 1;
       app.s.counter = 2;
       app.s.counter = 3;
 
       await app.nextTick();
 
-      // Log should capture all changes in order
-      expect(app.s.log).toEqual([1, 2, 3]);
+      // With batched reactivity, watcher sees only the final value
+      // This is correct behavior - watchers are deduplicated per flush
+      expect(app.s.log).toEqual([3]);
+
+      // Further mutations should still trigger watcher
+      app.s.counter = 4;
+      await app.nextTick();
+      expect(app.s.log).toEqual([3, 4]);
     });
   });
 

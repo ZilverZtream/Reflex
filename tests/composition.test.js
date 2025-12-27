@@ -682,7 +682,7 @@ describe('Directive Composition', () => {
 
       // Change first item
       inputs[0].value = 'modified';
-      inputs[0].dispatchEvent(new Event('input'));
+      inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
 
       expect(app.s.items[0].value).toBe('modified');
       expect(changes).toContain(1);
