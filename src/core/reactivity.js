@@ -274,6 +274,9 @@ export const ReactivityMixin = {
       ks.add(k);
       return;
     }
+    if (process.env.NODE_ENV !== 'production') {
+      this._dtEmit('state:change', { target: m.r, key: k, state: this.s });
+    }
     const s = m.d.get(k);
     if (s) {
       for (const e of s) {
