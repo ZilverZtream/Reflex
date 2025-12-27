@@ -271,7 +271,8 @@ describe('Browser Quirks', () => {
       await app.nextTick();
 
       expect(div.textContent).toBe('Updated text');
-      expect(div.isContentEditable).toBe(true);
+      // Check attribute is preserved (isContentEditable is not reliable in happy-dom)
+      expect(div.getAttribute('contenteditable')).toBe('true');
     });
 
     it('should handle contenteditable with nested elements', async () => {

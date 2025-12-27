@@ -140,7 +140,13 @@ export const SchedulerMixin = {
     }
     const onError = this.cfg?.onError;
     if (typeof onError === 'function') {
-      onError(err);
+      // Provide context for debugging
+      const context = {
+        scope: scope,
+        error: err,
+        message: err?.message || String(err)
+      };
+      onError(err, context);
       return;
     }
     console.error('Reflex: Error during flush:', err);
@@ -155,19 +161,22 @@ export const SchedulerMixin = {
     const subs = new Set<EffectRunner>();
 
     const runner = this._ef(() => {
-      v = fn(self.s);
-      dirty = false;
+      try {
+        v = fn(self.s);
+        dirty = false;
+      } catch (err) {
+        dirty = false; // Prevent infinite retry
+        self._handleError(err, null);
+        v = undefined;
+      }
       return v;
     }, {
       lazy: true,
       sched: () => {
         if (!dirty) {
           dirty = true;
-          // Auto-refresh if unconsumed to maintain state consistency
-          if (!subs.size) {
-            self._qj(runner);
-            return;
-          }
+          // Truly lazy: only notify subscribers, don't auto-refresh
+          // If no one is accessing the computed, it won't re-compute
           for (const e of subs) {
             if (e.f & ACTIVE && !(e.f & RUNNING)) {
               e.s ? e.s(e) : self._qj(e);
@@ -200,11 +209,17 @@ export const SchedulerMixin = {
     let old, cleanup;
 
     const job = () => {
-      const n = runner();
-      if (opts.deep || !Object.is(n, old)) {
-        if (cleanup) cleanup();
-        cb(n, old, fn => { cleanup = fn; });
-        old = opts.deep ? self._clone(n) : n;
+      try {
+        const n = runner();
+        if (opts.deep || !Object.is(n, old)) {
+          if (cleanup) {
+            try { cleanup(); } catch (err) { self._handleError(err, null); }
+          }
+          cb(n, old, fn => { cleanup = fn; });
+          old = opts.deep ? self._clone(n) : n;
+        }
+      } catch (err) {
+        self._handleError(err, null);
       }
     };
 

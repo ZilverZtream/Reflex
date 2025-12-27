@@ -100,6 +100,12 @@ export const ArrayHandler: ProxyHandler<any[]> = {
   set(o, k, v, rec) {
     const meta = (o as ReactiveTarget)[META] as ReactiveMeta;
     const engine = meta.engine;
+
+    // Security: Block setting dangerous properties
+    if (typeof k === 'string' && UNSAFE_PROPS[k]) {
+      throw new Error(`Reflex: Cannot set unsafe property '${k}'`);
+    }
+
     const raw = engine.toRaw(v);
     const old = o[k];
     if (Object.is(old, raw) && k !== 'length') return true;
@@ -175,6 +181,12 @@ export const ObjectHandler: ProxyHandler<ReactiveTarget> = {
   set(o, k, v, rec) {
     const meta = o[META] as ReactiveMeta;
     const engine = meta.engine;
+
+    // Security: Block setting dangerous properties
+    if (typeof k === 'string' && UNSAFE_PROPS[k]) {
+      throw new Error(`Reflex: Cannot set unsafe property '${k}'`);
+    }
+
     const raw = engine.toRaw(v);
     const old = o[k];
     if (Object.is(old, raw)) return true;

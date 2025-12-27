@@ -514,6 +514,19 @@ export const CompilerMixin = {
     const isUrlAttr = att === 'href' || att === 'src' || att === 'action' ||
                       att === 'formaction' || att === 'xlink:href';
 
+    // Handle kebab-case to camelCase conversion for SVG attributes
+    // e.g., :view-box -> viewBox
+    let attrName = att;
+    if (att.includes('-')) {
+      attrName = att.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+    }
+
+    // SVG attributes that should always use setAttribute (not property access)
+    // These are read-only properties that return SVGAnimated* objects
+    const isSVGAttr = attrName === 'viewBox' || attrName === 'preserveAspectRatio' ||
+                      attrName === 'transform' || attrName === 'gradientTransform' ||
+                      attrName === 'patternTransform';
+
     const e = this._ef(() => {
       try {
         let v = fn(this.s, o);
@@ -530,7 +543,14 @@ export const CompilerMixin = {
         } else if (att === 'style') {
           const next = this._sty(v);
           if (next !== prev) { prev = next; el.style.cssText = next; }
-        } else if (att in el) {
+        } else if (isSVGAttr) {
+          // SVG attributes must use setAttribute with proper camelCase
+          const next = v === null || v === false ? null : String(v);
+          if (next !== prev) {
+            prev = next;
+            next === null ? el.removeAttribute(attrName) : el.setAttribute(attrName, next);
+          }
+        } else if (att in el && !isSVGAttr) {
           el[att] = v ?? '';
         } else {
           const next = v === null || v === false ? null : String(v);
@@ -941,14 +961,53 @@ export const CompilerMixin = {
 
   /**
    * m-effect directive: run side effects when dependencies change
+   *
+   * IMPORTANT: Properly handles cleanup functions returned by effects.
+   * When dependencies change, the previous cleanup is called before
+   * the effect runs again. This prevents resource leaks.
    */
   _effect(el, exp, o) {
+    // Use handler mode to get proper `this` binding from with(s){}
     const fn = this._fn(exp, true);
+    const self = this;
+
+    // Track the current cleanup function
+    let currentCleanup = null;
+
     const e = this._ef(() => {
-      try { fn(this.s, o, null, el); } catch (err) { this._handleError(err, o); }
+      // Call previous cleanup before running effect again
+      if (typeof currentCleanup === 'function') {
+        try {
+          currentCleanup();
+        } catch (err) {
+          self._handleError(err, o);
+        }
+        currentCleanup = null;
+      }
+
+      try {
+        const result = fn(self.s, o, null, el);
+        // If effect returns a function, it's a cleanup callback
+        if (typeof result === 'function') {
+          currentCleanup = result;
+        }
+      } catch (err) {
+        self._handleError(err, o);
+      }
     });
     e.o = o;
-    this._reg(el, e.kill);
+
+    // Register final cleanup when element is removed
+    this._reg(el, () => {
+      if (typeof currentCleanup === 'function') {
+        try {
+          currentCleanup();
+        } catch (err) {
+          self._handleError(err, o);
+        }
+      }
+      e.kill();
+    });
   },
 
   /**

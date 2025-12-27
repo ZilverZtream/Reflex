@@ -186,7 +186,30 @@ export const ExprMixin = {
     if (isH) {
       // Handler mode: use 'with' to allow mutations like count++
       // First check if there's a context (c), fall back to state (s)
-      const body = `${magicArgs}with(c||{}){with(s){${exp}}}`;
+
+      // Auto-call simple function references: "onEnter" -> "onEnter()"
+      // This handles the common pattern @click="handler" (without parentheses)
+      let handlerExp = exp;
+      let useReturn = false;
+
+      if (/^[a-z_$][\w$.]*$/i.test(exp) && !exp.includes('.')) {
+        // Simple identifier - auto-call it
+        handlerExp = `${exp}($event)`;
+        useReturn = true; // Single function call can return cleanup
+      } else if (/^[a-z_$][\w$.]+$/i.test(exp) && exp.includes('.') && !exp.includes(';')) {
+        // Method path like obj.method - auto-call it
+        handlerExp = `${exp}($event)`;
+        useReturn = true; // Single function call can return cleanup
+      } else if (!exp.includes(';')) {
+        // Single expression without semicolons - can safely return
+        useReturn = true;
+      }
+
+      // For single expressions (like function calls), add return to capture cleanup
+      // For multi-statement expressions (with ;), don't add return
+      const body = useReturn
+        ? `${magicArgs}with(c||{}){with(s){return(${handlerExp})}}`
+        : `${magicArgs}with(c||{}){with(s){${handlerExp}}}`;
       try {
         rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el', body);
         return this._ec.set(k, (s, c, e, el) => {
