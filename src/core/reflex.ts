@@ -81,6 +81,7 @@ export class Reflex {
     cspSafe: boolean;
     cacheSize: number;
     onError: ((err: any) => void) | null;
+    domPurify: any | null;
   };
 
   constructor(init = {}) {
@@ -120,7 +121,8 @@ export class Reflex {
       sanitize: true,         // Sanitize HTML content
       cspSafe: false,         // CSP-safe mode (no new Function)
       cacheSize: 1000,        // Expression cache size
-      onError: null           // Global error handler
+      onError: null,          // Global error handler
+      domPurify: null         // DOMPurify instance for m-html sanitization
     };
 
     // Initialize reactive state
@@ -146,6 +148,7 @@ export class Reflex {
    * @param {number} opts.cacheSize - Expression cache size (default: 1000)
    * @param {Object} opts.parser - CSP-safe expression parser instance
    * @param {Function} opts.onError - Global error handler
+   * @param {Object} opts.domPurify - DOMPurify instance for m-html sanitization
    * @returns {Reflex} This instance for chaining
    *
    * @example
@@ -154,6 +157,11 @@ export class Reflex {
    *   cspSafe: true,
    *   parser: new SafeExprParser()
    * });
+   *
+   * @example
+   * // Configure DOMPurify for m-html security
+   * import DOMPurify from 'dompurify';
+   * app.configure({ domPurify: DOMPurify });
    */
   configure(opts) {
     if (opts.sanitize !== undefined) this.cfg.sanitize = opts.sanitize;
@@ -164,6 +172,7 @@ export class Reflex {
     }
     if (opts.parser !== undefined) this._parser = opts.parser;
     if (opts.onError !== undefined) this.cfg.onError = opts.onError;
+    if (opts.domPurify !== undefined) this.cfg.domPurify = opts.domPurify;
     return this;
   }
 
@@ -177,7 +186,7 @@ export class Reflex {
     this._dr = el;
     this._bnd(el, null);
     this._w(el, null);
-    if (process.env.NODE_ENV !== 'production') {
+    if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
       this._dtRegister();
     }
     return this;
@@ -235,18 +244,11 @@ export class Reflex {
     const t = document.createElement('template');
     let template = def.template;
 
-    if (this.cfg.sanitize) {
-      if (typeof DOMPurify !== 'undefined') {
-        template = DOMPurify.sanitize(template, {
-          RETURN_DOM_FRAGMENT: false,
-          WHOLE_DOCUMENT: false
-        });
-      } else {
-        console.warn(
-          'Reflex: DOMPurify not loaded. Component templates should be trusted ' +
-          'or load DOMPurify for sanitization.'
-        );
-      }
+    if (this.cfg.sanitize && this.cfg.domPurify) {
+      template = this.cfg.domPurify.sanitize(template, {
+        RETURN_DOM_FRAGMENT: false,
+        WHOLE_DOCUMENT: false
+      });
     }
 
     t.innerHTML = template;
@@ -396,7 +398,9 @@ export class Reflex {
       }
     };
 
-    const scopeRaw = Object.create(props);
+    // Use flat object copy instead of Object.create for V8 optimization
+    // Object.create creates unique prototype chains, preventing inline caching
+    const scopeRaw = Object.assign({}, props);
     scopeRaw.$props = props;
     scopeRaw.$emit = emit;
 
@@ -479,8 +483,8 @@ export class Reflex {
       const fallbackTpl = document.createElement('template');
       let fallbackHtml = asyncDef.fallback;
 
-      if (this.cfg.sanitize && typeof DOMPurify !== 'undefined') {
-        fallbackHtml = DOMPurify.sanitize(fallbackHtml, {
+      if (this.cfg.sanitize && this.cfg.domPurify) {
+        fallbackHtml = this.cfg.domPurify.sanitize(fallbackHtml, {
           RETURN_DOM_FRAGMENT: false,
           WHOLE_DOCUMENT: false
         });
@@ -491,6 +495,8 @@ export class Reflex {
     }
 
     // Track if this async component has been aborted
+    // Use a unique mount ID to prevent race conditions from multiple loads
+    const mountId = Symbol('mount');
     let aborted = false;
 
     // Replace element with marker (and fallback if present)
@@ -514,12 +520,25 @@ export class Reflex {
 
     // Function to mount the real component once loaded
     const mountComponent = (def) => {
-      // Security: Check if marker is still connected to the DOM or aborted
-      // This prevents "zombie effects" when parent is destroyed while loading
-      if (aborted || !marker.isConnected) {
-        // Parent was destroyed while we were loading - don't mount
-        // Clean up fallback if it exists
-        if (fallbackNode && fallbackNode.isConnected) {
+      // ROBUST ABORT CHECKS to prevent zombie components:
+      // 1. Check explicit abort flag (set when parent is destroyed)
+      // 2. Verify marker is still in the document (not detached)
+      // 3. Ensure marker's parent exists and is connected
+      // This prevents "zombie effects" when parent is destroyed/moved while loading
+      if (aborted) {
+        // Explicitly aborted during cleanup
+        if (fallbackNode?.parentNode) {
+          self._kill(fallbackNode);
+          fallbackNode.remove();
+        }
+        return;
+      }
+
+      // Verify marker is still in a valid location
+      if (!marker.parentNode || !marker.parentNode.isConnected) {
+        // Marker was removed or its parent was detached
+        aborted = true;
+        if (fallbackNode?.parentNode) {
           self._kill(fallbackNode);
           fallbackNode.remove();
         }
@@ -536,8 +555,8 @@ export class Reflex {
       const t = document.createElement('template');
       let template = def.template;
 
-      if (self.cfg.sanitize && typeof DOMPurify !== 'undefined') {
-        template = DOMPurify.sanitize(template, {
+      if (self.cfg.sanitize && self.cfg.domPurify) {
+        template = self.cfg.domPurify.sanitize(template, {
           RETURN_DOM_FRAGMENT: false,
           WHOLE_DOCUMENT: false
         });
@@ -641,7 +660,7 @@ Object.assign(Reflex.prototype, SchedulerMixin);
 Object.assign(Reflex.prototype, ExprMixin);
 Object.assign(Reflex.prototype, CompilerMixin);
 
-if (process.env.NODE_ENV !== 'production') {
+if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
   Reflex.prototype._dtRegister = function() {
     if (typeof window === 'undefined') return;
     const hook = window.__REFLEX_DEVTOOLS_HOOK__;
