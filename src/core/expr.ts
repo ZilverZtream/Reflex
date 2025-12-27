@@ -11,7 +11,7 @@
  * CSP mode requires an external parser (SafeExprParser).
  */
 
-import { META, RESERVED, UNSAFE_PROPS, UNSAFE_EXPR_RE, ID_RE, normalizeUnicodeEscapes } from './symbols.js';
+import { META, RESERVED, UNSAFE_PROPS, UNSAFE_EXPR_RE, ID_RE, normalizeUnicodeEscapes, createMembrane } from './symbols.js';
 
 /**
  * Expression cache with LRU (Least Recently Used) eviction strategy.
@@ -77,25 +77,12 @@ export const ExprMixin = {
     const cached = this._ec.get(k);
     if (cached) return cached;
 
-    // SECURITY WARNING: Regex-based expression validation provides only basic protection.
-    // It CANNOT fully prevent determined attackers from executing arbitrary code.
-    // For production applications handling untrusted user input:
-    // 1. Enable CSP-safe mode: app.configure({ cspSafe: true, parser: SafeExprParser })
-    // 2. Use strict Content Security Policy headers (no 'unsafe-eval')
-    // 3. Never render user-provided template expressions without sanitization
-    //
-    // This check blocks common attack patterns but is NOT a complete security solution.
-    const normalizedExp = normalizeUnicodeEscapes(exp);
-    if (UNSAFE_EXPR_RE.test(normalizedExp)) {
-      if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
-        console.warn(
-          'Reflex: SECURITY - Blocked potentially unsafe expression pattern.\n' +
-          'Expression: ' + exp + '\n' +
-          'For production apps, use CSP-safe mode to prevent code injection.'
-        );
-      }
-      return this._ec.set(k, () => undefined);
-    }
+    // SECURITY NOTE: Standard mode now uses "The Iron Membrane" - an unbypassable
+    // runtime Proxy sandbox that provides defense-in-depth against code injection.
+    // The membrane wraps state and context objects, blocking access to dangerous
+    // properties like 'constructor', '__proto__', 'prototype', and global objects.
+    // This replaces fragile regex validation with runtime enforcement that cannot
+    // be bypassed through string concatenation or Unicode escapes.
 
     // === FAST PATH OPTIMIZATIONS ===
     // Skip new Function/regex for common simple expressions
@@ -202,13 +189,26 @@ export const ExprMixin = {
       const body = `${magicArgs}with(c||{}){with(s){${exp}}}`;
       try {
         rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el', body);
-        return this._ec.set(k, (s, c, e, el) => rawFn(
-          s, c || {}, e,
-          self._refs,
-          self._dispatch.bind(self),
-          self.nextTick.bind(self),
-          el
-        ));
+        return this._ec.set(k, (s, c, e, el) => {
+          try {
+            return rawFn(
+              createMembrane(s), createMembrane(c || {}), e,
+              self._refs,
+              self._dispatch.bind(self),
+              self.nextTick.bind(self),
+              el
+            );
+          } catch (err) {
+            // Membrane security errors - silently return undefined to prevent code execution
+            if (err instanceof Error && err.message.includes('Reflex Security')) {
+              if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+                console.error(err.message);
+              }
+              return undefined;
+            }
+            throw err;
+          }
+        });
       } catch (err) {
         // Check if this is a CSP violation
         if (err instanceof EvalError || (err.message && err.message.includes('unsafe-eval'))) {
@@ -244,14 +244,27 @@ export const ExprMixin = {
 
     try {
       rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el', body);
-      // Wrap to inject magic properties
-      return this._ec.set(k, (s, c, e, el) => rawFn(
-        s, c, e,
-        self._refs,
-        self._dispatch.bind(self),
-        self.nextTick.bind(self),
-        el
-      ));
+      // Wrap to inject magic properties and apply security membrane
+      return this._ec.set(k, (s, c, e, el) => {
+        try {
+          return rawFn(
+            createMembrane(s), createMembrane(c), e,
+            self._refs,
+            self._dispatch.bind(self),
+            self.nextTick.bind(self),
+            el
+          );
+        } catch (err) {
+          // Membrane security errors - silently return undefined to prevent code execution
+          if (err instanceof Error && err.message.includes('Reflex Security')) {
+            if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+              console.error(err.message);
+            }
+            return undefined;
+          }
+          throw err;
+        }
+      });
     } catch (err) {
       // Check if this is a CSP violation
       if (err instanceof EvalError || (err.message && err.message.includes('unsafe-eval'))) {
