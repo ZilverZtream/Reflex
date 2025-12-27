@@ -15,6 +15,11 @@ import { ACTIVE, RUNNING, QUEUED, META } from './symbols.js';
 // This prevents infinite loops from circular dependencies
 const MAX_FLUSH_ITERATIONS = 100;
 
+// Time slicing threshold in milliseconds
+// After processing jobs for this duration, yield to the browser for rendering
+// 5ms leaves ~11ms for browser rendering in a 60fps frame (16.67ms total)
+const YIELD_THRESHOLD = 5;
+
 type EffectRunner = (() => any) & {
   f: number;
   d: Array<Set<EffectRunner>>;
@@ -82,12 +87,13 @@ export const SchedulerMixin = {
   },
 
   /**
-   * Flush the job queue
+   * Flush the job queue with cooperative scheduling (time slicing)
    * Uses double-buffering to reduce GC pressure by reusing arrays
    * Includes circular dependency detection to prevent infinite loops
+   * Yields to browser after YIELD_THRESHOLD to prevent UI freezes
    */
   _fl() {
-    this._p = false;
+    const start = performance.now();
     let iterations = 0;
 
     // Process queue, checking for circular dependencies
@@ -112,18 +118,39 @@ export const SchedulerMixin = {
         );
         console.error(error);
         this._handleError(error, null);
+        this._p = false;
         return;
       }
 
-      for (let i = 0; i < q.length; i++) {
-        const j = q[i];
+      // Process jobs one by one with time slicing
+      let processedCount = 0;
+      while (q.length > 0) {
+        // Check if we've exceeded our time budget (skip check on first job to ensure progress)
+        if (processedCount > 0 && performance.now() - start > YIELD_THRESHOLD) {
+          // Time's up! Yield to browser for rendering
+          // Toggle back to restore consistent state
+          this._qf = !this._qf;
+
+          // Use Scheduler API if available (better priority control), otherwise setTimeout
+          if (typeof globalThis !== 'undefined' && globalThis.scheduler?.postTask) {
+            globalThis.scheduler.postTask(() => this._fl());
+          } else {
+            setTimeout(() => this._fl(), 0);
+          }
+
+          // Return without clearing _p flag - we'll resume later
+          return;
+        }
+
+        const j = q.shift();
         j.f &= ~QUEUED; // Clear queued flag before running
         try { j(); } catch (err) { this._handleError(err, j.o); }
+        processedCount++;
       }
-
-      // Clear without deallocation - reuses the same memory
-      q.length = 0;
     }
+
+    // All jobs processed successfully
+    this._p = false;
   },
 
   /**
