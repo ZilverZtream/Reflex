@@ -107,24 +107,26 @@ export const CompilerMixin = {
               // Skip templates
             } else {
               const mIf = c.getAttribute('m-if');
-              if (mIf !== null) {
+              const mFor = c.getAttribute('m-for');
+
+              // CRITICAL: When both m-for and m-if are on same element,
+              // m-for has higher priority (Vue/Alpine semantics)
+              // Process m-for first, m-if will be applied to each cloned item
+              if (mFor !== null) {
+                this._dir_for(c, scope);
+              } else if (mIf !== null) {
                 this._dir_if(c, scope);
               } else {
-                const mFor = c.getAttribute('m-for');
-                if (mFor !== null) {
-                  this._dir_for(c, scope);
+                const t = tag.toLowerCase();
+                if (this._cp.has(t)) {
+                  this._comp(c, t, scope);
+                } else if (this._acp.has(t)) {
+                  // Async component: lazy-load the handler
+                  this._asyncComp(c, t, scope);
                 } else {
-                  const t = tag.toLowerCase();
-                  if (this._cp.has(t)) {
-                    this._comp(c, t, scope);
-                  } else if (this._acp.has(t)) {
-                    // Async component: lazy-load the handler
-                    this._asyncComp(c, t, scope);
-                  } else {
-                    this._bnd(c, scope);
-                    // Push child for processing instead of recursive call
-                    stack.push({ node: c, scope: scope });
-                  }
+                  this._bnd(c, scope);
+                  // Push child for processing instead of recursive call
+                  stack.push({ node: c, scope: scope });
                 }
               }
             }
@@ -196,84 +198,88 @@ export const CompilerMixin = {
     const isAsyncComp = this._acp.has(tag);
 
     const e = this._ef(() => {
-      const ok = !!fn(this.s, o);
-      if (ok && !cur && !leaving) {
-        const cloned = el.cloneNode(true);
-        cloned.removeAttribute('m-if');
-        cloned.removeAttribute('m-trans');
-        cm.after(cloned);
+      try {
+        const ok = !!fn(this.s, o);
+        if (ok && !cur && !leaving) {
+          const cloned = el.cloneNode(true);
+          cloned.removeAttribute('m-if');
+          cloned.removeAttribute('m-trans');
+          cm.after(cloned);
 
-        if (isSyncComp) {
-          // For sync components, track the returned instance
-          cur = this._comp(cloned, tag, o);
-        } else if (isAsyncComp) {
-          // For async components, track the marker that _asyncComp creates
-          // _asyncComp replaces cloned with marker (+ optional fallback)
-          this._asyncComp(cloned, tag, o);
-          // The marker is now at cloned's position (cm.nextSibling)
-          cur = cm.nextSibling;
-        } else {
-          // Check if cloned element has m-for directive
-          const hasMFor = cloned.getAttribute('m-for');
-
-          if (hasMFor) {
-            // CRITICAL FIX: Handle m-if + m-for composition
-            // When an element has both m-if and m-for, we've removed m-if
-            // but the clone still has m-for. We need to process m-for directly
-            // on this element, not just walk its children.
-            cur = cloned;
-            this._bnd(cur, o);
-            // Process m-for directive directly
-            this._dir_for(cloned, o);
-            // After _dir_for, the element is replaced with a comment + list
-            // Update cur to point to the m-for comment marker
+          if (isSyncComp) {
+            // For sync components, track the returned instance
+            cur = this._comp(cloned, tag, o);
+          } else if (isAsyncComp) {
+            // For async components, track the marker that _asyncComp creates
+            // _asyncComp replaces cloned with marker (+ optional fallback)
+            this._asyncComp(cloned, tag, o);
+            // The marker is now at cloned's position (cm.nextSibling)
             cur = cm.nextSibling;
           } else {
-            // Normal case: no structural directives on the clone
-            cur = cloned;
-            this._bnd(cur, o);
-            this._w(cur, o);
+            // Check if cloned element has m-for directive
+            const hasMFor = cloned.getAttribute('m-for');
+
+            if (hasMFor) {
+              // CRITICAL FIX: Handle m-if + m-for composition
+              // When an element has both m-if and m-for, we've removed m-if
+              // but the clone still has m-for. We need to process m-for directly
+              // on this element, not just walk its children.
+              cur = cloned;
+              this._bnd(cur, o);
+              // Process m-for directive directly
+              this._dir_for(cloned, o);
+              // After _dir_for, the element is replaced with a comment + list
+              // Update cur to point to the m-for comment marker
+              cur = cm.nextSibling;
+            } else {
+              // Normal case: no structural directives on the clone
+              cur = cloned;
+              this._bnd(cur, o);
+              this._w(cur, o);
+            }
+          }
+          // Run enter transition
+          if (trans && cur) runTransition(cur, trans, 'enter', null);
+        } else if (!ok && cur && !leaving) {
+          // For async components, we need to find all nodes between marker and end
+          // For now, remove all siblings after the marker until we hit another comment/marker
+          if (isAsyncComp) {
+            // Remove all content from async component (marker, fallback, or loaded component)
+            let node = cm.nextSibling;
+            while (node) {
+              const next = node.nextSibling;
+              // Stop if we hit another structural directive marker
+              if (node.nodeType === 8 && ((node as Comment).nodeValue?.startsWith('if') ||
+                  (node as Comment).nodeValue?.startsWith('for'))) {
+                break;
+              }
+              this._kill(node);
+              (node as ChildNode).remove();
+              // For async, remove only one element/marker set
+              if (node.nodeType === 1 || (node as Comment).nodeValue?.startsWith('async:')) {
+                break;
+              }
+              node = next;
+            }
+            cur = null;
+          } else if (trans) {
+            // Run leave transition before removing
+            leaving = true;
+            const node = cur;
+            runTransition(node, trans, 'leave', () => {
+              this._kill(node);
+              node.remove();
+              leaving = false;
+            });
+            cur = null;
+          } else {
+            this._kill(cur);
+            cur.remove();
+            cur = null;
           }
         }
-        // Run enter transition
-        if (trans && cur) runTransition(cur, trans, 'enter', null);
-      } else if (!ok && cur && !leaving) {
-        // For async components, we need to find all nodes between marker and end
-        // For now, remove all siblings after the marker until we hit another comment/marker
-        if (isAsyncComp) {
-          // Remove all content from async component (marker, fallback, or loaded component)
-          let node = cm.nextSibling;
-          while (node) {
-            const next = node.nextSibling;
-            // Stop if we hit another structural directive marker
-            if (node.nodeType === 8 && ((node as Comment).nodeValue?.startsWith('if') ||
-                (node as Comment).nodeValue?.startsWith('for'))) {
-              break;
-            }
-            this._kill(node);
-            (node as ChildNode).remove();
-            // For async, remove only one element/marker set
-            if (node.nodeType === 1 || (node as Comment).nodeValue?.startsWith('async:')) {
-              break;
-            }
-            node = next;
-          }
-          cur = null;
-        } else if (trans) {
-          // Run leave transition before removing
-          leaving = true;
-          const node = cur;
-          runTransition(node, trans, 'leave', () => {
-            this._kill(node);
-            node.remove();
-            leaving = false;
-          });
-          cur = null;
-        } else {
-          this._kill(cur);
-          cur.remove();
-          cur = null;
-        }
+      } catch (err) {
+        this._handleError(err, o);
       }
     });
     e.o = o;
@@ -304,6 +310,10 @@ export const CompilerMixin = {
     const tpl = el.cloneNode(true);
     tpl.removeAttribute('m-for');
     tpl.removeAttribute('m-key');
+
+    // Check if element has m-if (for m-for + m-if combination)
+    const mIfExpr = tpl.getAttribute('m-if');
+    const ifFn = mIfExpr ? this._fn(mIfExpr) : null;
 
     // Check if the template is a component
     const tag = el.tagName.toLowerCase();
@@ -346,7 +356,27 @@ export const CompilerMixin = {
 
         createNode: (item, index) => {
           const scope = config.createScope(item, index);
+
+          // CRITICAL: Handle m-if on the same element as m-for
+          // Evaluate m-if in the loop item's scope and skip if false
+          if (ifFn) {
+            let shouldRender = false;
+            try {
+              shouldRender = !!ifFn(this.s, scope);
+            } catch (err) {
+              this._handleError(err, scope);
+            }
+            if (!shouldRender) {
+              // Return null to indicate this item should not be rendered
+              return null;
+            }
+          }
+
           const node = tpl.cloneNode(true);
+          // Remove m-if since we've already processed it
+          if (mIfExpr) {
+            node.removeAttribute('m-if');
+          }
 
           if (isSyncComp) {
             // For sync components, we need to insert the node first,
@@ -392,7 +422,17 @@ export const CompilerMixin = {
         removeNode: (node) => {
           this._kill(node);
           node.remove();
-        }
+        },
+
+        // Optional: Check if item should be kept (for m-if filtering)
+        shouldKeep: ifFn ? (item, index, scope) => {
+          try {
+            return !!ifFn(this.s, scope);
+          } catch (err) {
+            this._handleError(err, scope);
+            return false;
+          }
+        } : null
       };
 
       // Use centralized reconciliation logic
@@ -433,9 +473,13 @@ export const CompilerMixin = {
       const fn = this._fn(raw.slice(2, -2));
       let prev;
       const e = this._ef(() => {
-        const v = fn(this.s, o);
-        const next = v == null ? '' : String(v);
-        if (next !== prev) { prev = next; n.nodeValue = next; }
+        try {
+          const v = fn(this.s, o);
+          const next = v == null ? '' : String(v);
+          if (next !== prev) { prev = next; n.nodeValue = next; }
+        } catch (err) {
+          this._handleError(err, o);
+        }
       });
       e.o = o;
       this._reg(n, e.kill);
@@ -446,12 +490,16 @@ export const CompilerMixin = {
     );
     let prev;
     const e = this._ef(() => {
-      let out = '';
-      for (let i = 0; i < pts.length; i++) {
-        const p = pts[i];
-        out += typeof p === 'function' ? (p(this.s, o) ?? '') : p;
+      try {
+        let out = '';
+        for (let i = 0; i < pts.length; i++) {
+          const p = pts[i];
+          out += typeof p === 'function' ? (p(this.s, o) ?? '') : p;
+        }
+        if (out !== prev) { prev = out; n.nodeValue = out; }
+      } catch (err) {
+        this._handleError(err, o);
       }
-      if (out !== prev) { prev = out; n.nodeValue = out; }
     });
     e.o = o;
     this._reg(n, e.kill);
@@ -467,28 +515,32 @@ export const CompilerMixin = {
                       att === 'formaction' || att === 'xlink:href';
 
     const e = this._ef(() => {
-      let v = fn(this.s, o);
+      try {
+        let v = fn(this.s, o);
 
-      // Security: validate URL protocols
-      if (isUrlAttr && v != null && typeof v === 'string' && UNSAFE_URL_RE.test(v)) {
-        console.warn('Reflex: Blocked unsafe URL protocol in', att + ':', v);
-        v = 'about:blank';
-      }
-
-      if (att === 'class') {
-        const next = this._cls(v);
-        if (next !== prev) { prev = next; el.className = next; }
-      } else if (att === 'style') {
-        const next = this._sty(v);
-        if (next !== prev) { prev = next; el.style.cssText = next; }
-      } else if (att in el) {
-        el[att] = v ?? '';
-      } else {
-        const next = v === null || v === false ? null : String(v);
-        if (next !== prev) {
-          prev = next;
-          next === null ? el.removeAttribute(att) : el.setAttribute(att, next);
+        // Security: validate URL protocols
+        if (isUrlAttr && v != null && typeof v === 'string' && UNSAFE_URL_RE.test(v)) {
+          console.warn('Reflex: Blocked unsafe URL protocol in', att + ':', v);
+          v = 'about:blank';
         }
+
+        if (att === 'class') {
+          const next = this._cls(v);
+          if (next !== prev) { prev = next; el.className = next; }
+        } else if (att === 'style') {
+          const next = this._sty(v);
+          if (next !== prev) { prev = next; el.style.cssText = next; }
+        } else if (att in el) {
+          el[att] = v ?? '';
+        } else {
+          const next = v === null || v === false ? null : String(v);
+          if (next !== prev) {
+            prev = next;
+            next === null ? el.removeAttribute(att) : el.setAttribute(att, next);
+          }
+        }
+      } catch (err) {
+        this._handleError(err, o);
       }
     });
     e.o = o;
@@ -513,26 +565,30 @@ export const CompilerMixin = {
     let prev;
     const self = this;
     const e = this._ef(() => {
-      const v = fn(self.s, o);
-      let html = v == null ? '' : String(v);
+      try {
+        const v = fn(self.s, o);
+        let html = v == null ? '' : String(v);
 
-      if (self.cfg.sanitize) {
-        // Use configured DOMPurify instance (not global variable)
-        const purify = self.cfg.domPurify;
-        if (purify && typeof purify.sanitize === 'function') {
-          html = purify.sanitize(html);
-        } else {
-          // CRITICAL: Fail hard instead of silent fallback
-          throw new Error(
-            'Reflex: SECURITY ERROR - m-html requires DOMPurify.\n' +
-            'Configure it with: app.configure({ domPurify: DOMPurify })\n' +
-            'Install: npm install dompurify\n' +
-            'Or disable sanitization (UNSAFE): app.configure({ sanitize: false })'
-          );
+        if (self.cfg.sanitize) {
+          // Use configured DOMPurify instance (not global variable)
+          const purify = self.cfg.domPurify;
+          if (purify && typeof purify.sanitize === 'function') {
+            html = purify.sanitize(html);
+          } else {
+            // CRITICAL: Fail hard instead of silent fallback
+            throw new Error(
+              'Reflex: SECURITY ERROR - m-html requires DOMPurify.\n' +
+              'Configure it with: app.configure({ domPurify: DOMPurify })\n' +
+              'Install: npm install dompurify\n' +
+              'Or disable sanitization (UNSAFE): app.configure({ sanitize: false })'
+            );
+          }
         }
-      }
 
-      if (html !== prev) { prev = html; el.innerHTML = html; }
+        if (html !== prev) { prev = html; el.innerHTML = html; }
+      } catch (err) {
+        self._handleError(err, o);
+      }
     });
     e.o = o;
     this._reg(el, e.kill);
@@ -547,25 +603,29 @@ export const CompilerMixin = {
     let prev, transitioning = false;
 
     const e = this._ef(() => {
-      const show = !!fn(this.s, o);
-      const next = show ? d : 'none';
+      try {
+        const show = !!fn(this.s, o);
+        const next = show ? d : 'none';
 
-      if (next !== prev && !transitioning) {
-        if (trans && prev !== undefined) {
-          transitioning = true;
-          if (show) {
-            el.style.display = d;
-            runTransition(el, trans, 'enter', () => { transitioning = false; });
+        if (next !== prev && !transitioning) {
+          if (trans && prev !== undefined) {
+            transitioning = true;
+            if (show) {
+              el.style.display = d;
+              runTransition(el, trans, 'enter', () => { transitioning = false; });
+            } else {
+              runTransition(el, trans, 'leave', () => {
+                el.style.display = 'none';
+                transitioning = false;
+              });
+            }
           } else {
-            runTransition(el, trans, 'leave', () => {
-              el.style.display = 'none';
-              transitioning = false;
-            });
+            el.style.display = next;
           }
-        } else {
-          el.style.display = next;
+          prev = next;
         }
-        prev = next;
+      } catch (err) {
+        this._handleError(err, o);
       }
     });
     e.o = o;
@@ -585,28 +645,32 @@ export const CompilerMixin = {
     const isLazy = modifiers.includes('lazy');
 
     const e = this._ef(() => {
-      const v = fn(this.s, o);
-      if (isChk) {
-        // Handle checkbox array binding
-        if (Array.isArray(v)) {
-          el.checked = v.includes(el.value);
+      try {
+        const v = fn(this.s, o);
+        if (isChk) {
+          // Handle checkbox array binding
+          if (Array.isArray(v)) {
+            el.checked = v.includes(el.value);
+          } else {
+            el.checked = !!v;
+          }
+        } else if (isRadio) {
+          // Radio button: check if value matches model
+          el.checked = String(v) === String(el.value);
+        } else if (isMultiSelect) {
+          // For multi-select, v should be an array of selected values
+          const selectedValues = Array.isArray(v) ? v : [];
+          // Update the selected options
+          const options = el.options;
+          for (let i = 0; i < options.length; i++) {
+            options[i].selected = selectedValues.includes(options[i].value);
+          }
         } else {
-          el.checked = !!v;
+          const next = v == null ? '' : String(v);
+          if (el.value !== next) el.value = next;
         }
-      } else if (isRadio) {
-        // Radio button: check if value matches model
-        el.checked = String(v) === String(el.value);
-      } else if (isMultiSelect) {
-        // For multi-select, v should be an array of selected values
-        const selectedValues = Array.isArray(v) ? v : [];
-        // Update the selected options
-        const options = el.options;
-        for (let i = 0; i < options.length; i++) {
-          options[i].selected = selectedValues.includes(options[i].value);
-        }
-      } else {
-        const next = v == null ? '' : String(v);
-        if (el.value !== next) el.value = next;
+      } catch (err) {
+        this._handleError(err, o);
       }
     });
     e.o = o;
@@ -845,21 +909,18 @@ export const CompilerMixin = {
         if (m.includes('self') && e.target !== t) { t = t.parentNode; continue; }
 
         // Check key modifiers
-        if (m.length > 0) {
-          const hasKeyMod = m.some(mod => ['enter', 'esc', 'space', 'tab', 'ctrl', 'alt', 'shift', 'meta'].includes(mod));
-          if (hasKeyMod && e.key) {
-            // Key-specific modifiers
-            if (m.includes('enter') && e.key !== 'Enter') { t = t.parentNode; continue; }
-            if (m.includes('esc') && e.key !== 'Escape') { t = t.parentNode; continue; }
-            if (m.includes('space') && e.key !== ' ') { t = t.parentNode; continue; }
-            if (m.includes('tab') && e.key !== 'Tab') { t = t.parentNode; continue; }
-            // System key modifiers
-            if (m.includes('ctrl') && !e.ctrlKey) { t = t.parentNode; continue; }
-            if (m.includes('alt') && !e.altKey) { t = t.parentNode; continue; }
-            if (m.includes('shift') && !e.shiftKey) { t = t.parentNode; continue; }
-            if (m.includes('meta') && !e.metaKey) { t = t.parentNode; continue; }
-          }
+        // Key-specific modifiers (enter, esc, etc.)
+        if (e.key) {
+          if (m.includes('enter') && e.key !== 'Enter') { t = t.parentNode; continue; }
+          if (m.includes('esc') && e.key !== 'Escape') { t = t.parentNode; continue; }
+          if (m.includes('space') && e.key !== ' ') { t = t.parentNode; continue; }
+          if (m.includes('tab') && e.key !== 'Tab') { t = t.parentNode; continue; }
         }
+        // System key modifiers (ctrl, alt, shift, meta) - work with any event type
+        if (m.includes('ctrl') && !e.ctrlKey) { t = t.parentNode; continue; }
+        if (m.includes('alt') && !e.altKey) { t = t.parentNode; continue; }
+        if (m.includes('shift') && !e.shiftKey) { t = t.parentNode; continue; }
+        if (m.includes('meta') && !e.metaKey) { t = t.parentNode; continue; }
 
         if (m.includes('prevent')) e.preventDefault();
         if (m.includes('stop')) e.stopPropagation();
