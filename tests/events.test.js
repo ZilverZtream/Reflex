@@ -237,6 +237,30 @@ describe('Events', () => {
       await vi.advanceTimersByTimeAsync(100);
       expect(app.s.count).toBe(1);
     });
+
+    it('should cleanup debounce timer when component unmounts', async () => {
+      document.body.innerHTML = '<div m-if="show"><button @click.debounce.300ms="count++">Click</button></div>';
+      const app = new Reflex({ show: true, count: 0 });
+
+      await vi.runAllTimersAsync();
+
+      const button = document.querySelector('button');
+      expect(button).toBeTruthy();
+
+      // Click the button
+      dispatchClick(button);
+      expect(app.s.count).toBe(0); // Not fired yet due to debounce
+
+      // Immediately unmount the component
+      app.s.show = false;
+      await vi.runAllTimersAsync();
+
+      // Advance past the debounce delay
+      await vi.advanceTimersByTimeAsync(400);
+
+      // The callback should NOT have fired because cleanup cleared the timer
+      expect(app.s.count).toBe(0);
+    });
   });
 
   describe('Throttle Modifier', () => {
