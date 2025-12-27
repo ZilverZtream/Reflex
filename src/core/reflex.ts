@@ -61,6 +61,7 @@ export class Reflex {
   declare _dh: Map<any, any>;
   declare _dr: Element | null;
   declare _cp: Map<string, any>;
+  declare _acp: Map<string, any>;  // Async component factories
   declare _cd: Map<string, any>;
   declare _refs: Record<string, any>;
   declare _parser: any;
@@ -108,6 +109,7 @@ export class Reflex {
 
     // === EXTENSIONS ===
     this._cp = new Map();     // Component Definitions
+    this._acp = new Map();    // Async Component Factories
     this._cd = new Map();     // Custom Directives
     this._refs = {};          // $refs registry
     this._parser = null;      // CSP parser (lazy-loaded)
@@ -184,14 +186,52 @@ export class Reflex {
   /**
    * Register a component definition.
    *
+   * Supports both synchronous and asynchronous component definitions:
+   * - Sync: app.component('name', { template: '...', setup: ... })
+   * - Async: app.component('name', () => import('./Component.js'))
+   *
+   * Async components support a fallback placeholder that displays while loading.
+   *
    * @param {string} name - Component tag name
-   * @param {Object} def - Component definition
-   * @param {string} def.template - HTML template
+   * @param {Object|Function} def - Component definition or async factory
+   * @param {string} def.template - HTML template (sync only)
    * @param {string[]} def.props - Prop names
    * @param {Function} def.setup - Setup function
+   * @param {string} def.fallback - Fallback template for async components
    * @returns {Reflex} This instance for chaining
+   *
+   * @example
+   * // Synchronous component
+   * app.component('my-button', {
+   *   template: '<button>{{ label }}</button>',
+   *   props: ['label']
+   * });
+   *
+   * @example
+   * // Async component with dynamic import
+   * app.component('heavy-chart', () => import('./HeavyChart.js'));
+   *
+   * @example
+   * // Async component with fallback
+   * app.component('lazy-modal', () => import('./Modal.js'), {
+   *   fallback: '<div class="loading">Loading...</div>'
+   * });
    */
-  component(n, def) {
+  component(n, def, opts?) {
+    const name = n.toLowerCase();
+
+    // Async component: factory function that returns a Promise
+    if (typeof def === 'function') {
+      this._acp.set(name, {
+        factory: def,
+        fallback: opts?.fallback || null,
+        resolved: null,  // Cache resolved definition
+        pending: null    // Shared pending Promise
+      });
+      return this;
+    }
+
+    // Sync component: standard definition object
     const t = document.createElement('template');
     let template = def.template;
 
@@ -210,7 +250,7 @@ export class Reflex {
     }
 
     t.innerHTML = template;
-    this._cp.set(n.toLowerCase(), {
+    this._cp.set(name, {
       _t: t.content.firstElementChild,
       p: def.props || [],
       s: def.setup
@@ -299,10 +339,11 @@ export class Reflex {
 
   /**
    * Component rendering
+   * @returns The component instance element (for use in m-for etc.)
    */
-  _comp(el: Element, tag: string, o: any) {
+  _comp(el: Element, tag: string, o: any): Element {
     const def = this._cp.get(tag);
-    const inst = def._t.cloneNode(true);
+    const inst = def._t.cloneNode(true) as Element;
     const props = this._r({});
     const propDefs = [];
     const hostHandlers = Object.create(null);
@@ -355,6 +396,145 @@ export class Reflex {
 
     this._bnd(inst, scope);
     this._w(inst, scope);
+
+    return inst;
+  }
+
+  /**
+   * Async component rendering with Suspense support.
+   *
+   * This method is only called when an async component is actually used,
+   * keeping the runtime minimal for apps that don't use code-splitting.
+   *
+   * The flow:
+   * 1. Show fallback placeholder (if defined) or a comment marker
+   * 2. Load the component via its factory function
+   * 3. Cache the resolved definition for future instances
+   * 4. Swap the placeholder with the real component
+   *
+   * @param el - The element placeholder in the DOM
+   * @param tag - Component tag name (lowercase)
+   * @param o - Parent scope
+   */
+  _asyncComp(el: Element, tag: string, o: any) {
+    const asyncDef = this._acp.get(tag);
+    const self = this;
+
+    // Capture attributes before replacing element
+    const savedAttrs: { name: string; value: string }[] = [];
+    const attrs = Array.from(el.attributes) as Attr[];
+    for (const a of attrs) {
+      savedAttrs.push({ name: a.name, value: a.value });
+    }
+
+    // Create a marker comment and optional fallback
+    const marker = document.createComment(`async:${tag}`);
+    let fallbackNode: Element | null = null;
+
+    if (asyncDef.fallback) {
+      // Render fallback template
+      const fallbackTpl = document.createElement('template');
+      let fallbackHtml = asyncDef.fallback;
+
+      if (this.cfg.sanitize && typeof DOMPurify !== 'undefined') {
+        fallbackHtml = DOMPurify.sanitize(fallbackHtml, {
+          RETURN_DOM_FRAGMENT: false,
+          WHOLE_DOCUMENT: false
+        });
+      }
+
+      fallbackTpl.innerHTML = fallbackHtml;
+      fallbackNode = fallbackTpl.content.firstElementChild?.cloneNode(true) as Element;
+    }
+
+    // Replace element with marker (and fallback if present)
+    if (fallbackNode) {
+      el.replaceWith(marker, fallbackNode);
+      // Bind the fallback so it can use reactive expressions
+      this._bnd(fallbackNode, o);
+      this._w(fallbackNode, o);
+    } else {
+      el.replaceWith(marker);
+    }
+
+    // Function to mount the real component once loaded
+    const mountComponent = (def) => {
+      // Create a temporary element with saved attributes
+      const tempEl = document.createElement(tag);
+      for (const attr of savedAttrs) {
+        tempEl.setAttribute(attr.name, attr.value);
+      }
+
+      // Register the resolved component in the sync map
+      const t = document.createElement('template');
+      let template = def.template;
+
+      if (self.cfg.sanitize && typeof DOMPurify !== 'undefined') {
+        template = DOMPurify.sanitize(template, {
+          RETURN_DOM_FRAGMENT: false,
+          WHOLE_DOCUMENT: false
+        });
+      }
+
+      t.innerHTML = template;
+      self._cp.set(tag, {
+        _t: t.content.firstElementChild,
+        p: def.props || [],
+        s: def.setup
+      });
+
+      // Remove fallback if present
+      if (fallbackNode && fallbackNode.parentNode) {
+        self._kill(fallbackNode);
+        fallbackNode.remove();
+      }
+
+      // Insert temporary element after marker
+      marker.after(tempEl);
+
+      // Now render the real component (this will replace tempEl)
+      self._comp(tempEl, tag, o);
+
+      // Clean up marker
+      marker.remove();
+    };
+
+    // Check if already resolved (cached)
+    if (asyncDef.resolved) {
+      // Already loaded, mount immediately
+      mountComponent(asyncDef.resolved);
+      return;
+    }
+
+    // Check if already loading (shared promise)
+    if (asyncDef.pending) {
+      asyncDef.pending.then(mountComponent).catch(err => {
+        this._handleError(err, o);
+      });
+      return;
+    }
+
+    // Start loading the component
+    asyncDef.pending = asyncDef.factory()
+      .then(module => {
+        // Support both default export and named export
+        const def = module.default || module;
+        asyncDef.resolved = def;
+        asyncDef.pending = null;
+        return def;
+      });
+
+    asyncDef.pending
+      .then(mountComponent)
+      .catch(err => {
+        asyncDef.pending = null;
+        // Remove fallback on error
+        if (fallbackNode && fallbackNode.parentNode) {
+          self._kill(fallbackNode);
+          fallbackNode.remove();
+        }
+        this._handleError(err, o);
+      });
   }
 
   // === LIFECYCLE ===
