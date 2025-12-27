@@ -492,7 +492,7 @@ export class SafeExprParser {
         // Context lookup
         if (context && name in context) {
           const meta = context[META] || reflex._mf.get(context);
-          if (meta) reflex._tk(meta, name);
+          if (meta) reflex.trackDependency(meta, name);
           return context[name];
         }
         // State lookup
@@ -515,7 +515,7 @@ export class SafeExprParser {
           return undefined;
         }
         const meta = obj[META] || reflex._mf.get(obj);
-        if (meta) reflex._tk(meta, prop);
+        if (meta) reflex.trackDependency(meta, prop);
         return obj[prop];
       }
 

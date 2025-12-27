@@ -27,17 +27,17 @@ interface ReactiveEffect {
 interface ReactivityEngine {
   _e: ReactiveEffect | null;
   _b: number;
-  _pt: Map<ReactiveMeta, Set<ReactiveKey>>;
+  pendingTriggers: Map<ReactiveMeta, Set<ReactiveKey>>;
   _mf: WeakMap<object, ReactiveMeta>;
   s: unknown;
   _dtEmit: (event: string, payload: { target: object; key: ReactiveKey; state: unknown }) => void;
   _wrap: <T>(value: T) => T;
-  _tk: (meta: ReactiveMeta, key: ReactiveKey) => void;
-  _tr: (meta: ReactiveMeta, key: ReactiveKey) => void;
+  trackDependency: (meta: ReactiveMeta, key: ReactiveKey) => void;
+  triggerEffects: (meta: ReactiveMeta, key: ReactiveKey) => void;
   _fpt: () => void;
-  _qj: (effect: ReactiveEffect) => void;
-  _am: (target: any[], method: string, meta: ReactiveMeta) => (...args: any[]) => any;
-  _cm: (
+  queueJob: (effect: ReactiveEffect) => void;
+  wrapArrayMethod: (target: any[], method: string, meta: ReactiveMeta) => (...args: any[]) => any;
+  wrapCollectionMethod: (
     target: Map<any, any> | Set<any>,
     method: ReactiveKey,
     meta: ReactiveMeta,
@@ -88,11 +88,11 @@ export const ArrayHandler: ProxyHandler<any[]> = {
     // Cache array method wrappers to prevent closure factory bug
     if (ARRAY_MUTATORS[k]) {
       if (!meta._am) meta._am = Object.create(null);
-      if (!meta._am[k]) meta._am[k] = engine._am(o, k as string, meta);
+      if (!meta._am[k]) meta._am[k] = engine.wrapArrayMethod(o, k as string, meta);
       return meta._am[k];
     }
 
-    engine._tk(meta, k);
+    engine.trackDependency(meta, k);
     const v = Reflect.get(o, k, rec);
     return engine._wrap(v);
   },
@@ -124,17 +124,17 @@ export const ArrayHandler: ProxyHandler<any[]> = {
 
     meta.v++; // Increment version on mutation
     // Trigger specific key change
-    engine._tr(meta, k);
+    engine.triggerEffects(meta, k);
 
     // OPTIMIZATION: Only trigger ITERATE when structure actually changes
     // Setting existing array elements doesn't need ITERATE
     if (k === 'length') {
       // Length change always affects iteration
-      engine._tr(meta, ITERATE);
+      engine.triggerEffects(meta, ITERATE);
     } else if (isIdx && !had) {
       // New index added (sparse array) - affects iteration and length
-      engine._tr(meta, ITERATE);
-      engine._tr(meta, 'length');
+      engine.triggerEffects(meta, ITERATE);
+      engine.triggerEffects(meta, 'length');
     }
     // Note: Updating existing indices (arr[5] = x when arr.length > 5)
     // does NOT trigger ITERATE, preventing O(N) over-reactivity
@@ -148,9 +148,9 @@ export const ArrayHandler: ProxyHandler<any[]> = {
     if (res) {
       meta.v++; // Increment version on mutation
       const engine = meta.engine;
-      engine._tr(meta, k);
-      engine._tr(meta, ITERATE);
-      engine._tr(meta, 'length');
+      engine.triggerEffects(meta, k);
+      engine.triggerEffects(meta, ITERATE);
+      engine.triggerEffects(meta, 'length');
     }
     return res;
   }
@@ -173,7 +173,7 @@ export const ObjectHandler: ProxyHandler<ReactiveTarget> = {
     }
 
     const engine = meta.engine;
-    engine._tk(meta, k);
+    engine.trackDependency(meta, k);
     const v = Reflect.get(o, k, rec);
     return engine._wrap(v);
   },
@@ -196,8 +196,8 @@ export const ObjectHandler: ProxyHandler<ReactiveTarget> = {
     if (!ok) return false;
 
     meta.v++; // Increment version on mutation
-    engine._tr(meta, k);
-    if (!had) engine._tr(meta, ITERATE);
+    engine.triggerEffects(meta, k);
+    if (!had) engine.triggerEffects(meta, ITERATE);
     return true;
   },
 
@@ -208,8 +208,8 @@ export const ObjectHandler: ProxyHandler<ReactiveTarget> = {
     if (res) {
       meta.v++; // Increment version on mutation
       const engine = meta.engine;
-      engine._tr(meta, k);
-      engine._tr(meta, ITERATE);
+      engine.triggerEffects(meta, k);
+      engine.triggerEffects(meta, ITERATE);
     }
     return res;
   }
@@ -234,13 +234,13 @@ export const MapHandler: ProxyHandler<Map<any, any>> = {
 
     const engine = meta.engine;
 
-    if (k === 'size') { engine._tk(meta, ITERATE); return o.size; }
+    if (k === 'size') { engine.trackDependency(meta, ITERATE); return o.size; }
 
     if ((k === Symbol.iterator || COLLECTION_METHODS[k]) && typeof o[k] === 'function') {
-      return engine._cm(o, k, meta, true);
+      return engine.wrapCollectionMethod(o, k, meta, true);
     }
 
-    engine._tk(meta, k);
+    engine.trackDependency(meta, k);
     return Reflect.get(o, k, rec);
   },
 
@@ -272,13 +272,13 @@ export const SetHandler: ProxyHandler<Set<any>> = {
 
     const engine = meta.engine;
 
-    if (k === 'size') { engine._tk(meta, ITERATE); return o.size; }
+    if (k === 'size') { engine.trackDependency(meta, ITERATE); return o.size; }
 
     if ((k === Symbol.iterator || COLLECTION_METHODS[k]) && typeof o[k] === 'function') {
-      return engine._cm(o, k, meta, false);
+      return engine.wrapCollectionMethod(o, k, meta, false);
     }
 
-    engine._tk(meta, k);
+    engine.trackDependency(meta, k);
     return Reflect.get(o, k, rec);
   },
 
@@ -359,7 +359,7 @@ export const ReactivityMixin = {
   /**
    * Track key access for dependency collection
    */
-  _tk(m: ReactiveMeta, k: ReactiveKey) {
+  trackDependency(m: ReactiveMeta, k: ReactiveKey) {
     if (!this._e) return;
 
     if (Array.isArray(m.r) && typeof k === 'string') {
@@ -378,10 +378,10 @@ export const ReactivityMixin = {
   /**
    * Trigger effects when a key changes
    */
-  _tr(m: ReactiveMeta, k: ReactiveKey) {
+  triggerEffects(m: ReactiveMeta, k: ReactiveKey) {
     if (this._b > 0) {
-      let ks = this._pt.get(m);
-      if (!ks) this._pt.set(m, ks = new Set());
+      let ks = this.pendingTriggers.get(m);
+      if (!ks) this.pendingTriggers.set(m, ks = new Set());
       ks.add(k);
       return;
     }
@@ -393,7 +393,7 @@ export const ReactivityMixin = {
     if (s) {
       for (const e of s) {
         if (e.f & ACTIVE && !(e.f & RUNNING)) {
-          e.s ? e.s(e) : this._qj(e);
+          e.s ? e.s(e) : this.queueJob(e);
         }
       }
     }
@@ -403,12 +403,12 @@ export const ReactivityMixin = {
    * Flush pending triggers after batch completes
    */
   _fpt() {
-    if (!this._pt.size) return;
-    const pt = this._pt;
-    this._pt = new Map();
+    if (!this.pendingTriggers.size) return;
+    const pt = this.pendingTriggers;
+    this.pendingTriggers = new Map();
     for (const [m, ks] of pt) {
       for (const k of ks) {
-        try { this._tr(m, k); } catch (err) { console.error('Reflex: Error triggering update for key:', k, err); }
+        try { this.triggerEffects(m, k); } catch (err) { console.error('Reflex: Error triggering update for key:', k, err); }
       }
     }
   },
@@ -417,7 +417,7 @@ export const ReactivityMixin = {
    * Create cached array method wrapper
    * Prevents closure factory bug by caching wrappers on meta
    */
-  _am(t: any[], m: string, meta: ReactiveMeta) {
+  wrapArrayMethod(t: any[], m: string, meta: ReactiveMeta) {
     const self = this;
     return function(...args) {
       self._b++;
@@ -426,8 +426,8 @@ export const ReactivityMixin = {
         res = Array.prototype[m].apply(t, args);
 
         meta.v++; // Increment version on array mutation
-        let ks = self._pt.get(meta);
-        if (!ks) self._pt.set(meta, ks = new Set());
+        let ks = self.pendingTriggers.get(meta);
+        if (!ks) self.pendingTriggers.set(meta, ks = new Set());
         ks.add(ITERATE);
         ks.add('length');
 
@@ -452,7 +452,7 @@ export const ReactivityMixin = {
   /**
    * Create cached collection method wrapper for Map/Set
    */
-  _cm(t: Map<any, any> | Set<any>, m: ReactiveKey, meta: ReactiveMeta, isMap: boolean) {
+  wrapCollectionMethod(t: Map<any, any> | Set<any>, m: ReactiveKey, meta: ReactiveMeta, isMap: boolean) {
     if (meta[m]) return meta[m];
     const self = this;
     const proto = isMap ? Map.prototype : Set.prototype;
@@ -460,7 +460,7 @@ export const ReactivityMixin = {
 
     if (m === Symbol.iterator || m === 'entries' || m === 'values' || m === 'keys') {
       return meta[m] = function() {
-        self._tk(meta, ITERATE);
+        self.trackDependency(meta, ITERATE);
         const it = fn.call(t);
         return {
           [Symbol.iterator]() { return this; },
@@ -481,15 +481,15 @@ export const ReactivityMixin = {
 
     if (m === 'get') return meta[m] = k => {
       const rk = self.toRaw(k);
-      self._tk(meta, rk);
+      self.trackDependency(meta, rk);
       return self._wrap((t as Map<any, any>).get(rk));
     };
     if (m === 'has') return meta[m] = k => {
       const rk = self.toRaw(k);
-      self._tk(meta, rk);
+      self.trackDependency(meta, rk);
       return (t as Map<any, any> | Set<any>).has(rk);
     };
-    if (m === 'forEach') return meta[m] = function(cb, ctx) { self._tk(meta, ITERATE); fn.call(t, (v, k) => cb.call(ctx, self._wrap(v), self._wrap(k), meta.p)); };
+    if (m === 'forEach') return meta[m] = function(cb, ctx) { self.trackDependency(meta, ITERATE); fn.call(t, (v, k) => cb.call(ctx, self._wrap(v), self._wrap(k), meta.p)); };
 
     if (m === 'set') return meta[m] = function(k, v) {
       const map = t as Map<any, any>;
@@ -502,8 +502,8 @@ export const ReactivityMixin = {
         meta.v++; // Increment version on mutation
         self._b++;
         try {
-          let ks = self._pt.get(meta);
-          if (!ks) self._pt.set(meta, ks = new Set());
+          let ks = self.pendingTriggers.get(meta);
+          if (!ks) self.pendingTriggers.set(meta, ks = new Set());
           ks.add(rk); ks.add(ITERATE);
         } finally {
           if (--self._b === 0) {
@@ -522,8 +522,8 @@ export const ReactivityMixin = {
         meta.v++; // Increment version on mutation
         self._b++;
         try {
-          let ks = self._pt.get(meta);
-          if (!ks) self._pt.set(meta, ks = new Set());
+          let ks = self.pendingTriggers.get(meta);
+          if (!ks) self.pendingTriggers.set(meta, ks = new Set());
           ks.add(rv); ks.add(ITERATE);
         } finally {
           if (--self._b === 0) {
@@ -542,8 +542,8 @@ export const ReactivityMixin = {
         meta.v++; // Increment version on mutation
         self._b++;
         try {
-          let ks = self._pt.get(meta);
-          if (!ks) self._pt.set(meta, ks = new Set());
+          let ks = self.pendingTriggers.get(meta);
+          if (!ks) self.pendingTriggers.set(meta, ks = new Set());
           ks.add(rk); ks.add(ITERATE);
         } finally {
           if (--self._b === 0) {
@@ -559,8 +559,8 @@ export const ReactivityMixin = {
       meta.v++; // Increment version on mutation
       self._b++;
       try {
-        let ks = self._pt.get(meta);
-        if (!ks) self._pt.set(meta, ks = new Set());
+        let ks = self.pendingTriggers.get(meta);
+        if (!ks) self.pendingTriggers.set(meta, ks = new Set());
         (t as Map<any, any> | Set<any>).forEach((_, k) => ks.add(k));
         ks.add(ITERATE);
         (t as Map<any, any> | Set<any>).clear();
@@ -571,6 +571,6 @@ export const ReactivityMixin = {
       }
     };
 
-    return meta[m] = function() { self._tk(meta, ITERATE); return fn.call(t); };
+    return meta[m] = function() { self.trackDependency(meta, ITERATE); return fn.call(t); };
   }
 };
