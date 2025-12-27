@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Run tests
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+  build:
+    name: Build & Size Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Check bundle sizes
+        run: |
+          echo "Bundle sizes:"
+          ls -lh dist/*.js dist/csp/*.js
+
+          # Check main bundle is under 25KB minified
+          SIZE=$(stat -c%s dist/reflex.min.js 2>/dev/null || stat -f%z dist/reflex.min.js)
+          echo "reflex.min.js: $SIZE bytes"
+          if [ $SIZE -gt 25600 ]; then
+            echo "::warning::Bundle size ($SIZE bytes) exceeds 25KB"
+          fi
+
+      - name: Verify exports
+        run: |
+          node -e "
+            import { Reflex, computeLIS, META, ITERATE } from './dist/reflex.esm.js';
+            console.log('ESM exports OK');
+            if (typeof Reflex !== 'function') throw new Error('Reflex not exported');
+            if (typeof computeLIS !== 'function') throw new Error('computeLIS not exported');
+          "
+
+          node -e "
+            const { Reflex, computeLIS } = require('./dist/reflex.cjs');
+            console.log('CJS exports OK');
+            if (typeof Reflex !== 'function') throw new Error('Reflex not exported');
+          "
+
+          node -e "
+            import { SafeExprParser } from './dist/csp/index.esm.js';
+            console.log('CSP ESM exports OK');
+            if (typeof SafeExprParser !== 'function') throw new Error('SafeExprParser not exported');
+          "
+
+          node -e "
+            const { SafeExprParser } = require('./dist/csp/index.cjs');
+            console.log('CSP CJS exports OK');
+            if (typeof SafeExprParser !== 'function') throw new Error('SafeExprParser not exported');
+          "
+
+  coverage:
+    name: Test Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests with coverage
+        run: npm run test:coverage
+
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v3
+        with:
+          files: coverage/coverage-final.json
+          fail_ci_if_error: false

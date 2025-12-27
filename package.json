@@ -1,5 +1,73 @@
 {
+  "name": "reflex",
+  "version": "1.3.0",
+  "description": "The Direct Reactive Engine - Zero Dependencies, Zero Build, Zero VDOM",
+  "type": "module",
+  "main": "./dist/reflex.cjs",
+  "module": "./dist/reflex.esm.js",
+  "browser": "./dist/reflex.iife.js",
+  "types": "./dist/reflex.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/reflex.esm.js",
+      "require": "./dist/reflex.cjs",
+      "types": "./dist/reflex.d.ts"
+    },
+    "./csp": {
+      "import": "./dist/csp/index.esm.js",
+      "require": "./dist/csp/index.cjs",
+      "types": "./dist/csp/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "node scripts/build.js",
+    "build:watch": "node scripts/build.js --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint src tests",
+    "lint:fix": "eslint src tests --fix",
+    "format": "prettier --write \"src/**/*.js\" \"tests/**/*.js\"",
+    "format:check": "prettier --check \"src/**/*.js\" \"tests/**/*.js\"",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run lint && npm run test && npm run build"
+  },
+  "keywords": [
+    "reactive",
+    "framework",
+    "dom",
+    "proxy",
+    "no-vdom",
+    "lightweight",
+    "csp-safe",
+    "zero-dependency"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZilverZtream/Reflex.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ZilverZtream/Reflex/issues"
+  },
+  "homepage": "https://github.com/ZilverZtream/Reflex#readme",
   "devDependencies": {
-    "terser": "^5.44.1"
+    "@types/node": "^20.10.0",
+    "esbuild": "^0.19.8",
+    "eslint": "^8.55.0",
+    "happy-dom": "^12.10.3",
+    "prettier": "^3.1.1",
+    "terser": "^5.44.1",
+    "typescript": "^5.3.2",
+    "vitest": "^1.0.4"
+  },
+  "engines": {
+    "node": ">=16.0.0"
   }
 }
