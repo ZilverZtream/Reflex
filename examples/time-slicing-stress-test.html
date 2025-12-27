@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reflex - Time Slicing Stress Test</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      padding: 2rem;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 16px;
+      padding: 2rem;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    }
+
+    h1 {
+      color: #333;
+      margin-bottom: 0.5rem;
+    }
+
+    .subtitle {
+      color: #666;
+      margin-bottom: 2rem;
+      font-size: 0.9rem;
+    }
+
+    .test-controls {
+      display: flex;
+      gap: 1rem;
+      margin-bottom: 2rem;
+      flex-wrap: wrap;
+    }
+
+    button {
+      padding: 1rem 2rem;
+      font-size: 1rem;
+      font-weight: 600;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s;
+      color: white;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+    }
+
+    .btn-secondary {
+      background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+    }
+
+    .btn-secondary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px rgba(245, 87, 108, 0.4);
+    }
+
+    .stats {
+      display: flex;
+      gap: 2rem;
+      margin-bottom: 2rem;
+      flex-wrap: wrap;
+    }
+
+    .stat-card {
+      flex: 1;
+      min-width: 150px;
+      padding: 1rem;
+      background: linear-gradient(135deg, #667eea15 0%, #764ba215 100%);
+      border-radius: 8px;
+      border: 2px solid #667eea;
+    }
+
+    .stat-label {
+      font-size: 0.8rem;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .stat-value {
+      font-size: 2rem;
+      font-weight: 700;
+      color: #667eea;
+      margin-top: 0.25rem;
+    }
+
+    .demo-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2rem;
+      margin-top: 2rem;
+    }
+
+    @media (max-width: 768px) {
+      .demo-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .animation-box {
+      background: linear-gradient(135deg, #667eea15 0%, #764ba215 100%);
+      border-radius: 8px;
+      padding: 2rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 300px;
+      border: 2px solid #667eea;
+    }
+
+    .animation-box h3 {
+      margin-bottom: 1rem;
+      color: #333;
+    }
+
+    .spinner {
+      width: 100px;
+      height: 100px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border-radius: 8px;
+      animation: spin 2s linear infinite;
+      box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+    }
+
+    @keyframes spin {
+      from {
+        transform: rotate(0deg);
+      }
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    .list-box {
+      background: #f8f9fa;
+      border-radius: 8px;
+      padding: 1rem;
+      border: 2px solid #e9ecef;
+    }
+
+    .list-box h3 {
+      margin-bottom: 1rem;
+      color: #333;
+    }
+
+    .list-container {
+      max-height: 300px;
+      overflow-y: auto;
+      background: white;
+      border-radius: 4px;
+      padding: 0.5rem;
+    }
+
+    .list-item {
+      padding: 0.5rem;
+      border-bottom: 1px solid #e9ecef;
+      font-size: 0.9rem;
+      color: #666;
+    }
+
+    .list-item:last-child {
+      border-bottom: none;
+    }
+
+    .info-box {
+      margin-top: 2rem;
+      padding: 1rem;
+      background: #fff3cd;
+      border-left: 4px solid #ffc107;
+      border-radius: 4px;
+    }
+
+    .info-box h4 {
+      color: #856404;
+      margin-bottom: 0.5rem;
+    }
+
+    .info-box p {
+      color: #856404;
+      font-size: 0.9rem;
+      line-height: 1.6;
+    }
+
+    .success-box {
+      background: #d4edda;
+      border-left-color: #28a745;
+    }
+
+    .success-box h4,
+    .success-box p {
+      color: #155724;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🚀 Cooperative Scheduling (Time Slicing) Stress Test</h1>
+    <p class="subtitle">This test verifies that Reflex can handle massive state updates without freezing the UI</p>
+
+    <div class="test-controls">
+      <button class="btn-primary" @click="app.stressTest()">
+        Run Stress Test (10,000 Updates)
+      </button>
+      <button class="btn-secondary" @click="app.clearList()">
+        Clear List
+      </button>
+    </div>
+
+    <div class="stats">
+      <div class="stat-card">
+        <div class="stat-label">Items in List</div>
+        <div class="stat-value">{{ app.s.items.length }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Updates Count</div>
+        <div class="stat-value">{{ app.s.updateCount }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Status</div>
+        <div class="stat-value" :style="{ fontSize: '1.2rem' }">{{ app.s.status }}</div>
+      </div>
+    </div>
+
+    <div class="demo-grid">
+      <div class="animation-box">
+        <h3>Continuous Animation</h3>
+        <div class="spinner"></div>
+        <p style="margin-top: 1rem; text-align: center; color: #666;">
+          This spinner should continue rotating smoothly even during massive updates
+        </p>
+      </div>
+
+      <div class="list-box">
+        <h3>Live Updates (Last 100 items)</h3>
+        <div class="list-container">
+          <template :for="item in app.computed(() => app.s.items.slice(-100))">
+            <div class="list-item">{{ item }}</div>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <div class="info-box">
+      <h4>📋 How This Test Works</h4>
+      <p>
+        When you click "Run Stress Test", the application will queue 10,000 state updates.
+        <strong>Without time slicing</strong>, the browser would freeze until all updates complete,
+        causing the CSS animation to stutter or pause.
+        <strong>With time slicing</strong>, the scheduler yields to the browser every 5ms,
+        allowing the animation to stay smooth throughout the entire update process.
+      </p>
+    </div>
+
+    <div class="info-box success-box" :if="app.s.updateCount >= 10000">
+      <h4>✅ Test Completed Successfully!</h4>
+      <p>
+        If the spinner above continued rotating smoothly during the 10,000 updates,
+        then cooperative scheduling is working correctly. The time slicing mechanism
+        prevented UI freezes by yielding to the browser for rendering.
+      </p>
+    </div>
+  </div>
+
+  <script type="module">
+    import { Reflex } from '../src/index.ts';
+
+    const app = new Reflex({
+      state: {
+        items: [],
+        updateCount: 0,
+        status: 'Ready'
+      },
+      methods: {
+        stressTest() {
+          app.s.status = 'Running...';
+          app.s.updateCount = 0;
+          app.s.items = [];
+
+          // Trigger 10,000 updates synchronously to stress test the scheduler
+          // Without time slicing, this would freeze the UI and pause the CSS animation
+          // With time slicing, the scheduler yields every 5ms to keep the UI responsive
+          requestAnimationFrame(() => {
+            for (let i = 0; i < 10000; i++) {
+              app.s.items.push(`Item ${i + 1} - ${new Date().toLocaleTimeString()}`);
+              app.s.updateCount = i + 1;
+            }
+            app.s.status = 'Complete! ✅';
+          });
+        },
+
+        clearList() {
+          app.s.items = [];
+          app.s.updateCount = 0;
+          app.s.status = 'Ready';
+        }
+      }
+    });
+
+    app.mount(document.body);
+    window.app = app; // For debugging
+  </script>
+</body>
+</html>
