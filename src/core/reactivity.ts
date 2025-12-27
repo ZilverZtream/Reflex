@@ -15,14 +15,59 @@ import {
   ARRAY_MUTATORS, REORDER_METHODS, COLLECTION_METHODS
 } from './symbols.js';
 
+type ReactiveKey = PropertyKey;
+
+interface ReactiveEffect {
+  f: number;
+  d: Array<Set<ReactiveEffect>>;
+  s: ((effect: ReactiveEffect) => void) | null;
+}
+
+interface ReactivityEngine {
+  _e: ReactiveEffect | null;
+  _b: number;
+  _pt: Map<ReactiveMeta, Set<ReactiveKey>>;
+  _mf: WeakMap<object, ReactiveMeta>;
+  s: unknown;
+  _dtEmit: (event: string, payload: { target: object; key: ReactiveKey; state: unknown }) => void;
+  _wrap: <T>(value: T) => T;
+  _tk: (meta: ReactiveMeta, key: ReactiveKey) => void;
+  _tr: (meta: ReactiveMeta, key: ReactiveKey) => void;
+  _fpt: () => void;
+  _qj: (effect: ReactiveEffect) => void;
+  _am: (target: any[], method: string, meta: ReactiveMeta) => (...args: any[]) => any;
+  _cm: (
+    target: Map<any, any> | Set<any>,
+    method: ReactiveKey,
+    meta: ReactiveMeta,
+    isMap: boolean
+  ) => (...args: any[]) => any;
+  toRaw: <T>(value: T) => T;
+}
+
+interface ReactiveMeta {
+  p: any;
+  r: object;
+  d: Map<ReactiveKey, Set<ReactiveEffect>>;
+  ai: boolean;
+  _am: Record<string | symbol, (...args: any[]) => any> | null;
+  engine: ReactivityEngine;
+  [key: string | symbol]: any;
+}
+
+type ReactiveTarget = Record<ReactiveKey, any> & {
+  [META]?: ReactiveMeta;
+  [SKIP]?: boolean;
+};
+
 // === STATIC PROXY HANDLERS ===
 // Optimization: Define handlers ONCE to eliminate per-object allocation.
 // Each reactive object reuses the same handler object.
 // The engine (Reflex instance) is stored on meta.engine.
 
-export const ArrayHandler = {
+export const ArrayHandler: ProxyHandler<any[]> = {
   get(o, k, rec) {
-    const meta = o[META];
+    const meta = (o as ReactiveTarget)[META] as ReactiveMeta;
     if (k === META) return meta;
     if (k === SKIP) return o[SKIP];
 
@@ -34,7 +79,7 @@ export const ArrayHandler = {
     // Cache array method wrappers to prevent closure factory bug
     if (ARRAY_MUTATORS[k]) {
       if (!meta._am) meta._am = Object.create(null);
-      if (!meta._am[k]) meta._am[k] = engine._am(o, k, meta);
+      if (!meta._am[k]) meta._am[k] = engine._am(o, k as string, meta);
       return meta._am[k];
     }
 
@@ -44,7 +89,7 @@ export const ArrayHandler = {
   },
 
   set(o, k, v, rec) {
-    const meta = o[META];
+    const meta = (o as ReactiveTarget)[META] as ReactiveMeta;
     const engine = meta.engine;
     const raw = engine.toRaw(v);
     const old = o[k];
@@ -73,7 +118,7 @@ export const ArrayHandler = {
   },
 
   deleteProperty(o, k) {
-    const meta = o[META];
+    const meta = (o as ReactiveTarget)[META] as ReactiveMeta;
     if (!(k in o)) return true;
     const res = Reflect.deleteProperty(o, k);
     if (res) {
@@ -86,9 +131,9 @@ export const ArrayHandler = {
   }
 };
 
-export const ObjectHandler = {
+export const ObjectHandler: ProxyHandler<ReactiveTarget> = {
   get(o, k, rec) {
-    const meta = o[META];
+    const meta = o[META] as ReactiveMeta;
     if (k === META) return meta;
     if (k === SKIP) return o[SKIP];
 
@@ -102,7 +147,7 @@ export const ObjectHandler = {
   },
 
   set(o, k, v, rec) {
-    const meta = o[META];
+    const meta = o[META] as ReactiveMeta;
     const engine = meta.engine;
     const raw = engine.toRaw(v);
     const old = o[k];
@@ -118,7 +163,7 @@ export const ObjectHandler = {
   },
 
   deleteProperty(o, k) {
-    const meta = o[META];
+    const meta = o[META] as ReactiveMeta;
     if (!(k in o)) return true;
     const res = Reflect.deleteProperty(o, k);
     if (res) {
@@ -130,9 +175,9 @@ export const ObjectHandler = {
   }
 };
 
-export const MapHandler = {
+export const MapHandler: ProxyHandler<Map<any, any>> = {
   get(o, k, rec) {
-    const meta = o[META];
+    const meta = (o as Map<any, any> & ReactiveTarget)[META] as ReactiveMeta;
     if (k === META) return meta;
     if (k === SKIP) return o[SKIP];
 
@@ -162,9 +207,9 @@ export const MapHandler = {
   }
 };
 
-export const SetHandler = {
+export const SetHandler: ProxyHandler<Set<any>> = {
   get(o, k, rec) {
-    const meta = o[META];
+    const meta = (o as Set<any> & ReactiveTarget)[META] as ReactiveMeta;
     if (k === META) return meta;
     if (k === SKIP) return o[SKIP];
 
@@ -204,33 +249,40 @@ export const ReactivityMixin = {
    * @param {Object} t - Target object
    * @returns {Proxy} Reactive proxy
    */
-  _r(t) {
+  _r<T>(t: T): T {
     if (t === null || typeof t !== 'object') return t;
-    if (t[SKIP]) return t;
+    if ((t as ReactiveTarget)[SKIP]) return t;
     if (t instanceof Node) return t;
 
-    const existing = t[META] || this._mf.get(t);
+    const existing = (t as ReactiveTarget)[META] || this._mf.get(t as object);
     if (existing) return existing.p;
 
     // Store engine reference on meta for static handler access
-    const meta = { p: null, r: t, d: new Map(), ai: false, _am: null, engine: this };
+    const meta: ReactiveMeta = {
+      p: null,
+      r: t as object,
+      d: new Map(),
+      ai: false,
+      _am: null,
+      engine: this
+    };
     const isArr = Array.isArray(t);
     const isMap = t instanceof Map;
     const isSet = t instanceof Set;
 
     // Use static handlers - ZERO allocation per reactive object
-    let h;
+    let h: ProxyHandler<any>;
     if (isArr) h = ArrayHandler;
     else if (isMap) h = MapHandler;
     else if (isSet) h = SetHandler;
     else h = ObjectHandler;
 
-    meta.p = new Proxy(t, h);
+    meta.p = new Proxy(t as object, h);
 
     if (Object.isExtensible(t)) {
-      Object.defineProperty(t, META, { value: meta, configurable: true });
+      Object.defineProperty(t as object, META, { value: meta, configurable: true });
     } else {
-      this._mf.set(t, meta);
+      this._mf.set(t as object, meta);
     }
 
     return meta.p;
@@ -239,8 +291,11 @@ export const ReactivityMixin = {
   /**
    * Wrap a value in a reactive proxy if applicable
    */
-  _wrap(v) {
-    return v !== null && typeof v === 'object' && !v[SKIP] && !(v instanceof Node)
+  _wrap<T>(v: T): T {
+    return v !== null &&
+      typeof v === 'object' &&
+      !(v as ReactiveTarget)[SKIP] &&
+      !(v instanceof Node)
       ? this._r(v)
       : v;
   },
@@ -248,7 +303,7 @@ export const ReactivityMixin = {
   /**
    * Track key access for dependency collection
    */
-  _tk(m, k) {
+  _tk(m: ReactiveMeta, k: ReactiveKey) {
     if (!this._e) return;
 
     if (Array.isArray(m.r) && typeof k === 'string') {
@@ -267,7 +322,7 @@ export const ReactivityMixin = {
   /**
    * Trigger effects when a key changes
    */
-  _tr(m, k) {
+  _tr(m: ReactiveMeta, k: ReactiveKey) {
     if (this._b > 0) {
       let ks = this._pt.get(m);
       if (!ks) this._pt.set(m, ks = new Set());
@@ -305,7 +360,7 @@ export const ReactivityMixin = {
    * Create cached array method wrapper
    * Prevents closure factory bug by caching wrappers on meta
    */
-  _am(t, m, meta) {
+  _am(t: any[], m: string, meta: ReactiveMeta) {
     const self = this;
     return function(...args) {
       self._b++;
@@ -339,11 +394,11 @@ export const ReactivityMixin = {
   /**
    * Create cached collection method wrapper for Map/Set
    */
-  _cm(t, m, meta, isMap) {
+  _cm(t: Map<any, any> | Set<any>, m: ReactiveKey, meta: ReactiveMeta, isMap: boolean) {
     if (meta[m]) return meta[m];
     const self = this;
     const proto = isMap ? Map.prototype : Set.prototype;
-    const fn = proto[m];
+    const fn = (proto as any)[m];
 
     if (m === Symbol.iterator || m === 'entries' || m === 'values' || m === 'keys') {
       return meta[m] = function() {
@@ -366,13 +421,25 @@ export const ReactivityMixin = {
       };
     }
 
-    if (m === 'get') return meta[m] = k => { const rk = self.toRaw(k); self._tk(meta, rk); return self._wrap(fn.call(t, rk)); };
-    if (m === 'has') return meta[m] = k => { const rk = self.toRaw(k); self._tk(meta, rk); return fn.call(t, rk); };
+    if (m === 'get') return meta[m] = k => {
+      const rk = self.toRaw(k);
+      self._tk(meta, rk);
+      return self._wrap((t as Map<any, any>).get(rk));
+    };
+    if (m === 'has') return meta[m] = k => {
+      const rk = self.toRaw(k);
+      self._tk(meta, rk);
+      return (t as Map<any, any> | Set<any>).has(rk);
+    };
     if (m === 'forEach') return meta[m] = function(cb, ctx) { self._tk(meta, ITERATE); fn.call(t, (v, k) => cb.call(ctx, self._wrap(v), self._wrap(k), meta.p)); };
 
     if (m === 'set') return meta[m] = function(k, v) {
-      const rk = self.toRaw(k), rv = self.toRaw(v), had = t.has(rk), old = had ? t.get(rk) : undefined;
-      fn.call(t, rk, rv);
+      const map = t as Map<any, any>;
+      const rk = self.toRaw(k);
+      const rv = self.toRaw(v);
+      const had = map.has(rk);
+      const old = had ? map.get(rk) : undefined;
+      map.set(rk, rv);
       if (!had || !Object.is(old, rv)) {
         self._b++;
         try {
@@ -390,8 +457,9 @@ export const ReactivityMixin = {
 
     if (m === 'add') return meta[m] = function(v) {
       const rv = self.toRaw(v);
-      if (!t.has(rv)) {
-        fn.call(t, rv);
+      const set = t as Set<any>;
+      if (!set.has(rv)) {
+        set.add(rv);
         self._b++;
         try {
           let ks = self._pt.get(meta);
@@ -407,7 +475,9 @@ export const ReactivityMixin = {
     };
 
     if (m === 'delete') return meta[m] = k => {
-      const rk = self.toRaw(k), had = t.has(rk), res = fn.call(t, rk);
+      const rk = self.toRaw(k);
+      const had = (t as Map<any, any> | Set<any>).has(rk);
+      const res = (t as Map<any, any> | Set<any>).delete(rk);
       if (had) {
         self._b++;
         try {
@@ -424,13 +494,14 @@ export const ReactivityMixin = {
     };
 
     if (m === 'clear') return meta[m] = () => {
-      if (!t.size) return;
+      if (!(t as Map<any, any> | Set<any>).size) return;
       self._b++;
       try {
         let ks = self._pt.get(meta);
         if (!ks) self._pt.set(meta, ks = new Set());
-        t.forEach((_, k) => ks.add(k)); ks.add(ITERATE);
-        fn.call(t);
+        (t as Map<any, any> | Set<any>).forEach((_, k) => ks.add(k));
+        ks.add(ITERATE);
+        (t as Map<any, any> | Set<any>).clear();
       } finally {
         if (--self._b === 0) {
           try { self._fpt(); } catch (err) { console.error('Reflex: Error flushing pending triggers:', err); }

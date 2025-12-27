@@ -19,17 +19,21 @@ import { META, RESERVED, UNSAFE_PROPS, UNSAFE_EXPR_RE, ID_RE } from './symbols.j
  * cache thrashing that would cause compilation storms.
  */
 export class ExprCache {
+  declare max: number;
+  declare cache: Map<string, any>;
+  declare _evictCount: number;
+
   constructor(maxSize = 1000) {
     this.max = maxSize;
     this.cache = new Map();
     this._evictCount = Math.max(1, Math.floor(maxSize * 0.1));
   }
 
-  get(key) {
+  get(key: string) {
     return this.cache.get(key);
   }
 
-  set(key, value) {
+  set<T>(key: string, value: T): T {
     // FIFO eviction: remove oldest entries when at capacity
     // Map maintains insertion order, so first entries are oldest
     if (this.cache.size >= this.max) {
@@ -44,7 +48,7 @@ export class ExprCache {
     return value;
   }
 
-  has(key) {
+  has(key: string) {
     return this.cache.has(key);
   }
 
@@ -64,7 +68,7 @@ export const ExprMixin = {
    * @param {boolean} isH - Is handler mode (no return value expected)
    * @returns {Function} Evaluator (state, context, $event, $el) => result
    */
-  _fn(exp, isH) {
+  _fn(exp, isH = false) {
     const k = (isH ? 'H:' : '') + exp;
     const cached = this._ec.get(k);
     if (cached) return cached;

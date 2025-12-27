@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { computeLIS } from '../src/core/reconcile.js';
+import { computeLIS } from '../src/core/reconcile.ts';
 
 describe('computeLIS', () => {
   describe('Basic Cases', () => {

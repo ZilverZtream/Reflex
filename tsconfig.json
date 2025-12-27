@@ -2,8 +2,9 @@
   "compilerOptions": {
     "target": "ES2020",
     "module": "ESNext",
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
     "allowJs": true,
+    "allowImportingTsExtensions": true,
     "checkJs": true,
     "noEmit": true,
     "strict": false,
@@ -12,6 +13,6 @@
     "resolveJsonModule": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.js", "tests/**/*.js"],
+  "include": ["src/**/*.ts", "tests/**/*.js"],
   "exclude": ["node_modules", "dist"]
 }

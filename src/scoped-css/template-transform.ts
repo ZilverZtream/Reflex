@@ -201,7 +201,12 @@ export function injectScopeAttribute(attrs, scopeAttr) {
  * @param {Set<string>} [options.skip] - Additional elements to skip
  * @returns {string} Transformed template
  */
-export function transformTemplate(template, scopeId, options = {}) {
+export interface TemplateTransformOptions {
+  scopeSlots?: boolean;
+  skip?: Set<string>;
+}
+
+export function transformTemplate(template: string, scopeId: string, options: TemplateTransformOptions = {}) {
   const {
     scopeSlots = false,
     skip = new Set()

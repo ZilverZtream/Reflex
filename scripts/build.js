@@ -50,21 +50,21 @@ const builds = [
   // Main library - ESM
   {
     ...commonOptions,
-    entryPoints: [path.join(srcDir, 'index.js')],
+    entryPoints: [path.join(srcDir, 'index.ts')],
     outfile: path.join(distDir, 'reflex.esm.js'),
     format: 'esm',
   },
   // Main library - CJS
   {
     ...commonOptions,
-    entryPoints: [path.join(srcDir, 'index.js')],
+    entryPoints: [path.join(srcDir, 'index.ts')],
     outfile: path.join(distDir, 'reflex.cjs'),
     format: 'cjs',
   },
   // Main library - IIFE (browser)
   {
     ...commonOptions,
-    entryPoints: [path.join(srcDir, 'index.js')],
+    entryPoints: [path.join(srcDir, 'index.ts')],
     outfile: path.join(distDir, 'reflex.iife.js'),
     format: 'iife',
     globalName: 'Reflex',
@@ -75,7 +75,7 @@ const builds = [
   // Main library - Minified IIFE
   {
     ...commonOptions,
-    entryPoints: [path.join(srcDir, 'index.js')],
+    entryPoints: [path.join(srcDir, 'index.ts')],
     outfile: path.join(distDir, 'reflex.min.js'),
     format: 'iife',
     globalName: 'Reflex',
@@ -88,21 +88,21 @@ const builds = [
   // CSP module - ESM
   {
     ...commonOptions,
-    entryPoints: [path.join(srcDir, 'csp', 'index.js')],
+    entryPoints: [path.join(srcDir, 'csp', 'index.ts')],
     outfile: path.join(distDir, 'csp', 'index.esm.js'),
     format: 'esm',
   },
   // CSP module - CJS
   {
     ...commonOptions,
-    entryPoints: [path.join(srcDir, 'csp', 'index.js')],
+    entryPoints: [path.join(srcDir, 'csp', 'index.ts')],
     outfile: path.join(distDir, 'csp', 'index.cjs'),
     format: 'cjs',
   },
   // CSP module - IIFE
   {
     ...commonOptions,
-    entryPoints: [path.join(srcDir, 'csp', 'index.js')],
+    entryPoints: [path.join(srcDir, 'csp', 'index.ts')],
     outfile: path.join(distDir, 'csp', 'index.iife.js'),
     format: 'iife',
     globalName: 'ReflexCSP',
@@ -113,7 +113,7 @@ const builds = [
   // Hydration module - ESM
   {
     ...commonOptions,
-    entryPoints: [path.join(srcDir, 'hydration', 'index.js')],
+    entryPoints: [path.join(srcDir, 'hydration', 'index.ts')],
     outfile: path.join(distDir, 'hydration', 'index.esm.js'),
     format: 'esm',
     // Mark core modules as external to avoid duplication
@@ -122,7 +122,7 @@ const builds = [
   // Hydration module - CJS
   {
     ...commonOptions,
-    entryPoints: [path.join(srcDir, 'hydration', 'index.js')],
+    entryPoints: [path.join(srcDir, 'hydration', 'index.ts')],
     outfile: path.join(distDir, 'hydration', 'index.cjs'),
     format: 'cjs',
     external: ['../core/*'],
@@ -130,7 +130,7 @@ const builds = [
   // Hydration module - IIFE (standalone, includes dependencies)
   {
     ...commonOptions,
-    entryPoints: [path.join(srcDir, 'hydration', 'index.js')],
+    entryPoints: [path.join(srcDir, 'hydration', 'index.ts')],
     outfile: path.join(distDir, 'hydration', 'index.iife.js'),
     format: 'iife',
     globalName: 'ReflexHydration',
@@ -141,7 +141,7 @@ const builds = [
   // Scoped CSS module - ESM (for build tools, Node.js)
   {
     ...commonOptions,
-    entryPoints: [path.join(srcDir, 'scoped-css', 'index.js')],
+    entryPoints: [path.join(srcDir, 'scoped-css', 'index.ts')],
     outfile: path.join(distDir, 'scoped-css', 'index.esm.js'),
     format: 'esm',
     platform: 'node',
@@ -149,7 +149,7 @@ const builds = [
   // Scoped CSS module - CJS (for CommonJS build tools)
   {
     ...commonOptions,
-    entryPoints: [path.join(srcDir, 'scoped-css', 'index.js')],
+    entryPoints: [path.join(srcDir, 'scoped-css', 'index.ts')],
     outfile: path.join(distDir, 'scoped-css', 'index.cjs'),
     format: 'cjs',
     platform: 'node',

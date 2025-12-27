@@ -567,7 +567,7 @@ export const CompilerMixin = {
         if (mod.includes('stop')) e.stopPropagation();
         fn(self.s, o, e, el);
       };
-      const opts = mod.includes('once') ? { once: true } : undefined;
+      const opts: AddEventListenerOptions | undefined = mod.includes('once') ? { once: true } : undefined;
       target.addEventListener(nm, handler, opts);
       this._reg(el, () => target.removeEventListener(nm, handler, opts));
       return;

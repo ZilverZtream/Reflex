@@ -315,7 +315,11 @@ function scopeSingleSelector(selector, dataAttr) {
  * @param {boolean} [options.preserveComments=true] - Keep CSS comments
  * @returns {string} Transformed CSS
  */
-export function transformCSS(css, scopeId, options = {}) {
+export interface ScopedCSSTransformOptions {
+  preserveComments?: boolean;
+}
+
+export function transformCSS(css: string, scopeId: string, options: ScopedCSSTransformOptions = {}) {
   const { preserveComments = true } = options;
 
   const tokens = tokenizeCSS(css);

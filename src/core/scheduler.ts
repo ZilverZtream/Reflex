@@ -11,6 +11,23 @@
 
 import { ACTIVE, RUNNING, QUEUED, META } from './symbols.js';
 
+type EffectRunner = (() => any) & {
+  f: number;
+  d: Array<Set<EffectRunner>>;
+  s: ((effect: EffectRunner) => void) | null;
+  kill: () => void;
+};
+
+interface EffectOptions {
+  lazy?: boolean;
+  sched?: (effect: EffectRunner) => void;
+}
+
+interface WatchOptions {
+  deep?: boolean;
+  immediate?: boolean;
+}
+
 /**
  * Scheduler mixin for Reflex class.
  */
@@ -21,9 +38,9 @@ export const SchedulerMixin = {
    * @param {Object} options - { lazy: boolean, sched: Function }
    * @returns {Function} Effect runner with kill() method
    */
-  _ef(fn, o = {}) {
+  _ef(fn: () => any, o: EffectOptions = {}) {
     const self = this;
-    const e = () => {
+    const e: EffectRunner = () => {
       if (!(e.f & ACTIVE)) return;
       self._cln_eff(e);
       self._es.push(self._e);
@@ -42,7 +59,7 @@ export const SchedulerMixin = {
   /**
    * Clean up effect dependencies
    */
-  _cln_eff(e) {
+  _cln_eff(e: EffectRunner) {
     for (let i = 0; i < e.d.length; i++) e.d[i].delete(e);
     e.d.length = 0;
   },
@@ -51,7 +68,7 @@ export const SchedulerMixin = {
    * Queue a job for execution
    * Uses QUEUED flag for O(1) deduplication instead of Set.has()
    */
-  _qj(j) {
+  _qj(j: EffectRunner) {
     if (j.f & QUEUED) return; // Already queued
     j.f |= QUEUED;            // Mark as queued
     // Push to the active queue (double-buffering for GC reduction)
@@ -82,10 +99,10 @@ export const SchedulerMixin = {
   /**
    * Create a computed property with lazy evaluation
    */
-  computed(fn) {
+  computed(fn: (state: any) => any) {
     const self = this;
     let v, dirty = true;
-    const subs = new Set();
+    const subs = new Set<EffectRunner>();
 
     const runner = this._ef(() => {
       v = fn(self.s);
@@ -127,7 +144,7 @@ export const SchedulerMixin = {
   /**
    * Watch a reactive source and run callback on changes
    */
-  watch(src, cb, opts = {}) {
+  watch(src: any, cb: (value: any, oldValue: any, onCleanup: (fn: () => void) => void) => void, opts: WatchOptions = {}) {
     const self = this;
     const getter = typeof src === 'function' ? src : () => src.value;
     let old, cleanup;
@@ -156,7 +173,7 @@ export const SchedulerMixin = {
   /**
    * Batch multiple state changes and flush once
    */
-  batch(fn) {
+  batch(fn: () => void) {
     this._b++;
     try { fn(); } finally {
       if (--this._b === 0) {
@@ -168,14 +185,14 @@ export const SchedulerMixin = {
   /**
    * Execute callback after next DOM update
    */
-  nextTick(fn) {
-    return new Promise(r => queueMicrotask(() => { this._fl(); fn?.(); r(); }));
+  nextTick(fn?: () => void) {
+    return new Promise<void>(r => queueMicrotask(() => { this._fl(); fn?.(); r(); }));
   },
 
   /**
    * Extract raw (non-reactive) object from proxy
    */
-  toRaw(o) {
+  toRaw<T>(o: T): T {
     if (o === null || typeof o !== 'object') return o;
     const m = o[META] || this._mf.get(o);
     return m ? m.r : o;
@@ -184,7 +201,7 @@ export const SchedulerMixin = {
   /**
    * Traverse value deeply for deep watch tracking
    */
-  _trv(v, s = new Set()) {
+  _trv(v: any, s = new Set<any>()) {
     if (v === null || typeof v !== 'object' || s.has(v)) return;
     s.add(v);
     const meta = v[META] || this._mf.get(v);

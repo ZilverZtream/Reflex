@@ -156,7 +156,16 @@ export function extractTemplate(source) {
  *   styles: Array<{content: string, scoped: boolean}>
  * }}
  */
-export function transformComponent(source, componentName = '', options = {}) {
+export interface ComponentTransformOptions {
+  removeStyles?: boolean;
+  minifyCSS?: boolean;
+}
+
+export function transformComponent(
+  source: string,
+  componentName = '',
+  options: ComponentTransformOptions = {}
+) {
   const {
     removeStyles = false,
     minifyCSS = false

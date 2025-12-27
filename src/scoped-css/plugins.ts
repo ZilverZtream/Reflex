@@ -8,6 +8,14 @@
 import { transformComponent } from './component-transform.js';
 import { minifyCSS } from './css-transform.js';
 
+export interface ScopedCSSPluginOptions {
+  include?: RegExp;
+  exclude?: RegExp;
+  cssOutput?: string | null;
+  minify?: boolean;
+  removeStyles?: boolean;
+}
+
 // ============================================================================
 // ESBUILD PLUGIN
 // ============================================================================
@@ -43,7 +51,7 @@ import { minifyCSS } from './css-transform.js';
  *   ]
  * });
  */
-export function scopedCSSPlugin(options = {}) {
+export function scopedCSSPlugin(options: ScopedCSSPluginOptions = {}) {
   const {
     include = /\.(reflex|vue|html)$/,
     exclude = /node_modules/,
@@ -165,7 +173,7 @@ export function scopedCSSPlugin(options = {}) {
  *   ]
  * };
  */
-export function viteScopedCSS(options = {}) {
+export function viteScopedCSS(options: ScopedCSSPluginOptions = {}) {
   const {
     include = /\.(reflex|vue|html)$/,
     exclude = /node_modules/
@@ -277,7 +285,7 @@ export function viteScopedCSS(options = {}) {
  *   ]
  * };
  */
-export function rollupScopedCSS(options = {}) {
+export function rollupScopedCSS(options: ScopedCSSPluginOptions = {}) {
   const {
     include = /\.(reflex|vue|html)$/,
     exclude = /node_modules/,

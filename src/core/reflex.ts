@@ -20,6 +20,11 @@ import { SchedulerMixin } from './scheduler.js';
 import { ExprMixin, ExprCache } from './expr.js';
 import { CompilerMixin } from './compiler.js';
 
+type ReactivityMixinType = typeof ReactivityMixin;
+type SchedulerMixinType = typeof SchedulerMixin;
+type ExprMixinType = typeof ExprMixin;
+type CompilerMixinType = typeof CompilerMixin;
+
 
 /**
  * Reflex - The Direct Reactive Engine
@@ -40,6 +45,42 @@ import { CompilerMixin } from './compiler.js';
  * app.configure({ cspSafe: true, parser: new SafeExprParser() });
  */
 export class Reflex {
+  declare s: any;
+  declare _e: any;
+  declare _es: any[];
+  declare _q: any[];
+  declare _qb: any[];
+  declare _qf: boolean;
+  declare _p: boolean;
+  declare _b: number;
+  declare _pt: Map<any, Set<any>>;
+  declare _ec: ExprCache;
+  declare _mf: WeakMap<object, any>;
+  declare _cl: WeakMap<Node, Array<() => void>>;
+  declare _scopeMap: WeakMap<Node, any>;
+  declare _dh: Map<any, any>;
+  declare _dr: Element | null;
+  declare _cp: Map<string, any>;
+  declare _cd: Map<string, any>;
+  declare _refs: Record<string, any>;
+  declare _parser: any;
+  declare _plugins: Set<any>;
+  declare _hydrateMode?: boolean;
+  declare hydrate?: (el?: Element | null) => this;
+  declare _hydrateWalk?: (node: Node, scope: any) => void;
+  declare _hydrateNode?: (node: Element, scope: any) => void;
+  declare _hydrateText?: (node: Node, scope: any) => void;
+  declare _hydrateIf?: (node: Element, scope: any) => void;
+  declare _hydrateFor?: (node: Element, scope: any) => void;
+  declare _dtRegister?: () => void;
+  declare _dtEmit?: (event: string, payload: any) => void;
+  declare customMethod?: (...args: any[]) => any;
+  declare cfg: {
+    sanitize: boolean;
+    cspSafe: boolean;
+    cacheSize: number;
+  };
+
   constructor(init = {}) {
     // === STATE ===
     this.s = null;            // Reactive state
@@ -255,14 +296,14 @@ export class Reflex {
   /**
    * Component rendering
    */
-  _comp(el, tag, o) {
+  _comp(el: Element, tag: string, o: any) {
     const def = this._cp.get(tag);
     const inst = def._t.cloneNode(true);
     const props = this._r({});
     const propDefs = [];
     const hostHandlers = Object.create(null);
 
-    const attrs = Array.from(el.attributes);
+    const attrs = Array.from(el.attributes) as Attr[];
     for (const a of attrs) {
       const n = a.name, v = a.value;
       if (n.startsWith('@')) hostHandlers[n.slice(1)] = this._fn(v, true);
@@ -336,6 +377,8 @@ export class Reflex {
     }
   }
 }
+
+export interface Reflex extends ReactivityMixinType, SchedulerMixinType, ExprMixinType, CompilerMixinType {}
 
 // Apply mixins to Reflex prototype
 Object.assign(Reflex.prototype, ReactivityMixin);
