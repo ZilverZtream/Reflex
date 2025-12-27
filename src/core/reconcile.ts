@@ -112,10 +112,11 @@ export function reconcileKeyedList({
 }) {
   const {
     getKey,      // (item, index, scope) => key
-    createNode,  // (item, index) => node
+    createNode,  // (item, index) => node | null
     updateNode,  // (node, item, index) => void
     removeNode,  // (node) => void
-    createScope  // (item, index) => scope
+    createScope, // (item, index) => scope
+    shouldKeep   // (item, index, scope) => boolean (optional, for m-if filtering)
   } = config;
 
   const newLen = rawList.length;
@@ -140,16 +141,32 @@ export function reconcileKeyedList({
 
     const existing = oldRows.get(key);
     if (existing) {
-      // Reuse existing node, update scope
-      updateNode(existing.node, item, i);
-      newNodes[i] = existing.node;
-      oldIndices[i] = keyToOldIdx.get(key) ?? -1;
-      oldRows.delete(key);
+      // Check if node should still be kept (m-if re-evaluation for existing nodes)
+      if (shouldKeep && !shouldKeep(item, i, scope)) {
+        // m-if condition is now false, remove this node
+        removeNode(existing.node);
+        newNodes[i] = null;
+        oldIndices[i] = -1;
+        oldRows.delete(key);
+      } else {
+        // Reuse existing node, update scope
+        updateNode(existing.node, item, i);
+        newNodes[i] = existing.node;
+        oldIndices[i] = keyToOldIdx.get(key) ?? -1;
+        oldRows.delete(key);
+      }
     } else {
       // Create new node
       const node = createNode(item, i);
-      newNodes[i] = node;
-      oldIndices[i] = -1; // New node
+      // CRITICAL: Handle null nodes (skipped due to m-if failing)
+      if (node === null) {
+        // Skip this item - it failed the m-if check
+        newNodes[i] = null;
+        oldIndices[i] = -1;
+      } else {
+        newNodes[i] = node;
+        oldIndices[i] = -1; // New node
+      }
     }
   }
 
@@ -165,6 +182,9 @@ export function reconcileKeyedList({
   let nextSibling = null;
   for (let i = newLen - 1; i >= 0; i--) {
     const node = newNodes[i];
+    // Skip null nodes (filtered by m-if)
+    if (node === null) continue;
+
     if (!lisSet.has(i)) {
       // Node needs to be moved/inserted
       if (nextSibling) {
@@ -173,7 +193,7 @@ export function reconcileKeyedList({
         // Insert at end (after last sibling or after comment marker)
         let lastNode = marker;
         for (let j = 0; j < i; j++) {
-          if (newNodes[j].parentNode) lastNode = newNodes[j];
+          if (newNodes[j] && newNodes[j].parentNode) lastNode = newNodes[j];
         }
         lastNode.after(node);
       }
@@ -181,10 +201,12 @@ export function reconcileKeyedList({
     nextSibling = node;
   }
 
-  // Build new rows map
+  // Build new rows map (excluding null nodes)
   const newRows = new Map();
   for (let i = 0; i < newLen; i++) {
-    newRows.set(newKeys[i], { node: newNodes[i], oldIdx: i });
+    if (newNodes[i] !== null) {
+      newRows.set(newKeys[i], { node: newNodes[i], oldIdx: i });
+    }
   }
 
   return { rows: newRows, keys: newKeys };
