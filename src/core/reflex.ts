@@ -67,6 +67,7 @@ export class Reflex {
   declare _refs: Record<string, any>;
   declare _parser: any;
   declare _plugins: Set<any>;
+  declare _m: boolean;
   declare _hydrateMode?: boolean;
   declare hydrate?: (el?: Element | null) => this;
   declare _hydrateWalk?: (node: Node, scope: any) => void;
@@ -116,10 +117,11 @@ export class Reflex {
     this._refs = {};          // $refs registry
     this._parser = null;      // CSP parser (lazy-loaded)
     this._plugins = new Set(); // Installed plugins (per-instance)
+    this._m = false;          // Mounted flag (prevents double-mount)
 
     // === CONFIGURATION ===
     this.cfg = {
-      sanitize: true,         // Sanitize HTML content
+      sanitize: false,        // Sanitize HTML content (opt-in, requires domPurify)
       cspSafe: false,         // CSP-safe mode (no new Function)
       cacheSize: 1000,        // Expression cache size
       onError: null,          // Global error handler
@@ -202,6 +204,13 @@ export class Reflex {
    * @returns {Reflex} This instance for chaining
    */
   mount(el = document.body) {
+    // Prevent double-mounting (could cause memory leaks and duplicate effects)
+    if (this._m) {
+      console.warn('Reflex: mount() called multiple times. Ignoring duplicate mount.');
+      return this;
+    }
+    this._m = true;
+
     this._dr = el;
     this._bnd(el, null);
     this._w(el, null);
@@ -263,7 +272,15 @@ export class Reflex {
     const t = document.createElement('template');
     let template = def.template;
 
-    if (this.cfg.sanitize && this.cfg.domPurify) {
+    // SECURITY: Fail closed - if sanitization is enabled but DOMPurify is missing, throw error
+    if (this.cfg.sanitize) {
+      if (!this.cfg.domPurify) {
+        throw new Error(
+          'Reflex Security: sanitize is enabled but domPurify is not configured.\n' +
+          'To fix: app.configure({ domPurify: DOMPurify })\n' +
+          'Or disable sanitization (NOT recommended): app.configure({ sanitize: false })'
+        );
+      }
       template = this.cfg.domPurify.sanitize(template, {
         RETURN_DOM_FRAGMENT: false,
         WHOLE_DOCUMENT: false
@@ -547,7 +564,15 @@ export class Reflex {
       const fallbackTpl = document.createElement('template');
       let fallbackHtml = asyncDef.fallback;
 
-      if (this.cfg.sanitize && this.cfg.domPurify) {
+      // SECURITY: Fail closed - if sanitization is enabled but DOMPurify is missing, throw error
+      if (this.cfg.sanitize) {
+        if (!this.cfg.domPurify) {
+          throw new Error(
+            'Reflex Security: sanitize is enabled but domPurify is not configured.\n' +
+            'To fix: app.configure({ domPurify: DOMPurify })\n' +
+            'Or disable sanitization (NOT recommended): app.configure({ sanitize: false })'
+          );
+        }
         fallbackHtml = this.cfg.domPurify.sanitize(fallbackHtml, {
           RETURN_DOM_FRAGMENT: false,
           WHOLE_DOCUMENT: false
@@ -619,7 +644,15 @@ export class Reflex {
       const t = document.createElement('template');
       let template = def.template;
 
-      if (self.cfg.sanitize && self.cfg.domPurify) {
+      // SECURITY: Fail closed - if sanitization is enabled but DOMPurify is missing, throw error
+      if (self.cfg.sanitize) {
+        if (!self.cfg.domPurify) {
+          throw new Error(
+            'Reflex Security: sanitize is enabled but domPurify is not configured.\n' +
+            'To fix: app.configure({ domPurify: DOMPurify })\n' +
+            'Or disable sanitization (NOT recommended): app.configure({ sanitize: false })'
+          );
+        }
         template = self.cfg.domPurify.sanitize(template, {
           RETURN_DOM_FRAGMENT: false,
           WHOLE_DOCUMENT: false

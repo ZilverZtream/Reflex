@@ -77,6 +77,14 @@ export const ExprMixin = {
     const cached = this._ec.get(k);
     if (cached) return cached;
 
+    // SECURITY: Enforce regex check before compiling (defense-in-depth)
+    // Normalize Unicode escapes to prevent bypass attempts
+    const normalized = normalizeUnicodeEscapes(exp);
+    if (!this.cfg.cspSafe && UNSAFE_EXPR_RE.test(normalized)) {
+      console.warn('Reflex: unsafe expression blocked:', exp);
+      return this._ec.set(k, () => {});
+    }
+
     // SECURITY NOTE: Standard mode now uses "The Iron Membrane" - an unbypassable
     // runtime Proxy sandbox that provides defense-in-depth against code injection.
     // The membrane wraps state and context objects, blocking access to dangerous
