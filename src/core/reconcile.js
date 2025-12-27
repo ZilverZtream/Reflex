@@ -1,0 +1,217 @@
+/**
+ * Reflex Core - DOM Reconciliation
+ *
+ * Implements keyed list reconciliation using the Longest Increasing Subsequence (LIS)
+ * algorithm for minimal DOM operations.
+ *
+ * ## Algorithm Overview
+ *
+ * When reordering a keyed list, we want to minimize DOM moves. The insight is that
+ * nodes in the LIS of old positions don't need to move - only nodes outside the LIS
+ * need repositioning.
+ *
+ * Example:
+ *   Old: [A, B, C, D, E]  (indices: 0, 1, 2, 3, 4)
+ *   New: [C, A, B, E, D]
+ *   Old indices of new items: [2, 0, 1, 4, 3]
+ *   LIS: [0, 1, 4] (positions 1, 2, 3 in new array - A, B, E don't move)
+ *   Only C and D need to be moved.
+ *
+ * ## Complexity
+ * - Time: O(n log n) using binary search
+ * - Space: O(n) for predecessor tracking
+ *
+ * ## Influences / Credits
+ *
+ * This implementation uses the LIS technique popularized by:
+ * - Vue 3's runtime-core (https://github.com/vuejs/core)
+ * - Inferno's keyed diffing (https://github.com/infernojs/inferno)
+ * - The algorithm itself is based on the patience sorting approach
+ *   described in academic literature on LIS computation.
+ *
+ * The core idea: finding nodes that are already in correct relative order
+ * (the LIS) and only moving the rest. This reduces O(n) potential DOM
+ * operations to O(n - LIS_length) actual moves.
+ */
+
+/**
+ * Compute the Longest Increasing Subsequence (LIS) of an array.
+ *
+ * @param {number[]} arr - Array of old indices (-1 for new nodes)
+ * @returns {number[]} Indices in arr that form the LIS
+ *
+ * @example
+ * computeLIS([2, 0, 1, 4, 3])  // Returns [1, 2, 3] (indices of 0, 1, 4)
+ * computeLIS([-1, 0, 1, -1])   // Returns [1, 2] (skips -1 entries)
+ */
+export function computeLIS(arr) {
+  const n = arr.length;
+  if (n === 0) return [];
+
+  // result[i] = index in arr of smallest tail of LIS of length i+1
+  const result = [];
+  // predecessors[i] = previous index in LIS ending at i
+  const predecessors = new Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const val = arr[i];
+    // Skip -1 entries (new nodes have no old position)
+    if (val < 0) continue;
+
+    // Binary search for insertion position
+    // Find the first position where arr[result[pos]] >= val
+    let lo = 0, hi = result.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arr[result[mid]] < val) lo = mid + 1;
+      else hi = mid;
+    }
+
+    // Update predecessor chain
+    if (lo > 0) predecessors[i] = result[lo - 1];
+    result[lo] = i;
+  }
+
+  // Reconstruct the LIS by following predecessors
+  let len = result.length;
+  const lis = new Array(len);
+  let idx = result[len - 1];
+  while (len-- > 0) {
+    lis[len] = idx;
+    idx = predecessors[idx];
+  }
+
+  return lis;
+}
+
+/**
+ * Reconcile a keyed list with minimal DOM operations.
+ *
+ * Given the old and new arrays, this function:
+ * 1. Removes nodes that are no longer present
+ * 2. Creates nodes that are new
+ * 3. Moves existing nodes to their correct positions using LIS
+ *
+ * @param {Object} params - Reconciliation parameters
+ * @param {Map} params.oldRows - Map of key -> { node, oldIdx }
+ * @param {string[]} params.oldKeys - Previous key order
+ * @param {Array} params.rawList - New raw list data
+ * @param {Object} params.config - Configuration for node creation/update
+ * @param {Reflex} params.engine - Reflex instance
+ * @param {Comment} params.marker - Comment marker for insertion point
+ *
+ * @returns {Object} { rows: Map, keys: string[] } - New state
+ */
+export function reconcileKeyedList({
+  oldRows,
+  oldKeys,
+  rawList,
+  config,
+  engine: _engine, // Reserved for future use
+  marker
+}) {
+  const {
+    getKey,      // (item, index, scope) => key
+    createNode,  // (item, index) => node
+    updateNode,  // (node, item, index) => void
+    removeNode,  // (node) => void
+    createScope  // (item, index) => scope
+  } = config;
+
+  const newLen = rawList.length;
+
+  // Build key-to-oldIndex map for LIS calculation
+  const keyToOldIdx = new Map();
+  for (let i = 0; i < oldKeys.length; i++) {
+    keyToOldIdx.set(oldKeys[i], i);
+  }
+
+  // Prepare new nodes and collect old indices for LIS
+  const newNodes = new Array(newLen);
+  const newKeys = new Array(newLen);
+  const oldIndices = new Array(newLen); // For LIS: old index or -1 if new
+
+  // First pass: create/update nodes and collect metadata
+  for (let i = 0; i < newLen; i++) {
+    const item = rawList[i];
+    const scope = createScope(item, i);
+    const key = getKey(item, i, scope);
+    newKeys[i] = key;
+
+    const existing = oldRows.get(key);
+    if (existing) {
+      // Reuse existing node, update scope
+      updateNode(existing.node, item, i);
+      newNodes[i] = existing.node;
+      oldIndices[i] = keyToOldIdx.get(key) ?? -1;
+      oldRows.delete(key);
+    } else {
+      // Create new node
+      const node = createNode(item, i);
+      newNodes[i] = node;
+      oldIndices[i] = -1; // New node
+    }
+  }
+
+  // Remove stale nodes
+  oldRows.forEach(({ node }) => removeNode(node));
+
+  // Compute LIS for optimal moves - nodes in LIS don't need to move
+  const lis = computeLIS(oldIndices);
+  const lisSet = new Set(lis);
+
+  // Insert nodes - only move nodes NOT in LIS
+  // We iterate backwards and insert before the next sibling
+  let nextSibling = null;
+  for (let i = newLen - 1; i >= 0; i--) {
+    const node = newNodes[i];
+    if (!lisSet.has(i)) {
+      // Node needs to be moved/inserted
+      if (nextSibling) {
+        marker.parentNode.insertBefore(node, nextSibling);
+      } else {
+        // Insert at end (after last sibling or after comment marker)
+        let lastNode = marker;
+        for (let j = 0; j < i; j++) {
+          if (newNodes[j].parentNode) lastNode = newNodes[j];
+        }
+        lastNode.after(node);
+      }
+    }
+    nextSibling = node;
+  }
+
+  // Build new rows map
+  const newRows = new Map();
+  for (let i = 0; i < newLen; i++) {
+    newRows.set(newKeys[i], { node: newNodes[i], oldIdx: i });
+  }
+
+  return { rows: newRows, keys: newKeys };
+}
+
+/**
+ * Handle duplicate keys in a list.
+ *
+ * When duplicate keys are detected, we warn in development and use
+ * index-based fallback to prevent crashes.
+ *
+ * @param {Map} seen - Set of already-seen keys
+ * @param {*} key - Current key
+ * @param {number} index - Current index
+ * @returns {*} Unique key (original or fallback)
+ */
+export function resolveDuplicateKey(seen, key, index) {
+  if (seen.has(key)) {
+    if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+      console.warn(
+        `Reflex: Duplicate key "${key}" in m-for. ` +
+        'Using index as fallback. This may cause incorrect behavior.'
+      );
+    }
+    // Use compound key to avoid collision
+    return `__dup_${index}_${key}`;
+  }
+  seen.add(key);
+  return key;
+}
