@@ -31,6 +31,9 @@ if (!fs.existsSync(path.join(distDir, 'csp'))) {
 if (!fs.existsSync(path.join(distDir, 'hydration'))) {
   fs.mkdirSync(path.join(distDir, 'hydration'), { recursive: true });
 }
+if (!fs.existsSync(path.join(distDir, 'scoped-css'))) {
+  fs.mkdirSync(path.join(distDir, 'scoped-css'), { recursive: true });
+}
 
 const isWatch = process.argv.includes('--watch');
 
@@ -134,6 +137,22 @@ const builds = [
     footer: {
       js: 'if(typeof window!=="undefined"){window.withHydration=ReflexHydration.withHydration;}'
     }
+  },
+  // Scoped CSS module - ESM (for build tools, Node.js)
+  {
+    ...commonOptions,
+    entryPoints: [path.join(srcDir, 'scoped-css', 'index.js')],
+    outfile: path.join(distDir, 'scoped-css', 'index.esm.js'),
+    format: 'esm',
+    platform: 'node',
+  },
+  // Scoped CSS module - CJS (for CommonJS build tools)
+  {
+    ...commonOptions,
+    entryPoints: [path.join(srcDir, 'scoped-css', 'index.js')],
+    outfile: path.join(distDir, 'scoped-css', 'index.cjs'),
+    format: 'cjs',
+    platform: 'node',
   },
 ];
 
@@ -376,9 +395,194 @@ export declare const withHydration: HydrationPlugin;
 export default withHydration;
 `;
 
+  const scopedCssDts = `/**
+ * Reflex Scoped CSS Module
+ *
+ * Zero-runtime scoped CSS for Reflex components.
+ * All processing happens at build time - 0KB runtime overhead.
+ *
+ * Use this module with esbuild, Vite, or Rollup to automatically
+ * scope component styles at build time.
+ */
+
+/**
+ * Generate a unique scope ID from source content.
+ * @param source - Source content to hash
+ * @param name - Optional component name for additional uniqueness
+ * @returns Scope ID in format 'v-xxxxxx'
+ */
+export declare function generateScopeId(source: string, name?: string): string;
+
+/**
+ * Scope a CSS selector by adding a data attribute.
+ * @param selector - CSS selector
+ * @param scopeId - Scope ID (e.g., 'v-abc123')
+ * @returns Scoped selector
+ */
+export declare function scopeSelector(selector: string, scopeId: string): string;
+
+/**
+ * Transform CSS with scoped selectors.
+ * @param css - Original CSS
+ * @param scopeId - Scope ID
+ * @param options - Transform options
+ * @returns Transformed CSS
+ */
+export declare function transformCSS(
+  css: string,
+  scopeId: string,
+  options?: { preserveComments?: boolean }
+): string;
+
+/**
+ * Transform an HTML template to add scope attributes.
+ * @param template - HTML template string
+ * @param scopeId - Scope ID
+ * @param options - Transform options
+ * @returns Transformed template
+ */
+export declare function transformTemplate(
+  template: string,
+  scopeId: string,
+  options?: { scopeSlots?: boolean; skip?: Set<string> }
+): string;
+
+/**
+ * Inject scope attribute into an element's attribute string.
+ * @param attrs - Existing attributes string
+ * @param scopeAttr - Scope attribute name
+ * @returns Modified attributes string
+ */
+export declare function injectScopeAttribute(attrs: string, scopeAttr: string): string;
+
+/**
+ * Extracted style information.
+ */
+export interface ExtractedStyle {
+  content: string;
+  scoped: boolean;
+  lang: string | null;
+  start: number;
+  end: number;
+  original: string;
+}
+
+/**
+ * Extract <style> blocks from component source.
+ * @param source - Component source code
+ * @returns Array of extracted styles
+ */
+export declare function extractStyles(source: string): ExtractedStyle[];
+
+/**
+ * Extracted template information.
+ */
+export interface ExtractedTemplate {
+  content: string;
+  start: number;
+  end: number;
+  type: 'tag' | 'property';
+  quote?: string;
+}
+
+/**
+ * Extract template from component source.
+ * @param source - Component source
+ * @returns Extracted template or null
+ */
+export declare function extractTemplate(source: string): ExtractedTemplate | null;
+
+/**
+ * Component transformation result.
+ */
+export interface TransformResult {
+  code: string;
+  css: string;
+  scopeId: string | null;
+  styles: ExtractedStyle[];
+}
+
+/**
+ * Transform a complete component with scoped styles.
+ * @param source - Component source code
+ * @param componentName - Component name for hash uniqueness
+ * @param options - Transform options
+ * @returns Transform result
+ */
+export declare function transformComponent(
+  source: string,
+  componentName?: string,
+  options?: { removeStyles?: boolean; minifyCSS?: boolean }
+): TransformResult;
+
+/**
+ * esbuild plugin options.
+ */
+export interface ScopedCSSPluginOptions {
+  include?: RegExp;
+  exclude?: RegExp;
+  cssOutput?: string;
+  minify?: boolean;
+  removeStyles?: boolean;
+}
+
+/**
+ * esbuild plugin for zero-runtime scoped CSS.
+ * @param options - Plugin options
+ * @returns esbuild plugin
+ */
+export declare function scopedCSSPlugin(options?: ScopedCSSPluginOptions): {
+  name: string;
+  setup(build: any): void;
+};
+
+/**
+ * Vite plugin options.
+ */
+export interface ViteScopedCSSOptions {
+  include?: RegExp;
+  exclude?: RegExp;
+}
+
+/**
+ * Vite plugin for zero-runtime scoped CSS.
+ * @param options - Plugin options
+ * @returns Vite plugin
+ */
+export declare function viteScopedCSS(options?: ViteScopedCSSOptions): {
+  name: string;
+  enforce: 'pre';
+  transform(code: string, id: string): { code: string; map: null } | null;
+  resolveId(id: string): string | null;
+  load(id: string): { code: string; map: null } | null;
+  handleHotUpdate(ctx: { file: string; server: any }): void;
+};
+
+/**
+ * Rollup plugin options.
+ */
+export interface RollupScopedCSSOptions {
+  include?: RegExp;
+  exclude?: RegExp;
+  cssOutput?: string;
+}
+
+/**
+ * Rollup plugin for zero-runtime scoped CSS.
+ * @param options - Plugin options
+ * @returns Rollup plugin
+ */
+export declare function rollupScopedCSS(options?: RollupScopedCSSOptions): {
+  name: string;
+  transform(code: string, id: string): { code: string; map: null } | null;
+  generateBundle(): void;
+};
+`;
+
   fs.writeFileSync(path.join(distDir, 'reflex.d.ts'), mainDts);
   fs.writeFileSync(path.join(distDir, 'csp', 'index.d.ts'), cspDts);
   fs.writeFileSync(path.join(distDir, 'hydration', 'index.d.ts'), hydrationDts);
+  fs.writeFileSync(path.join(distDir, 'scoped-css', 'index.d.ts'), scopedCssDts);
   console.log('Generated TypeScript declarations');
 }
 
@@ -410,6 +614,8 @@ async function build() {
         'hydration/index.esm.js',
         'hydration/index.cjs',
         'hydration/index.iife.js',
+        'scoped-css/index.esm.js',
+        'scoped-css/index.cjs',
       ];
 
       for (const file of files) {

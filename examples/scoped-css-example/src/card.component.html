@@ -1,0 +1,111 @@
+<!--
+  Card Component with Scoped Styles
+
+  Demonstrates:
+  - Component-level style encapsulation
+  - Pseudo-elements (::before, ::after)
+  - Media queries within scoped styles
+  - Nested selectors
+-->
+
+<template>
+  <article class="card" :class="{ featured: featured }">
+    <header class="card-header">
+      <h3 class="title">{{ title }}</h3>
+      <span class="badge" m-if="badge">{{ badge }}</span>
+    </header>
+    <div class="card-body">
+      <p class="description">{{ description }}</p>
+    </div>
+    <footer class="card-footer" m-if="showFooter">
+      <slot name="actions"></slot>
+    </footer>
+  </article>
+</template>
+
+<style scoped>
+  .card {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    overflow: hidden;
+    transition: transform 0.2s, box-shadow 0.2s;
+  }
+
+  .card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  }
+
+  .card.featured {
+    border: 2px solid #4CAF50;
+  }
+
+  .card.featured::before {
+    content: '★';
+    position: absolute;
+    top: -8px;
+    right: -8px;
+    width: 24px;
+    height: 24px;
+    background: #4CAF50;
+    color: white;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+  }
+
+  .card-header {
+    padding: 1rem;
+    border-bottom: 1px solid #eee;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .title {
+    margin: 0;
+    font-size: 1.25rem;
+    color: #333;
+  }
+
+  .badge {
+    padding: 0.25rem 0.5rem;
+    background: #e3f2fd;
+    color: #1976d2;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+
+  .card-body {
+    padding: 1rem;
+  }
+
+  .description {
+    margin: 0;
+    color: #666;
+    line-height: 1.5;
+  }
+
+  .card-footer {
+    padding: 1rem;
+    border-top: 1px solid #eee;
+    background: #fafafa;
+  }
+
+  /* Responsive styles within scoped block */
+  @media (max-width: 600px) {
+    .card-header {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.5rem;
+    }
+
+    .title {
+      font-size: 1rem;
+    }
+  }
+</style>
