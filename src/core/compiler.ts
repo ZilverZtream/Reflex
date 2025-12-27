@@ -553,7 +553,23 @@ export const CompilerMixin = {
         } else if (att in el && !isSVGAttr) {
           el[att] = v ?? '';
         } else {
-          const next = v === null || v === false ? null : String(v);
+          // ARIA boolean attributes need explicit "true"/"false" string values
+          // They should not be removed when value is false
+          const isAriaBoolAttr = att.startsWith('aria-') && (
+            att === 'aria-expanded' || att === 'aria-pressed' || att === 'aria-checked' ||
+            att === 'aria-selected' || att === 'aria-hidden' || att === 'aria-disabled' ||
+            att === 'aria-grabbed' || att === 'aria-busy' || att === 'aria-invalid' ||
+            att === 'aria-readonly' || att === 'aria-required' || att === 'aria-current' ||
+            att === 'aria-haspopup' || att === 'aria-modal'
+          );
+
+          let next;
+          if (isAriaBoolAttr && typeof v === 'boolean') {
+            next = String(v);  // Convert boolean to "true" or "false" string
+          } else {
+            next = v === null || v === false ? null : String(v);
+          }
+
           if (next !== prev) {
             prev = next;
             next === null ? el.removeAttribute(att) : el.setAttribute(att, next);
