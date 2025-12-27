@@ -347,6 +347,10 @@ export class Reflex {
     const props = this._r({});
     const propDefs = [];
     const hostHandlers = Object.create(null);
+    const self = this;
+
+    // Collect cleanup functions registered via onCleanup
+    const cleanupFns: Array<() => void> = [];
 
     const attrs = Array.from(el.attributes) as Attr[];
     for (const a of attrs) {
@@ -366,12 +370,38 @@ export class Reflex {
       if (h) h(this.s, o, detail);
     };
 
+    /**
+     * Register a cleanup callback that will be called when the component is unmounted.
+     * This is essential for cleaning up:
+     * - setInterval / setTimeout
+     * - window.addEventListener / document.addEventListener
+     * - WebSocket connections
+     * - Third-party library subscriptions
+     *
+     * @param fn - Cleanup function to call on unmount
+     *
+     * @example
+     * setup(props, { onCleanup }) {
+     *   const timer = setInterval(() => console.log('tick'), 1000);
+     *   onCleanup(() => clearInterval(timer));
+     *
+     *   const handleResize = () => { ... };
+     *   window.addEventListener('resize', handleResize);
+     *   onCleanup(() => window.removeEventListener('resize', handleResize));
+     * }
+     */
+    const onCleanup = (fn: () => void) => {
+      if (typeof fn === 'function') {
+        cleanupFns.push(fn);
+      }
+    };
+
     const scopeRaw = Object.create(props);
     scopeRaw.$props = props;
     scopeRaw.$emit = emit;
 
     if (def.s) {
-      const result = def.s(props, { emit, props, slots: {} });
+      const result = def.s(props, { emit, props, slots: {}, onCleanup });
       if (result && typeof result === 'object') {
         for (const k in result) {
           scopeRaw[k] = (result[k] !== null && typeof result[k] === 'object')
@@ -386,6 +416,19 @@ export class Reflex {
 
     const scope = this._r(scopeRaw);
     el.replaceWith(inst);
+
+    // Register all cleanup functions on the component instance
+    if (cleanupFns.length > 0) {
+      this._reg(inst, () => {
+        for (const fn of cleanupFns) {
+          try {
+            fn();
+          } catch (err) {
+            console.warn('Reflex: Error in component cleanup:', err);
+          }
+        }
+      });
+    }
 
     for (const pd of propDefs) {
       const fn = this._fn(pd.exp);
@@ -447,6 +490,9 @@ export class Reflex {
       fallbackNode = fallbackTpl.content.firstElementChild?.cloneNode(true) as Element;
     }
 
+    // Track if this async component has been aborted
+    let aborted = false;
+
     // Replace element with marker (and fallback if present)
     if (fallbackNode) {
       el.replaceWith(marker, fallbackNode);
@@ -457,8 +503,29 @@ export class Reflex {
       el.replaceWith(marker);
     }
 
+    // Register cleanup for the marker - if parent is destroyed, abort loading
+    this._reg(marker, () => {
+      aborted = true;
+      if (fallbackNode && fallbackNode.isConnected) {
+        self._kill(fallbackNode);
+        fallbackNode.remove();
+      }
+    });
+
     // Function to mount the real component once loaded
     const mountComponent = (def) => {
+      // Security: Check if marker is still connected to the DOM or aborted
+      // This prevents "zombie effects" when parent is destroyed while loading
+      if (aborted || !marker.isConnected) {
+        // Parent was destroyed while we were loading - don't mount
+        // Clean up fallback if it exists
+        if (fallbackNode && fallbackNode.isConnected) {
+          self._kill(fallbackNode);
+          fallbackNode.remove();
+        }
+        return;
+      }
+
       // Create a temporary element with saved attributes
       const tempEl = document.createElement(tag);
       for (const attr of savedAttrs) {

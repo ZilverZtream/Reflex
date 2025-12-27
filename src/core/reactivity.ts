@@ -12,7 +12,8 @@
 import {
   META, ITERATE, SKIP,
   ACTIVE, RUNNING,
-  ARRAY_MUTATORS, REORDER_METHODS, COLLECTION_METHODS
+  ARRAY_MUTATORS, REORDER_METHODS, COLLECTION_METHODS,
+  UNSAFE_PROPS
 } from './symbols.js';
 
 type ReactiveKey = PropertyKey;
@@ -73,6 +74,13 @@ export const ArrayHandler: ProxyHandler<any[]> = {
 
     // Fast path for symbols
     if (typeof k === 'symbol') return Reflect.get(o, k, rec);
+
+    // Security: Block access to dangerous properties at runtime
+    // This prevents dynamic property access bypasses like obj[dynamicKey]
+    if (UNSAFE_PROPS[k]) {
+      console.warn('Reflex: Blocked runtime access to unsafe property:', k);
+      return undefined;
+    }
 
     const engine = meta.engine;
 
@@ -140,6 +148,13 @@ export const ObjectHandler: ProxyHandler<ReactiveTarget> = {
     // Fast path for symbols
     if (typeof k === 'symbol') return Reflect.get(o, k, rec);
 
+    // Security: Block access to dangerous properties at runtime
+    // This prevents dynamic property access bypasses like obj[dynamicKey]
+    if (UNSAFE_PROPS[k]) {
+      console.warn('Reflex: Blocked runtime access to unsafe property:', k);
+      return undefined;
+    }
+
     const engine = meta.engine;
     engine._tk(meta, k);
     const v = Reflect.get(o, k, rec);
@@ -186,6 +201,12 @@ export const MapHandler: ProxyHandler<Map<any, any>> = {
       return Reflect.get(o, k, rec);
     }
 
+    // Security: Block access to dangerous properties at runtime
+    if (typeof k === 'string' && UNSAFE_PROPS[k]) {
+      console.warn('Reflex: Blocked runtime access to unsafe property:', k);
+      return undefined;
+    }
+
     const engine = meta.engine;
 
     if (k === 'size') { engine._tk(meta, ITERATE); return o.size; }
@@ -216,6 +237,12 @@ export const SetHandler: ProxyHandler<Set<any>> = {
     // Fast path for symbols (except iterator)
     if (typeof k === 'symbol' && k !== Symbol.iterator) {
       return Reflect.get(o, k, rec);
+    }
+
+    // Security: Block access to dangerous properties at runtime
+    if (typeof k === 'string' && UNSAFE_PROPS[k]) {
+      console.warn('Reflex: Blocked runtime access to unsafe property:', k);
+      return undefined;
     }
 
     const engine = meta.engine;

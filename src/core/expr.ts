@@ -11,7 +11,7 @@
  * CSP mode requires an external parser (SafeExprParser).
  */
 
-import { META, RESERVED, UNSAFE_PROPS, UNSAFE_EXPR_RE, ID_RE } from './symbols.js';
+import { META, RESERVED, UNSAFE_PROPS, UNSAFE_EXPR_RE, ID_RE, normalizeUnicodeEscapes } from './symbols.js';
 
 /**
  * Expression cache with FIFO eviction strategy.
@@ -74,7 +74,9 @@ export const ExprMixin = {
     if (cached) return cached;
 
     // Security: Block dangerous expression patterns
-    if (UNSAFE_EXPR_RE.test(exp)) {
+    // Normalize Unicode escapes first to prevent bypass via \uXXXX encoding
+    const normalizedExp = normalizeUnicodeEscapes(exp);
+    if (UNSAFE_EXPR_RE.test(normalizedExp)) {
       console.warn('Reflex: Blocked potentially unsafe expression:', exp);
       return this._ec.set(k, () => undefined);
     }

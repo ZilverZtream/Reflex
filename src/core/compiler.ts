@@ -12,7 +12,7 @@
  */
 
 import { META, ITERATE, SKIP, UNSAFE_PROPS, UNSAFE_URL_RE } from './symbols.js';
-import { computeLIS } from './reconcile.js';
+import { computeLIS, resolveDuplicateKey } from './reconcile.js';
 
 // Basic HTML entity escaping for when DOMPurify is unavailable
 const escapeHTML = s => s.replace(/[&<>"']/g, c => ({
@@ -302,6 +302,9 @@ export const CompilerMixin = {
       const newKeys = new Array(newLen);
       const oldIndices = new Array(newLen);
 
+      // Track seen keys to detect and handle duplicates
+      const seenKeys = new Map();
+
       for (let i = 0; i < newLen; i++) {
         let item = raw[i];
         if (item !== null && typeof item === 'object' && !item[SKIP]) {
@@ -311,7 +314,10 @@ export const CompilerMixin = {
         sc[alias] = item;
         if (idxAlias) sc[idxAlias] = i;
 
-        const key = kAttr ? (keyIsProp ? (item && item[kAttr]) : keyFn(this.s, sc)) : i;
+        let key = kAttr ? (keyIsProp ? (item && item[kAttr]) : keyFn(this.s, sc)) : i;
+
+        // Handle duplicate keys to prevent ghost nodes
+        key = resolveDuplicateKey(seenKeys, key, i);
         newKeys[i] = key;
 
         const existing = rows.get(key);
@@ -399,7 +405,15 @@ export const CompilerMixin = {
 
     eff.o = o;
     this._reg(cm, () => {
-      rows.forEach(({ node }) => this._kill(node));
+      // Kill effects and REMOVE nodes from DOM
+      // This is critical for m-if + m-for combinations where
+      // removing the m-for comment marker must also remove list items
+      rows.forEach(({ node }) => {
+        this._kill(node);
+        if (node.parentNode) {
+          node.remove();
+        }
+      });
       eff.kill();
     });
   },
@@ -477,10 +491,14 @@ export const CompilerMixin = {
 
   /**
    * HTML binding: m-html="expr"
+   *
+   * SECURITY NOTE: m-html requires DOMPurify for safe operation.
+   * Without DOMPurify, content is rendered as escaped text to prevent XSS.
    */
   _html(el, exp, o) {
     const fn = this._fn(exp);
     let prev;
+    let warnedOnce = false;
     const e = this._ef(() => {
       const v = fn(this.s, o);
       let html = v == null ? '' : String(v);
@@ -489,8 +507,22 @@ export const CompilerMixin = {
         if (typeof DOMPurify !== 'undefined') {
           html = DOMPurify.sanitize(html);
         } else {
-          html = escapeHTML(html);
-          console.warn('Reflex: DOMPurify not loaded. HTML content escaped for safety.');
+          // SECURITY: Without DOMPurify, we cannot safely use innerHTML
+          // Render as escaped text instead to prevent XSS
+          if (!warnedOnce) {
+            warnedOnce = true;
+            console.error(
+              'Reflex: SECURITY WARNING - m-html requires DOMPurify for safe operation. ' +
+              'Without DOMPurify, content will be rendered as escaped text. ' +
+              'Install DOMPurify: npm install dompurify'
+            );
+          }
+          // Use textContent instead of innerHTML when no sanitizer is available
+          if (html !== prev) {
+            prev = html;
+            el.textContent = html;
+          }
+          return;
         }
       }
 
@@ -709,6 +741,11 @@ export const CompilerMixin = {
 
   /**
    * Apply custom directive
+   *
+   * IMPORTANT: Properly handles cleanup functions returned by directives.
+   * When the directive value changes, the previous cleanup is called before
+   * the directive runs again. This prevents resource leaks like accumulated
+   * event listeners.
    */
   _applyDir(el, name, value, mods, o) {
     const dir = this._cd.get(name);
@@ -717,7 +754,20 @@ export const CompilerMixin = {
     const fn = this._fn(value);
     const self = this;
 
+    // Track the current cleanup function
+    let currentCleanup = null;
+
     const e = this._ef(() => {
+      // Call previous cleanup before running directive again
+      if (typeof currentCleanup === 'function') {
+        try {
+          currentCleanup();
+        } catch (err) {
+          console.warn('Reflex: Error in directive cleanup:', err);
+        }
+        currentCleanup = null;
+      }
+
       const binding = {
         value: fn(self.s, o),
         expression: value,
@@ -725,11 +775,22 @@ export const CompilerMixin = {
       };
       const cleanup = dir(el, binding, self);
       if (typeof cleanup === 'function') {
-        self._reg(el, cleanup);
+        currentCleanup = cleanup;
       }
     });
     e.o = o;
-    this._reg(el, e.kill);
+
+    // Register final cleanup when element is removed
+    this._reg(el, () => {
+      if (typeof currentCleanup === 'function') {
+        try {
+          currentCleanup();
+        } catch (err) {
+          console.warn('Reflex: Error in directive cleanup:', err);
+        }
+      }
+      e.kill();
+    });
     return true;
   },
 

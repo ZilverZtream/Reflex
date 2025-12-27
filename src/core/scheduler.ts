@@ -11,6 +11,10 @@
 
 import { ACTIVE, RUNNING, QUEUED, META } from './symbols.js';
 
+// Maximum number of flush iterations before throwing an error
+// This prevents infinite loops from circular dependencies
+const MAX_FLUSH_ITERATIONS = 100;
+
 type EffectRunner = (() => any) & {
   f: number;
   d: Array<Set<EffectRunner>>;
@@ -80,21 +84,46 @@ export const SchedulerMixin = {
   /**
    * Flush the job queue
    * Uses double-buffering to reduce GC pressure by reusing arrays
+   * Includes circular dependency detection to prevent infinite loops
    */
   _fl() {
     this._p = false;
-    // Swap buffers: process current, new jobs go to other
-    const q = this._qf ? this._qb : this._q;
-    this._qf = !this._qf; // Toggle active buffer
+    let iterations = 0;
 
-    for (let i = 0; i < q.length; i++) {
-      const j = q[i];
-      j.f &= ~QUEUED; // Clear queued flag before running
-      try { j(); } catch (err) { this._handleError(err, j.o); }
+    // Process queue, checking for circular dependencies
+    while (true) {
+      // Swap buffers: process current, new jobs go to other
+      const q = this._qf ? this._qb : this._q;
+      this._qf = !this._qf; // Toggle active buffer
+
+      if (q.length === 0) break;
+
+      // Safety check: prevent infinite loops from circular dependencies
+      if (++iterations > MAX_FLUSH_ITERATIONS) {
+        // Clear remaining jobs to prevent further issues
+        q.length = 0;
+        const otherQ = this._qf ? this._qb : this._q;
+        otherQ.length = 0;
+
+        const error = new Error(
+          `Reflex: Maximum update depth exceeded (${MAX_FLUSH_ITERATIONS} iterations). ` +
+          'This is likely caused by a circular dependency in computed values or watchers. ' +
+          'Check for expressions like "app.computed(() => app.s.count++)" that modify state during evaluation.'
+        );
+        console.error(error);
+        this._handleError(error, null);
+        return;
+      }
+
+      for (let i = 0; i < q.length; i++) {
+        const j = q[i];
+        j.f &= ~QUEUED; // Clear queued flag before running
+        try { j(); } catch (err) { this._handleError(err, j.o); }
+      }
+
+      // Clear without deallocation - reuses the same memory
+      q.length = 0;
     }
-
-    // Clear without deallocation - reuses the same memory
-    q.length = 0;
   },
 
   /**

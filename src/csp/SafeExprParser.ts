@@ -19,12 +19,46 @@
 import { META } from '../core/symbols.js';
 
 // Safe globals accessible in expressions
+// Note: Object is wrapped via SAFE_OBJECT to restrict dangerous methods
 const SAFE_GLOBALS = {
   __proto__: null,
-  Math, Date, Array, Object, Number, String, Boolean, JSON,
+  Math, Date, Array, Number, String, Boolean, JSON,
   parseInt, parseFloat, isNaN, isFinite, NaN, Infinity,
   true: true, false: false, null: null, undefined: undefined
 };
+
+// Dangerous Object methods that could modify prototypes or global state
+const UNSAFE_OBJECT_METHODS = Object.assign(Object.create(null), {
+  defineProperty: 1,
+  defineProperties: 1,
+  create: 1,
+  assign: 1,
+  setPrototypeOf: 1,
+  getOwnPropertyDescriptor: 1,
+  getOwnPropertyDescriptors: 1,
+  getOwnPropertyNames: 1,
+  getOwnPropertySymbols: 1,
+  getPrototypeOf: 1,
+  preventExtensions: 1,
+  seal: 1,
+  freeze: 1,
+  isExtensible: 1,
+  isSealed: 1,
+  isFrozen: 1
+});
+
+// Create a safe Object wrapper that only exposes safe methods
+const SAFE_OBJECT = {
+  keys: Object.keys,
+  values: Object.values,
+  entries: Object.entries,
+  fromEntries: Object.fromEntries,
+  hasOwn: Object.hasOwn || ((obj, prop) => Object.prototype.hasOwnProperty.call(obj, prop)),
+  is: Object.is
+};
+
+// Add safe Object to SAFE_GLOBALS
+SAFE_GLOBALS['Object'] = SAFE_OBJECT;
 
 // Dangerous property names that could lead to prototype pollution
 const UNSAFE_PROPS = Object.assign(Object.create(null), {
@@ -32,6 +66,14 @@ const UNSAFE_PROPS = Object.assign(Object.create(null), {
   __lookupGetter__: 1, __lookupSetter__: 1
 });
 UNSAFE_PROPS['__proto__'] = 1;
+
+// Dangerous method names that should be blocked on any object
+const UNSAFE_METHODS = Object.assign(Object.create(null), {
+  ...UNSAFE_OBJECT_METHODS,
+  // Additional dangerous methods that could be used for sandbox escape
+  eval: 1,
+  Function: 1
+});
 
 /**
  * CSP-Safe Expression Parser
@@ -485,6 +527,13 @@ export class SafeExprParser {
           const prop = node.callee.computed
             ? this._evaluate(node.callee.property, state, context, $event, $el, reflex)
             : node.callee.property;
+
+          // Security: Block calls to dangerous methods
+          if (UNSAFE_METHODS[prop] || UNSAFE_PROPS[prop]) {
+            console.warn('Reflex: Blocked call to unsafe method:', prop);
+            return undefined;
+          }
+
           callee = thisArg[prop];
         } else {
           callee = this._evaluate(node.callee, state, context, $event, $el, reflex);

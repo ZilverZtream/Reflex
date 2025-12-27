@@ -88,3 +88,29 @@ export const UNSAFE_EXPR_RE = /\[["'`]constructor["'`]\]|\[["'`]__proto__["'`]\]
 // === REGEX PATTERNS ===
 // Identifier extraction pattern for expression parsing
 export const ID_RE = /(?:^|[^.\w$])([a-zA-Z_$][\w$]*)/g;
+
+// === SECURITY UTILITIES ===
+
+/**
+ * Normalize Unicode escapes in a string to detect bypass attempts.
+ * JavaScript's `new Function()` parses \uXXXX and \xXX escapes AFTER
+ * our regex check, so we need to decode them first.
+ *
+ * @param {string} str - Expression string to normalize
+ * @returns {string} Normalized string with Unicode escapes decoded
+ */
+export function normalizeUnicodeEscapes(str: string): string {
+  // Decode \uXXXX escapes (4 hex digits)
+  let result = str.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
+    String.fromCharCode(parseInt(hex, 16))
+  );
+  // Decode \xXX escapes (2 hex digits)
+  result = result.replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) =>
+    String.fromCharCode(parseInt(hex, 16))
+  );
+  // Also handle Unicode escapes in template literals: \u{XXXXX}
+  result = result.replace(/\\u\{([0-9a-fA-F]+)\}/g, (_, hex) =>
+    String.fromCodePoint(parseInt(hex, 16))
+  );
+  return result;
+}
