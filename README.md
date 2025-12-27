@@ -8,13 +8,45 @@ A lightweight (~20KB minified) reactive framework that compiles templates direct
 
 ## Features
 
+### Core Reactivity
 - **Proxy-based reactivity** with automatic dependency tracking
 - **Direct DOM manipulation** - no virtual DOM overhead
+- **Quantum Cloning** - O(1) deep watchers without recursive traversal
+- **Computed properties** with automatic caching and lazy evaluation
+- **Batching support** - group multiple state changes into one update
+- **Maps and Sets** - full reactive support for collections
+
+### Performance & Optimization
+- **Cooperative scheduling (time slicing)** - yields to browser every 5ms to prevent UI freezes
+- **Double-buffered job queue** - reduces GC pressure during updates
+- **LIS-based reconciliation** - optimal list updates with minimal DOM operations
+- **Expression caching** - compiled expressions cached with FIFO eviction
+- **Fast-path expressions** - simple property access bypasses full compilation
+- **Static proxy handlers** - handlers defined once and reused
+
+### Security & Safety
+- **Iron Membrane sandbox** - unbypassable proxy-based expression sandboxing
+- **Prototype pollution prevention** - blocks `__proto__`, `constructor`, `prototype` access
+- **URL sanitization** - blocks `javascript:`, `vbscript:`, `data:` protocols
+- **HTML sanitization** - DOMPurify integration for safe m-html rendering
+- **CSP-safe mode** - optional parser without `new Function()`
+
+### Developer Experience
 - **Zero dependencies** - works standalone
 - **No build step required** - use directly in browser or Node.js
-- **CSP-safe mode** - optional parser without `new Function()`
 - **Small footprint** - ~20KB minified, ~8KB gzipped
 - **TypeScript declarations** included
+- **Tree-shakable plugins** - only bundle what you use
+- **Hot Module Replacement** - full HMR support for development
+
+### Advanced Features
+- **SSR hydration** - attach reactivity to server-rendered HTML
+- **Scoped CSS** - zero-runtime CSS scoping (build-time transform)
+- **Auto-cleanup plugin** - MutationObserver-based automatic cleanup for external DOM changes
+- **Template directives** - `<template>` support for structural directives
+- **Custom directives** - extend the framework with your own directives
+- **Plugin system** - extensible architecture with mixin support
+- **Async components** - dynamic component loading with suspense-like behavior
 
 ## Installation
 
@@ -158,6 +190,118 @@ app.component('my-button', {
 });
 ```
 
+### SSR Hydration
+
+Attach reactivity to server-rendered HTML without re-creating the DOM:
+
+```javascript
+import { Reflex } from 'reflex';
+import { withHydration } from 'reflex/hydration';
+
+const app = new Reflex({ count: 0 });
+app.use(withHydration);
+app.hydrate(document.getElementById('app')); // Hydrates instead of mounting
+```
+
+**Benefits:**
+- Faster time-to-interactive (TTI)
+- SEO-friendly server-rendered HTML
+- Progressive enhancement support
+
+### Scoped CSS
+
+Zero-runtime CSS scoping for components (build-time transform):
+
+```javascript
+// Build tool integration
+import { scopedCSSPlugin } from 'reflex/scoped-css';
+
+// Vite
+export default {
+  plugins: [viteScopedCSS()]
+};
+
+// esbuild
+esbuild.build({
+  plugins: [scopedCSSPlugin()]
+});
+```
+
+**Component with scoped styles:**
+```javascript
+app.component('card', {
+  template: `
+    <div class="card">
+      <h2>{{ title }}</h2>
+      <p>{{ content }}</p>
+    </div>
+  `,
+  styles: `
+    .card { border: 1px solid #ccc; }
+    h2 { color: blue; }
+  `,
+  props: ['title', 'content']
+});
+```
+
+### Auto-Cleanup Plugin
+
+Automatically clean up when elements are removed by external scripts (jQuery, HTMX, etc.):
+
+```javascript
+import { withAutoCleanup } from 'reflex/observer';
+
+const app = new Reflex({ count: 0 });
+app.use(withAutoCleanup);
+
+// Now external removals trigger cleanup automatically:
+// $('#my-element').remove(); // ← Listeners automatically cleaned up!
+```
+
+**Features:**
+- MutationObserver-based detection
+- O(1) element lookup using markers
+- Batched cleanup in microtasks
+- Zero overhead until elements are removed
+
+### Template Directives
+
+Use `<template>` tags for cleaner structural directives:
+
+```html
+<!-- Before -->
+<div m-if="show">
+  <div m-for="item in items" m-key="item.id">
+    {{ item.name }}
+  </div>
+</div>
+
+<!-- With <template> -->
+<template m-if="show">
+  <template m-for="item in items" m-key="item.id">
+    <div>{{ item.name }}</div>
+  </template>
+</template>
+```
+
+**Benefits:**
+- No wrapper elements in DOM
+- Better semantic structure
+- Matches Vue 3 and Svelte patterns
+
+### Async Components
+
+Load components dynamically with automatic loading states:
+
+```javascript
+app.component('lazy-chart', {
+  async: () => import('./Chart.js'),
+  loading: '<div>Loading chart...</div>',
+  error: '<div>Failed to load</div>',
+  timeout: 3000
+});
+```
+
 ## Directives
 
 | Directive | Description | Example |
@@ -234,17 +378,29 @@ Available in all expressions:
 ```
 src/
 ├── core/
-│   ├── symbols.js      # Shared symbols and constants
-│   ├── reactivity.js   # Proxy handlers, dependency tracking
-│   ├── scheduler.js    # Effect system, job queue
-│   ├── expr.js         # Expression compilation and caching
-│   ├── compiler.js     # DOM walking, directive processing
-│   ├── reconcile.js    # LIS-based list reconciliation
-│   └── reflex.js       # Main Reflex class
+│   ├── symbols.ts      # Shared symbols and constants
+│   ├── reactivity.ts   # Proxy handlers, Quantum Cloning, dependency tracking
+│   ├── scheduler.ts    # Effect system, cooperative scheduling, job queue
+│   ├── expr.ts         # Expression compilation, Iron Membrane sandbox
+│   ├── compiler.ts     # DOM walking, directive processing, transitions
+│   ├── reconcile.ts    # LIS-based list reconciliation
+│   └── reflex.ts       # Main Reflex class, plugin system
 ├── csp/
-│   ├── SafeExprParser.js  # CSP-safe expression parser
-│   └── index.js
-└── index.js            # Public exports
+│   ├── SafeExprParser.ts  # CSP-safe expression parser
+│   └── index.ts
+├── hydration/
+│   ├── withHydration.ts   # SSR hydration support
+│   └── index.ts
+├── scoped-css/
+│   ├── css-transform.ts      # CSS scoping transform
+│   ├── template-transform.ts # Template attribute injection
+│   ├── component-transform.ts # Component processing
+│   ├── plugins.ts           # Build tool plugins (esbuild, Vite)
+│   └── index.ts
+├── observer/
+│   ├── withAutoCleanup.ts # MutationObserver-based auto-cleanup
+│   └── index.ts
+└── index.ts            # Public exports
 ```
 
 ### Reactivity System
@@ -253,11 +409,21 @@ Reflex uses ES6 Proxies with static handlers to minimize memory allocation.
 Each reactive object stores metadata in a Symbol property or WeakMap (for
 non-extensible objects).
 
+**Quantum Cloning** enables O(1) deep watchers by using structural sharing:
+when you watch an object deeply, Reflex creates shallow clones of nested
+structures. Changes trigger updates without recursive traversal, enabling
+efficient deep watching of objects with 1000+ levels of nesting.
+
 ### Scheduler
 
 Effects are batched using a double-buffered queue to reduce garbage collection
 pressure. The scheduler uses microtasks (via `queueMicrotask`) for automatic
 batching.
+
+**Cooperative Scheduling (Time Slicing)** prevents UI freezes during large
+updates by yielding to the browser every 5ms. This maintains 60fps rendering
+even when processing thousands of DOM updates, similar to React's Concurrent
+Mode.
 
 ### List Reconciliation
 
@@ -267,11 +433,21 @@ move, reducing the number of DOM mutations.
 
 ## Security
 
-### Expression Sandboxing
+### Expression Sandboxing (Iron Membrane)
 
-- Blocks access to dangerous properties (`__proto__`, `constructor`, `prototype`)
-- Blocks dangerous expression patterns (bracket notation for dangerous props)
-- Blocks `Function()` constructor calls
+Reflex uses **"The Iron Membrane"** - an unbypassable proxy-based sandbox that
+wraps ALL expression results, preventing security exploits even with complex
+obfuscation:
+
+- **Runtime protection**: Blocks access to `__proto__`, `constructor`, `prototype`
+  at runtime using proxy traps
+- **Recursive wrapping**: All nested objects/arrays are automatically wrapped
+- **Array method safety**: Array methods like `map`, `filter`, `forEach` return
+  wrapped results
+- **Obfuscation-resistant**: Blocks tricks like `['constr'+'uctor']` and
+  string concatenation exploits
+- **No eval/Function**: Standard mode uses `new Function()` but sanitizes the
+  execution context
 
 ### URL Sanitization
 
@@ -308,13 +484,35 @@ The transition naming convention (`{name}-enter-from`, `{name}-enter-active`,
 
 ## Performance Notes
 
+### Reactivity Optimizations
 - **Static proxy handlers**: Handlers are defined once and reused, eliminating
   per-object closure allocation
-- **Expression caching**: Compiled expressions are cached with FIFO eviction
-- **Double-buffered scheduler**: Reduces GC pressure from queue management
-- **Fast-path expressions**: Simple property access bypasses full compilation
+- **Quantum Cloning**: O(1) deep watchers using structural sharing instead of
+  recursive traversal - enables watching 1000+ nested levels without stack overflow
+- **Lazy computed properties**: Only re-compute when dependencies change AND
+  value is accessed
+
+### Scheduler Optimizations
+- **Cooperative scheduling (time slicing)**: Yields to browser every 5ms during
+  large updates to maintain 60fps rendering
+- **Double-buffered job queue**: Reduces GC pressure by reusing arrays instead
+  of creating new ones each flush
+- **O(1) deduplication**: Uses bitflags (QUEUED) instead of Set.has() for
+  instant duplicate detection
+
+### Compilation Optimizations
+- **Expression caching**: Compiled expressions cached with FIFO eviction (1000 entry default)
+- **Fast-path expressions**: Simple property access like `{{ count }}` bypasses
+  full compilation
 - **WeakMap for lifecycle**: Cleanup functions stored in WeakMap to avoid
   modifying DOM node properties
+
+### Reconciliation Optimizations
+- **LIS algorithm**: Longest Increasing Subsequence for optimal list reordering
+  with minimal DOM moves (O(n log n))
+- **Keyed reconciliation**: Reuses DOM nodes when keys match, only moving/patching
+  changed elements
+- **TreeWalker for cleanup**: Efficient subtree traversal in auto-cleanup plugin
 
 ## Browser Support
 
