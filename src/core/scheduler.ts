@@ -48,7 +48,7 @@ export const SchedulerMixin = {
    * @param {Object} options - { lazy: boolean, sched: Function }
    * @returns {Function} Effect runner with kill() method
    */
-  _ef(fn: () => any, o: EffectOptions = {}) {
+  createEffect(fn: () => any, o: EffectOptions = {}) {
     const self = this;
     const e: EffectRunner = () => {
       if (!(e.f & ACTIVE)) return;
@@ -78,12 +78,12 @@ export const SchedulerMixin = {
    * Queue a job for execution
    * Uses QUEUED flag for O(1) deduplication instead of Set.has()
    */
-  _qj(j: EffectRunner) {
+  queueJob(j: EffectRunner) {
     if (j.f & QUEUED) return; // Already queued
     j.f |= QUEUED;            // Mark as queued
     // Push to the active queue (double-buffering for GC reduction)
     (this._qf ? this._qb : this._q).push(j);
-    if (!this._p) { this._p = true; queueMicrotask(() => this._fl()); }
+    if (!this._p) { this._p = true; queueMicrotask(() => this.flushQueue()); }
   },
 
   /**
@@ -92,7 +92,7 @@ export const SchedulerMixin = {
    * Includes circular dependency detection to prevent infinite loops
    * Yields to browser after YIELD_THRESHOLD to prevent UI freezes
    */
-  _fl() {
+  flushQueue() {
     const start = performance.now();
     let iterations = 0;
 
@@ -133,9 +133,9 @@ export const SchedulerMixin = {
 
           // Use Scheduler API if available (better priority control), otherwise setTimeout
           if (typeof globalThis !== 'undefined' && globalThis.scheduler?.postTask) {
-            globalThis.scheduler.postTask(() => this._fl());
+            globalThis.scheduler.postTask(() => this.flushQueue());
           } else {
-            setTimeout(() => this._fl(), 0);
+            setTimeout(() => this.flushQueue(), 0);
           }
 
           // Return without clearing _p flag - we'll resume later
@@ -187,7 +187,7 @@ export const SchedulerMixin = {
     let v, dirty = true;
     const subs = new Set<EffectRunner>();
 
-    const runner = this._ef(() => {
+    const runner = this.createEffect(() => {
       try {
         v = fn(self.s);
         dirty = false;
@@ -206,7 +206,7 @@ export const SchedulerMixin = {
           // If no one is accessing the computed, it won't re-compute
           for (const e of subs) {
             if (e.f & ACTIVE && !(e.f & RUNNING)) {
-              e.s ? e.s(e) : self._qj(e);
+              e.s ? e.s(e) : self.queueJob(e);
             }
           }
         }
@@ -250,11 +250,11 @@ export const SchedulerMixin = {
       }
     };
 
-    const runner = this._ef(() => {
+    const runner = this.createEffect(() => {
       const v = getter();
       if (opts.deep) self._trv(v);
       return v;
-    }, { lazy: true, sched: () => self._qj(job) });
+    }, { lazy: true, sched: () => self.queueJob(job) });
 
     if (opts.immediate) job();
     else { old = runner(); if (opts.deep) old = this._clone(old); }
@@ -278,7 +278,7 @@ export const SchedulerMixin = {
    * Execute callback after next DOM update
    */
   nextTick(fn?: () => void) {
-    return new Promise<void>(r => queueMicrotask(() => { this._fl(); fn?.(); r(); }));
+    return new Promise<void>(r => queueMicrotask(() => { this.flushQueue(); fn?.(); r(); }));
   },
 
   /**
@@ -297,7 +297,7 @@ export const SchedulerMixin = {
     if (v === null || typeof v !== 'object' || s.has(v)) return;
     s.add(v);
     const meta = v[META] || this._mf.get(v);
-    if (meta) this._tk(meta, Symbol.for('rx.iterate'));
+    if (meta) this.trackDependency(meta, Symbol.for('rx.iterate'));
     if (Array.isArray(v)) {
       for (const i of v) this._trv(i, s);
     } else if (v instanceof Map || v instanceof Set) {

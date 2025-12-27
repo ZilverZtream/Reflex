@@ -99,7 +99,7 @@ export const ExprMixin = {
       }
       const self = this;
       return this._ec.set(k, (s, o) => {
-        if (o) { const meta = o[META] || self._mf.get(o); if (meta) self._tk(meta, p[0]); }
+        if (o) { const meta = o[META] || self._mf.get(o); if (meta) self.trackDependency(meta, p[0]); }
         let v = (o && p[0] in o) ? o : s;
         for (const pk of p) { if (v == null) return true; v = v[pk]; }
         return !v;
@@ -120,12 +120,12 @@ export const ExprMixin = {
       if (p.length === 1) {
         const key = p[0];
         return this._ec.set(k, (s, o) => {
-          if (o) { const meta = o[META] || self._mf.get(o); if (meta) self._tk(meta, key); }
+          if (o) { const meta = o[META] || self._mf.get(o); if (meta) self.trackDependency(meta, key); }
           return (o && key in o) ? o[key] : s[key];
         });
       }
       return this._ec.set(k, (s, o) => {
-        if (o) { const meta = o[META] || self._mf.get(o); if (meta) self._tk(meta, p[0]); }
+        if (o) { const meta = o[META] || self._mf.get(o); if (meta) self.trackDependency(meta, p[0]); }
         let v = (o && p[0] in o) ? o : s;
         for (const pk of p) { if (v == null) return; v = v[pk]; }
         return v;
@@ -151,7 +151,7 @@ export const ExprMixin = {
       }
       const self = this;
       return this._ec.set(k, (s, o) => {
-        if (o) { const meta = o[META] || self._mf.get(o); if (meta) self._tk(meta, arrName); }
+        if (o) { const meta = o[META] || self._mf.get(o); if (meta) self.trackDependency(meta, arrName); }
         let arr = (o && arrName in o) ? o[arrName] : s[arrName];
         if (arr == null) return;
         let v = arr[idx];

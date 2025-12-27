@@ -186,7 +186,7 @@ const HydrationMixin = {
       let leaving = false;
       const tpl = el.cloneNode(true);
 
-      const e = this._ef(() => {
+      const e = this.createEffect(() => {
         const ok = !!fn(this.s, o);
         if (ok && !cur && !leaving) {
           cur = tpl.cloneNode(true);
@@ -295,10 +295,10 @@ const HydrationMixin = {
       }
 
       // Set up reactive effect for future updates
-      const eff = this._ef(() => {
+      const eff = this.createEffect(() => {
         const newList = listFn(this.s, o) || [];
         const listMeta = newList[META] || this._mf.get(newList);
-        if (listMeta) this._tk(listMeta, ITERATE);
+        if (listMeta) this.trackDependency(listMeta, ITERATE);
 
         const newRaw = Array.isArray(newList) ? this.toRaw(newList) : Array.from(newList);
         const newLen = newRaw.length;

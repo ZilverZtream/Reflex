@@ -201,7 +201,7 @@ export const CompilerMixin = {
     const isSyncComp = this._cp.has(tagLower);
     const isAsyncComp = this._acp.has(tagLower);
 
-    const e = this._ef(() => {
+    const e = this.createEffect(() => {
       try {
         const ok = !!fn(this.s, o);
         if (ok && !cur && !leaving) {
@@ -397,10 +397,10 @@ export const CompilerMixin = {
     let rows = new Map();     // key -> { node, oldIdx }
     let oldKeys = [];         // Track key order for LIS
 
-    const eff = this._ef(() => {
+    const eff = this.createEffect(() => {
       const list = listFn(this.s, o) || [];
       const listMeta = list[META] || this._mf.get(list);
-      if (listMeta) this._tk(listMeta, ITERATE);
+      if (listMeta) this.trackDependency(listMeta, ITERATE);
 
       const raw = Array.isArray(list) ? this.toRaw(list) : Array.from(list);
 
@@ -453,30 +453,44 @@ export const CompilerMixin = {
               clonedTpl.removeAttribute('m-if');
             }
 
-            // Create a wrapper using a custom element to contain template content
-            // This acts as an "invisible" wrapper for reconciliation
-            // Using 'rfx-tpl' custom element to avoid conflicts with normal element queries
-            const wrapper = document.createElement('rfx-tpl');
-            wrapper.style.display = 'contents'; // Make wrapper invisible in layout
-
-            // Clone and append all content nodes
+            // OPTIMIZATION: Check if template has only one element child (single root)
+            // If so, use that element directly without wrapper to fix CSS selectors like ul > li
             const contentNodes = Array.from(clonedTpl.content.childNodes);
-            contentNodes.forEach(childNode => {
-              wrapper.appendChild(childNode.cloneNode(true));
-            });
+            const elementNodes = contentNodes.filter(node => node.nodeType === 1);
 
-            this._scopeMap.set(wrapper, scope);
+            if (elementNodes.length === 1) {
+              // Single root element - use it directly without wrapper
+              const singleRoot = elementNodes[0].cloneNode(true) as Element;
+              this._scopeMap.set(singleRoot, scope);
+              this._bnd(singleRoot, scope);
+              this._w(singleRoot, scope);
+              return singleRoot;
+            } else {
+              // Multi-root or mixed content - use wrapper for reconciliation
+              // Create a wrapper using a custom element to contain template content
+              // This acts as an "invisible" wrapper for reconciliation
+              // Using 'rfx-tpl' custom element to avoid conflicts with normal element queries
+              const wrapper = document.createElement('rfx-tpl');
+              wrapper.style.display = 'contents'; // Make wrapper invisible in layout
 
-            // Process bindings and walk each child element
-            const children = Array.from(wrapper.childNodes);
-            children.forEach(child => {
-              if (child.nodeType === 1) {
-                this._bnd(child as Element, scope);
-                this._w(child as Element, scope);
-              }
-            });
+              // Clone and append all content nodes
+              contentNodes.forEach(childNode => {
+                wrapper.appendChild(childNode.cloneNode(true));
+              });
 
-            return wrapper;
+              this._scopeMap.set(wrapper, scope);
+
+              // Process bindings and walk each child element
+              const children = Array.from(wrapper.childNodes);
+              children.forEach(child => {
+                if (child.nodeType === 1) {
+                  this._bnd(child as Element, scope);
+                  this._w(child as Element, scope);
+                }
+              });
+
+              return wrapper;
+            }
           } else {
             // Non-template elements: existing logic
             const node = tpl.cloneNode(true);
@@ -580,7 +594,7 @@ export const CompilerMixin = {
     if (raw.startsWith('{{') && raw.endsWith('}}') && raw.indexOf('{{', 2) < 0) {
       const fn = this._fn(raw.slice(2, -2));
       let prev;
-      const e = this._ef(() => {
+      const e = this.createEffect(() => {
         try {
           const v = fn(this.s, o);
           const next = v == null ? '' : String(v);
@@ -597,7 +611,7 @@ export const CompilerMixin = {
       x.startsWith('{{') ? this._fn(x.slice(2, -2)) : x
     );
     let prev;
-    const e = this._ef(() => {
+    const e = this.createEffect(() => {
       try {
         let out = '';
         for (let i = 0; i < pts.length; i++) {
@@ -635,7 +649,7 @@ export const CompilerMixin = {
                       attrName === 'transform' || attrName === 'gradientTransform' ||
                       attrName === 'patternTransform';
 
-    const e = this._ef(() => {
+    const e = this.createEffect(() => {
       try {
         let v = fn(this.s, o);
 
@@ -708,7 +722,7 @@ export const CompilerMixin = {
     const fn = this._fn(exp);
     let prev;
     const self = this;
-    const e = this._ef(() => {
+    const e = this.createEffect(() => {
       try {
         const v = fn(self.s, o);
         let html = v == null ? '' : String(v);
@@ -719,13 +733,27 @@ export const CompilerMixin = {
           if (purify && typeof purify.sanitize === 'function') {
             html = purify.sanitize(html);
           } else {
-            // CRITICAL: Fail hard instead of silent fallback
-            throw new Error(
-              'Reflex: SECURITY ERROR - m-html requires DOMPurify.\n' +
-              'Configure it with: app.configure({ domPurify: DOMPurify })\n' +
-              'Install: npm install dompurify\n' +
-              'Or disable sanitization (UNSAFE): app.configure({ sanitize: false })'
-            );
+            // Check if we're in development mode
+            const isDev = typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production';
+
+            if (isDev) {
+              // DEVELOPMENT: Warn loudly but allow rendering for prototyping
+              console.error(
+                '⚠️ SECURITY WARNING: m-html is rendering unsanitized HTML in development mode!\n' +
+                'This is DANGEROUS and should NEVER be used in production.\n' +
+                'Configure DOMPurify: app.configure({ domPurify: DOMPurify })\n' +
+                'Install: npm install dompurify'
+              );
+              // Allow rendering in development for prototyping
+            } else {
+              // PRODUCTION: Fail hard to prevent XSS vulnerabilities
+              throw new Error(
+                'Reflex: SECURITY ERROR - m-html requires DOMPurify in production.\n' +
+                'Configure it with: app.configure({ domPurify: DOMPurify })\n' +
+                'Install: npm install dompurify\n' +
+                'Or disable sanitization (UNSAFE): app.configure({ sanitize: false })'
+              );
+            }
           }
         }
 
@@ -746,7 +774,7 @@ export const CompilerMixin = {
     const d = el.style.display === 'none' ? '' : el.style.display;
     let prev, transitioning = false;
 
-    const e = this._ef(() => {
+    const e = this.createEffect(() => {
       try {
         const show = !!fn(this.s, o);
         const next = show ? d : 'none';
@@ -788,7 +816,7 @@ export const CompilerMixin = {
     const isMultiSelect = type === 'select-multiple';
     const isLazy = modifiers.includes('lazy');
 
-    const e = this._ef(() => {
+    const e = this.createEffect(() => {
       try {
         const v = fn(this.s, o);
         if (isChk) {
@@ -1098,7 +1126,7 @@ export const CompilerMixin = {
     // Track the current cleanup function
     let currentCleanup = null;
 
-    const e = this._ef(() => {
+    const e = this.createEffect(() => {
       // Call previous cleanup before running effect again
       if (typeof currentCleanup === 'function') {
         try {
@@ -1152,7 +1180,7 @@ export const CompilerMixin = {
     // Track the current cleanup function
     let currentCleanup = null;
 
-    const e = this._ef(() => {
+    const e = this.createEffect(() => {
       // Call previous cleanup before running directive again
       if (typeof currentCleanup === 'function') {
         try {

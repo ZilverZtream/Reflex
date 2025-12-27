@@ -14,7 +14,8 @@
  * extensions like hydration, SSR, and custom features.
  */
 
-// Symbols are used by mixins, not directly in this file
+// Symbols are used by mixins, and META is used for DevTools
+import { META } from './symbols.js';
 import { ReactivityMixin } from './reactivity.js';
 import { SchedulerMixin } from './scheduler.js';
 import { ExprMixin, ExprCache } from './expr.js';
@@ -53,7 +54,7 @@ export class Reflex {
   declare _qf: boolean;
   declare _p: boolean;
   declare _b: number;
-  declare _pt: Map<any, Set<any>>;
+  declare pendingTriggers: Map<any, Set<any>>;
   declare _ec: ExprCache;
   declare _mf: WeakMap<object, any>;
   declare _cl: WeakMap<Node, Array<() => void>>;
@@ -96,7 +97,7 @@ export class Reflex {
     this._qf = false;         // Which queue is active
     this._p = false;          // Flush Pending
     this._b = 0;              // Batch Depth
-    this._pt = new Map();     // Pending Triggers (for batching)
+    this.pendingTriggers = new Map();     // Pending Triggers (for batching)
 
     // === CACHES ===
     this._ec = new ExprCache(1000);  // Expression Cache (FIFO eviction)
@@ -124,6 +125,24 @@ export class Reflex {
       onError: null,          // Global error handler
       domPurify: null         // DOMPurify instance for m-html sanitization
     };
+
+    // === AUTO-CSP DETECTION ===
+    // Try to detect CSP restrictions and automatically enable safe mode
+    if (!this.cfg.cspSafe) {
+      try {
+        // Attempt to create a function - this will fail in strict CSP environments
+        new Function('');
+      } catch (e) {
+        // CSP violation detected - switch to safe mode automatically
+        this.cfg.cspSafe = true;
+        if (typeof console !== 'undefined' && console.warn) {
+          console.warn(
+            'Reflex: CSP restriction detected. Automatically switching to Safe Parser mode.\n' +
+            'To suppress this warning, configure explicitly: app.configure({ cspSafe: true, parser: SafeExprParser })'
+          );
+        }
+      }
+    }
 
     // Initialize reactive state
     this.s = this._r(init);
@@ -481,7 +500,7 @@ export class Reflex {
 
     for (const pd of propDefs) {
       const fn = this._fn(pd.exp);
-      const e = this._ef(() => { props[pd.name] = fn(this.s, o); });
+      const e = this.createEffect(() => { props[pd.name] = fn(this.s, o); });
       e.o = o;
       this._reg(inst, e.kill);
     }
@@ -710,7 +729,28 @@ if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
     if (typeof window === 'undefined') return;
     const hook = window.__REFLEX_DEVTOOLS_HOOK__;
     if (!hook || typeof hook !== 'object') return;
-    const payload = { app: this, root: this._dr, state: this.s, components: this._cp };
+
+    // Helper function to get dependency map for an object
+    const getDependencies = (obj) => {
+      if (obj === null || typeof obj !== 'object') return null;
+      const meta = obj[META] || this._mf.get(obj);
+      if (!meta) return null;
+
+      // Convert dependency map to a readable format
+      const deps = {};
+      for (const [key, effectSet] of meta.d) {
+        deps[String(key)] = Array.from(effectSet).length;
+      }
+      return deps;
+    };
+
+    const payload = {
+      app: this,
+      root: this._dr,
+      state: this.s,
+      components: this._cp,
+      getDependencies  // Expose the helper to DevTools
+    };
     if (typeof hook.registerApp === 'function') {
       hook.registerApp(payload);
     } else if (Array.isArray(hook.apps)) {

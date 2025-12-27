@@ -15,6 +15,7 @@ import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { minify } from 'terser';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -81,6 +82,12 @@ const builds = [
     globalName: 'Reflex',
     minify: true,
     sourcemap: false,
+    // Mangle properties to reduce bundle size
+    // This mangles internal method names to short names in the minified build
+    // We mangle properties that:
+    // 1. Start with underscore (private internal methods)
+    // 2. Match our renamed long method names (trackDependency, triggerEffects, etc.)
+    mangleProps: /^(_[a-z_]+|trackDependency|triggerEffects|pendingTriggers|wrapArrayMethod|wrapCollectionMethod|queueJob|createEffect|flushQueue)$/,
     footer: {
       js: 'if(typeof window!=="undefined"){window.Reflex=Reflex.Reflex;}'
     }
@@ -600,6 +607,32 @@ async function build() {
     } else {
       // Single build
       await Promise.all(builds.map(config => esbuild.build(config)));
+
+      // Post-process minified build with Terser for aggressive property mangling
+      const minifiedPath = path.join(distDir, 'reflex.min.js');
+      const code = fs.readFileSync(minifiedPath, 'utf8');
+
+      const terserResult = await minify(code, {
+        compress: {
+          passes: 2,
+          unsafe: true,
+          unsafe_methods: true,
+          unsafe_proto: true,
+        },
+        mangle: {
+          properties: {
+            // Mangle properties matching these patterns
+            regex: /^(trackDependency|triggerEffects|pendingTriggers|wrapArrayMethod|wrapCollectionMethod|queueJob|createEffect|flushQueue|_[a-z_]+)$/,
+            reserved: ['s', 'cfg', 'mount', 'configure', 'component', 'directive', 'use', 'computed', 'watch', 'batch', 'nextTick', 'toRaw', 'clearCache', 'Reflex']
+          }
+        },
+        format: {
+          comments: false
+        }
+      });
+
+      fs.writeFileSync(minifiedPath, terserResult.code);
+
       generateDeclarations();
 
       // Print bundle sizes
