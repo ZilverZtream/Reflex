@@ -130,6 +130,9 @@ export class Reflex {
     this._dr = el;
     this._bnd(el, null);
     this._w(el, null);
+    if (process.env.NODE_ENV !== 'production') {
+      this._dtRegister();
+    }
     return this;
   }
 
@@ -339,3 +342,24 @@ Object.assign(Reflex.prototype, ReactivityMixin);
 Object.assign(Reflex.prototype, SchedulerMixin);
 Object.assign(Reflex.prototype, ExprMixin);
 Object.assign(Reflex.prototype, CompilerMixin);
+
+if (process.env.NODE_ENV !== 'production') {
+  Reflex.prototype._dtRegister = function() {
+    if (typeof window === 'undefined') return;
+    const hook = window.__REFLEX_DEVTOOLS_HOOK__;
+    if (!hook || typeof hook !== 'object') return;
+    const payload = { app: this, root: this._dr, state: this.s, components: this._cp };
+    if (typeof hook.registerApp === 'function') {
+      hook.registerApp(payload);
+    } else if (Array.isArray(hook.apps)) {
+      hook.apps.push(payload);
+    }
+  };
+
+  Reflex.prototype._dtEmit = function(event, payload) {
+    if (typeof window === 'undefined') return;
+    const hook = window.__REFLEX_DEVTOOLS_HOOK__;
+    if (!hook || typeof hook.emit !== 'function') return;
+    hook.emit(event, payload);
+  };
+}
