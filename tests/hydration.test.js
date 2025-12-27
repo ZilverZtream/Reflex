@@ -9,8 +9,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { Reflex } from '../src/index.js';
-import { withHydration } from '../src/hydration/index.js';
+import { Reflex } from '../src/index.ts';
+import { withHydration } from '../src/hydration/index.ts';
 
 describe('Plugin System', () => {
   beforeEach(() => {

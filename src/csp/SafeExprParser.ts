@@ -49,6 +49,9 @@ UNSAFE_PROPS['__proto__'] = 1;
  * - Magic properties: $event, $el, $refs, $dispatch, $nextTick
  */
 export class SafeExprParser {
+  declare pos: number;
+  declare expr: string;
+
   constructor() {
     this.pos = 0;
     this.expr = '';

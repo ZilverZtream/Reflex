@@ -14,16 +14,16 @@ import {
   scopeSelector,
   transformCSS,
   tokenizeCSS
-} from '../src/scoped-css/css-transform.js';
+} from '../src/scoped-css/css-transform.ts';
 import {
   transformTemplate,
   injectScopeAttribute
-} from '../src/scoped-css/template-transform.js';
+} from '../src/scoped-css/template-transform.ts';
 import {
   transformComponent,
   extractStyles,
   extractTemplate
-} from '../src/scoped-css/component-transform.js';
+} from '../src/scoped-css/component-transform.ts';
 
 describe('Scoped CSS', () => {
   describe('generateScopeId', () => {

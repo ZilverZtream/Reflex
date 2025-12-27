@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { Reflex } from '../src/index.js';
+import { Reflex } from '../src/index.ts';
 
 describe('Reactivity', () => {
   describe('Basic Proxy', () => {

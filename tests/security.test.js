@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { Reflex } from '../src/index.js';
+import { Reflex } from '../src/index.ts';
 
 describe('Security', () => {
   beforeEach(() => {

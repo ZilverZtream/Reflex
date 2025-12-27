@@ -6,8 +6,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { Reflex } from '../src/index.js';
-import { SafeExprParser } from '../src/csp/SafeExprParser.js';
+import { Reflex } from '../src/index.ts';
+import { SafeExprParser } from '../src/csp/SafeExprParser.ts';
 
 describe('CSP-Safe Parser', () => {
   let parser;
