@@ -157,8 +157,11 @@ export const CompilerMixin = {
       } else if (nm.startsWith('@')) {
         this._ev(n, nm.slice(1), v, o);
       } else if (nm.startsWith('m-')) {
-        if (nm === 'm-model') this._mod(n, v, o);
-        else if (nm === 'm-text') this._at(n, 'textContent', v, o);
+        if (nm.startsWith('m-model')) {
+          // Extract modifiers from m-model (e.g., m-model.lazy)
+          const modifiers = nm.split('.').slice(1);
+          this._mod(n, v, o, modifiers);
+        } else if (nm === 'm-text') this._at(n, 'textContent', v, o);
         else if (nm === 'm-html') this._html(n, v, o);
         else if (nm === 'm-show') this._show(n, v, o, trans);
         else if (nm === 'm-effect') this._effect(n, v, o);
@@ -572,17 +575,28 @@ export const CompilerMixin = {
   /**
    * Two-way binding: m-model="expr"
    */
-  _mod(el, exp, o) {
+  _mod(el, exp, o, modifiers = []) {
     const fn = this._fn(exp);
     const type = (el.type || '').toLowerCase();
     const isChk = type === 'checkbox';
+    const isRadio = type === 'radio';
     const isNum = type === 'number' || type === 'range';
     const isMultiSelect = type === 'select-multiple';
+    const isLazy = modifiers.includes('lazy');
 
     const e = this._ef(() => {
       const v = fn(this.s, o);
-      if (isChk) el.checked = !!v;
-      else if (isMultiSelect) {
+      if (isChk) {
+        // Handle checkbox array binding
+        if (Array.isArray(v)) {
+          el.checked = v.includes(el.value);
+        } else {
+          el.checked = !!v;
+        }
+      } else if (isRadio) {
+        // Radio button: check if value matches model
+        el.checked = String(v) === String(el.value);
+      } else if (isMultiSelect) {
         // For multi-select, v should be an array of selected values
         const selectedValues = Array.isArray(v) ? v : [];
         // Update the selected options
@@ -600,9 +614,31 @@ export const CompilerMixin = {
 
     const up = () => {
       let v;
-      if (isChk) v = el.checked;
-      else if (isNum) v = el.value === '' ? null : parseFloat(el.value);
-      else if (isMultiSelect) {
+      if (isChk) {
+        // Handle checkbox array binding
+        const currentValue = fn(this.s, o);
+        if (Array.isArray(currentValue)) {
+          // Toggle value in array
+          const arr = [...currentValue];
+          const idx = arr.indexOf(el.value);
+          if (el.checked && idx === -1) {
+            arr.push(el.value);
+          } else if (!el.checked && idx !== -1) {
+            arr.splice(idx, 1);
+          }
+          v = arr;
+        } else {
+          v = el.checked;
+        }
+      } else if (isRadio) {
+        v = el.value;
+      } else if (isNum) {
+        // Handle badInput state
+        if (el.validity && el.validity.badInput) {
+          return; // Don't update if input is invalid
+        }
+        v = el.value === '' ? null : parseFloat(el.value);
+      } else if (isMultiSelect) {
         // For multi-select, return array of selected values
         // Fallback for environments without selectedOptions (e.g., happy-dom)
         if (el.selectedOptions) {
@@ -638,12 +674,25 @@ export const CompilerMixin = {
       t[end] = v;
     };
 
-    const evt = isChk || el.tagName === 'SELECT' ? 'change' : 'input';
+    // Determine event type based on element type and .lazy modifier
+    let evt;
+    if (isLazy) {
+      evt = 'change'; // .lazy always uses 'change'
+    } else {
+      evt = isChk || isRadio || el.tagName === 'SELECT' ? 'change' : 'input';
+    }
+
     el.addEventListener(evt, up);
-    if (evt !== 'change') el.addEventListener('change', up);
+    // Also listen to 'change' for inputs (unless already using it)
+    if (evt !== 'change' && !isLazy) {
+      el.addEventListener('change', up);
+    }
+
     this._reg(el, () => {
       el.removeEventListener(evt, up);
-      el.removeEventListener('change', up);
+      if (evt !== 'change' && !isLazy) {
+        el.removeEventListener('change', up);
+      }
     });
   },
 
@@ -712,7 +761,11 @@ export const CompilerMixin = {
       const handler = (e) => {
         if (mod.includes('prevent')) e.preventDefault();
         if (mod.includes('stop')) e.stopPropagation();
-        fn(self.s, o, e, el);
+        try {
+          fn(self.s, o, e, el);
+        } catch (err) {
+          self._handleError(err, o);
+        }
       };
       const opts: AddEventListenerOptions | undefined = mod.includes('once') ? { once: true } : undefined;
       target.addEventListener(nm, handler, opts);
@@ -727,11 +780,48 @@ export const CompilerMixin = {
         if (!el.contains(e.target) && e.target !== el) {
           if (mod.includes('prevent')) e.preventDefault();
           if (mod.includes('stop')) e.stopPropagation();
-          fn(self.s, o, e, el);
+          try {
+            fn(self.s, o, e, el);
+          } catch (err) {
+            self._handleError(err, o);
+          }
         }
       };
       document.addEventListener(nm, handler);
       this._reg(el, () => document.removeEventListener(nm, handler));
+      return;
+    }
+
+    // Use direct binding for .stop and .self (delegation won't work for these)
+    if (mod.includes('stop') || mod.includes('self')) {
+      const self = this;
+      const handler = (e) => {
+        if (mod.includes('self') && e.target !== el) return;
+        if (mod.includes('prevent')) e.preventDefault();
+        if (mod.includes('stop')) e.stopPropagation();
+
+        // Check key modifiers
+        if (e.key) {
+          if (mod.includes('enter') && e.key !== 'Enter') return;
+          if (mod.includes('esc') && e.key !== 'Escape') return;
+          if (mod.includes('space') && e.key !== ' ') return;
+          if (mod.includes('tab') && e.key !== 'Tab') return;
+        }
+        if (mod.includes('ctrl') && !e.ctrlKey) return;
+        if (mod.includes('alt') && !e.altKey) return;
+        if (mod.includes('shift') && !e.shiftKey) return;
+        if (mod.includes('meta') && !e.metaKey) return;
+
+        try {
+          fn(self.s, o, e, el);
+        } catch (err) {
+          self._handleError(err, o);
+        }
+      };
+
+      const opts = mod.includes('once') ? { once: true } : undefined;
+      el.addEventListener(nm, handler, opts);
+      this._reg(el, () => el.removeEventListener(nm, handler, opts));
       return;
     }
 
@@ -753,9 +843,34 @@ export const CompilerMixin = {
       if (h) {
         const { f, o, m } = h;
         if (m.includes('self') && e.target !== t) { t = t.parentNode; continue; }
+
+        // Check key modifiers
+        if (m.length > 0) {
+          const hasKeyMod = m.some(mod => ['enter', 'esc', 'space', 'tab', 'ctrl', 'alt', 'shift', 'meta'].includes(mod));
+          if (hasKeyMod && e.key) {
+            // Key-specific modifiers
+            if (m.includes('enter') && e.key !== 'Enter') { t = t.parentNode; continue; }
+            if (m.includes('esc') && e.key !== 'Escape') { t = t.parentNode; continue; }
+            if (m.includes('space') && e.key !== ' ') { t = t.parentNode; continue; }
+            if (m.includes('tab') && e.key !== 'Tab') { t = t.parentNode; continue; }
+            // System key modifiers
+            if (m.includes('ctrl') && !e.ctrlKey) { t = t.parentNode; continue; }
+            if (m.includes('alt') && !e.altKey) { t = t.parentNode; continue; }
+            if (m.includes('shift') && !e.shiftKey) { t = t.parentNode; continue; }
+            if (m.includes('meta') && !e.metaKey) { t = t.parentNode; continue; }
+          }
+        }
+
         if (m.includes('prevent')) e.preventDefault();
         if (m.includes('stop')) e.stopPropagation();
-        f(this.s, o, e, t);
+
+        // Wrap handler in try-catch for error handling
+        try {
+          f(this.s, o, e, t);
+        } catch (err) {
+          this._handleError(err, o);
+        }
+
         if (m.includes('once')) this._dh.get(nm).delete(t);
         if (e.cancelBubble) return;
       }

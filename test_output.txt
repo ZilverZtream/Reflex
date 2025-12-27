@@ -1,0 +1,1174 @@
+
+> reflex@1.3.0 test
+> vitest run
+
+
+ RUN  v1.6.1 /home/user/Reflex
+
+ ✓ tests/reconcile.test.js  (15 tests) 9ms
+ ✓ tests/scoped-css.test.js  (65 tests) 34ms
+ ✓ tests/events.test.js  (15 tests) 29ms
+stderr | tests/security.test.js > Security > Prototype Pollution Prevention > should block bracket notation constructor access
+Reflex: Blocked runtime access to unsafe property: constructor
+
+stderr | tests/security.test.js > Security > Iron Membrane Sandbox > should block obfuscated constructor access via string concatenation
+Reflex: Blocked runtime access to unsafe property: constructor
+
+stderr | tests/security.test.js > Security > Iron Membrane Sandbox > should block constructor access via bracket notation
+Reflex: Blocked runtime access to unsafe property: constructor
+
+stderr | tests/security.test.js > Security > Iron Membrane Sandbox > should block __proto__ access via bracket notation
+Reflex: Blocked runtime access to unsafe property: __proto__
+
+stderr | tests/security.test.js > Security > Iron Membrane Sandbox > should block prototype access via bracket notation
+Reflex: Blocked runtime access to unsafe property: prototype
+
+stderr | tests/security.test.js > Security > Iron Membrane Sandbox > should allow safe array methods through membrane
+Reflex: Blocked runtime access to unsafe property: constructor
+
+stderr | tests/security.test.js > Security > Iron Membrane Sandbox > should recursively wrap nested objects in membrane
+Reflex: Blocked runtime access to unsafe property: constructor
+
+ ✓ tests/security.test.js  (28 tests) 53ms
+ ❯ tests/browser-quirks.test.js  (19 tests | 9 failed) 65ms
+   ❯ tests/browser-quirks.test.js > Browser Quirks > The "Input Type" Chaos > should handle input[type="number"] with BadInput state
+     → expected 12 to be 42 // Object.is equality
+   ❯ tests/browser-quirks.test.js > Browser Quirks > The "Input Type" Chaos > should handle m-model on radio inputs with dynamic :value binding
+     → expected false to be true // Object.is equality
+   ❯ tests/browser-quirks.test.js > Browser Quirks > The "Input Type" Chaos > should handle m-model.lazy (update on change vs input)
+     → expected '' to be 'b' // Object.is equality
+   ❯ tests/browser-quirks.test.js > Browser Quirks > SVG & Namespace Handling > should handle camelCase vs kebab-case attribute binding on SVG (viewBox)
+     → expected null to be '0 0 100 100' // Object.is equality
+   ❯ tests/browser-quirks.test.js > Browser Quirks > SVG & Namespace Handling > should handle kebab-case version :view-box binding
+     → expected null to be '0 0 50 50' // Object.is equality
+   ❯ tests/browser-quirks.test.js > Browser Quirks > The "ContentEditable" Trap > should update contenteditable reactively without destroying selection
+     → expected false to be true // Object.is equality
+   ❯ tests/browser-quirks.test.js > Browser Quirks > Radio button edge cases > should handle radio groups with same name across different models
+     → expected false to be true // Object.is equality
+   ❯ tests/browser-quirks.test.js > Browser Quirks > Checkbox arrays > should handle m-model on checkboxes with array binding
+     → expected true to be false // Object.is equality
+   ❯ tests/browser-quirks.test.js > Browser Quirks > Textarea edge cases > should handle textarea with m-model.lazy
+     → expected 'Initial' to be 'Typing...' // Object.is equality
+ ✓ tests/directives.test.js  (40 tests) 72ms
+stderr | tests/directives.test.js > Directives > Attribute Binding (:attr) > should bind class with array syntax
+Reflex: Blocked runtime access to unsafe property: constructor
+
+stderr | tests/hydration.test.js > Plugin System > should install function plugins
+Reflex: Blocked runtime access to unsafe property: constructor
+Reflex: Blocked runtime access to unsafe property: constructor
+
+stderr | tests/hydration.test.js > Plugin System > should install function plugins with options
+Reflex: Blocked runtime access to unsafe property: constructor
+Reflex: Blocked runtime access to unsafe property: constructor
+
+stderr | tests/hydration.test.js > Plugin System > should install object plugins with install method
+Reflex: Blocked runtime access to unsafe property: constructor
+Reflex: Blocked runtime access to unsafe property: constructor
+
+stderr | tests/hydration.test.js > Plugin System > should call init on mixin plugins
+Reflex: Blocked runtime access to unsafe property: constructor
+Reflex: Blocked runtime access to unsafe property: constructor
+
+ ✓ tests/csp-parser.test.js  (27 tests) 33ms
+ ❯ tests/composition.test.js  (25 tests | 9 failed) 186ms
+   ❯ tests/composition.test.js > Directive Composition > Structural Conflict > should handle m-for + m-if on same element
+     → expected +0 to be 2 // Object.is equality
+   ❯ tests/composition.test.js > Directive Composition > Structural Conflict > should handle nested m-for with inner m-if
+     → expected +0 to be 3 // Object.is equality
+   ❯ tests/composition.test.js > Directive Composition > Event Modifier Chaining > should handle @click.stop.prevent.once - all three modifiers
+     → expected true to be false // Object.is equality
+   ❯ tests/composition.test.js > Directive Composition > Event Modifier Chaining > should handle @click.stop - stops propagation
+     → expected true to be false // Object.is equality
+   ❯ tests/composition.test.js > Directive Composition > Event Modifier Chaining > should handle @keydown.enter modifier
+     → expected false to be true // Object.is equality
+   ❯ tests/composition.test.js > Directive Composition > Event Modifier Chaining > should handle @keydown.ctrl.enter - combined key modifiers
+     → expected false to be true // Object.is equality
+   ❯ tests/composition.test.js > Directive Composition > Event Modifier Chaining > should handle @click.self - only trigger when event target is element itself
+     → expected false to be true // Object.is equality
+   ❯ tests/composition.test.js > Directive Composition > Event Handlers with Structural Directives > should handle @click with m-if toggling
+     → expected +0 to be 1 // Object.is equality
+   ❯ tests/composition.test.js > Directive Composition > Complex Nested Compositions > should handle deeply nested directive combinations
+     → expected [] to include 1
+ ✓ tests/hydration.test.js  (22 tests) 40ms
+ ❯ tests/error-handling.test.js  (23 tests | 14 failed) 477ms
+   ❯ tests/error-handling.test.js > Error Handling & Resilience > Render Errors > should catch errors in interpolation and continue rendering
+     → expected null not to be null
+   ❯ tests/error-handling.test.js > Error Handling & Resilience > Render Errors > should handle errors in m-text directive
+     → expected false to be true // Object.is equality
+   ❯ tests/error-handling.test.js > Error Handling & Resilience > Render Errors > should handle errors in m-html directive
+     → expected false to be true // Object.is equality
+   ❯ tests/error-handling.test.js > Error Handling & Resilience > Render Errors > should handle errors in computed attribute bindings
+     → expected false to be true // Object.is equality
+   ❯ tests/error-handling.test.js > Error Handling & Resilience > Handler Errors > should catch errors in @click handlers and continue app execution
+     → expected false to be true // Object.is equality
+   ❯ tests/error-handling.test.js > Error Handling & Resilience > Handler Errors > should handle errors in event handler with arguments
+     → Handler error: test
+   ❯ tests/error-handling.test.js > Error Handling & Resilience > Handler Errors > should handle errors in inline event expressions
+     → Inline error
+   ❯ tests/error-handling.test.js > Error Handling & Resilience > Handler Errors > should handle errors in nested event handlers
+     → expected false to be true // Object.is equality
+   ❯ tests/error-handling.test.js > Error Handling & Resilience > Watcher Errors > should handle errors in immediate watcher
+     → Immediate watcher error
+   ❯ tests/error-handling.test.js > Error Handling & Resilience > Effect Errors > should handle errors in effect cleanup functions
+     → expected false to be true // Object.is equality
+   ❯ tests/error-handling.test.js > Error Handling & Resilience > Computed Errors > should handle errors in computed getter
+     → Computed crashed
+   ❯ tests/error-handling.test.js > Error Handling & Resilience > Error Recovery > should recover from error and continue normal operation
+     → expected +0 to be 1 // Object.is equality
+   ❯ tests/error-handling.test.js > Error Handling & Resilience > Error Recovery > should handle cascading errors gracefully
+     → expected +0 to be 3 // Object.is equality
+   ❯ tests/error-handling.test.js > Error Handling & Resilience > Production Mode Error Handling > should not expose internal stack traces in production
+     → expected null not to be null
+ ❯ tests/membrane-benchmark.test.js  (4 tests | 1 failed) 491ms
+   ❯ tests/membrane-benchmark.test.js > Iron Membrane Performance > should have minimal overhead for simple property access
+     → expected 0.0012484347100000014 to be less than 0.001
+stdout | tests/membrane-benchmark.test.js > Iron Membrane Performance > should have minimal overhead for simple property access
+
+Property Access Benchmark (100000 iterations):
+  Baseline time: 2.59ms
+  Membrane time: 124.84ms
+  Overhead: 4721.8%
+  Average time per access: 1.2484µs
+
+stdout | tests/membrane-benchmark.test.js > Iron Membrane Performance > should efficiently handle array operations
+Array operations time for 1000 iterations: 0.14ms
+Average per iteration: 0.000ms
+
+stderr | tests/membrane-benchmark.test.js > Iron Membrane Performance > should efficiently handle array operations
+Reflex: Blocked runtime access to unsafe property: constructor
+
+stdout | tests/membrane-benchmark.test.js > Iron Membrane Performance > should efficiently handle nested object access
+
+Nested access benchmark (100000 iterations):
+  Total time: 63.41ms
+  Average per iteration: 0.0006ms
+
+ ❯ tests/lifecycle.test.js  (21 tests | 7 failed) 505ms
+   ❯ tests/lifecycle.test.js > Lifecycle & Memory Leaks > Listener Count Verification > should clean up window and document listeners on unmount
+     → expected 0 to be less than 0
+   ❯ tests/lifecycle.test.js > Lifecycle & Memory Leaks > Async Component Teardown > should cancel pending effects when component unmounts
+     → expected false to be true // Object.is equality
+   ❯ tests/lifecycle.test.js > Lifecycle & Memory Leaks > DOM Node Cleanup > should fully remove m-for items from DOM when list is cleared
+     → expected 1 to be +0 // Object.is equality
+   ❯ tests/lifecycle.test.js > Lifecycle & Memory Leaks > Computed Property Cleanup > should stop computing when computed is no longer accessed
+     → expected "spy" to be called 2 times, but got 3 times
+   ❯ tests/lifecycle.test.js > Lifecycle & Memory Leaks > Effect Cleanup > should call cleanup function when effect dependencies change
+     → expected +0 to be 1 // Object.is equality
+   ❯ tests/lifecycle.test.js > Lifecycle & Memory Leaks > Effect Cleanup > should call cleanup when effect element is removed
+     → expected false to be true // Object.is equality
+   ❯ tests/lifecycle.test.js > Lifecycle & Memory Leaks > Complex Lifecycle Scenarios > should clean up in correct order for nested components
+     → expected +0 to be 3 // Object.is equality
+ ✓ tests/reactivity.test.js  (37 tests) 546ms
+ ✓ tests/async-components.test.js  (21 tests) 548ms
+ ❯ tests/stress-reactivity.test.js  (25 tests | 2 failed) 7791ms
+   ❯ tests/stress-reactivity.test.js > Stress Reactivity > Prototype Pollution Attempt > should block attempts to set constructor.prototype
+     → expected [Function] to throw an error
+   ❯ tests/stress-reactivity.test.js > Stress Reactivity > Concurrent Mutations > should maintain consistency with interleaved mutations
+stderr | tests/stress-reactivity.test.js > Stress Reactivity > Prototype Pollution Attempt > should block attempts to pollute Object.prototype via __proto__
+Reflex: Blocked runtime access to unsafe property: __proto__
+
+stderr | tests/stress-reactivity.test.js > Stress Reactivity > Prototype Pollution Attempt > should block __proto__ assignment in nested objects
+Reflex: Blocked runtime access to unsafe property: __proto__
+
+stderr | tests/stress-reactivity.test.js > Stress Reactivity > Prototype Pollution Attempt > should block prototype pollution via array methods
+Reflex: Blocked runtime access to unsafe property: __proto__
+
+stderr | tests/stress-reactivity.test.js > Stress Reactivity > Prototype Pollution Attempt > should block attempts to access and modify constructor
+Reflex: Blocked runtime access to unsafe property: constructor
+
+stderr | tests/stress-reactivity.test.js > Stress Reactivity > Concurrent Mutations > should maintain consistency with interleaved mutations
+Reflex: Blocked runtime access to unsafe property: constructor
+Reflex: Blocked runtime access to unsafe property: constructor
+Reflex: Blocked runtime access to unsafe property: constructor
+Reflex: Blocked runtime access to unsafe property: constructor
+Reflex: Blocked runtime access to unsafe property: constructor
+Reflex: Blocked runtime access to unsafe property: constructor
+
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/stress-reactivity.test.js > Stress Reactivity > Concurrent Mutations
+TypeError: Cannot read properties of undefined (reading 'name')
+ ❯ printComplexValue node_modules/pretty-format/build/index.js:209:34
+ ❯ format node_modules/pretty-format/build/index.js:466:10
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/42]⎯
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 42 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/browser-quirks.test.js > Browser Quirks > The "Input Type" Chaos > should handle input[type="number"] with BadInput state
+AssertionError: expected 12 to be 42 // Object.is equality
+
+- Expected
++ Received
+
+- 42
++ 12
+
+ ❯ tests/browser-quirks.test.js:43:25
+     41|       // When badInput is true, the framework should keep the previous…
+     42|       // or handle it gracefully (not crash, not set to NaN)
+     43|       expect(app.s.num).toBe(42); // Should not change from last valid…
+       |                         ^
+     44|     });
+     45| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/42]⎯
+
+ FAIL  tests/browser-quirks.test.js > Browser Quirks > The "Input Type" Chaos > should handle m-model on radio inputs with dynamic :value binding
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/browser-quirks.test.js:68:33
+     66|       // Verify the correct radio is checked based on model
+     67|       expect(radios[0].checked).toBe(false);
+     68|       expect(radios[1].checked).toBe(true); // selected = 'b'
+       |                                 ^
+     69|       expect(radios[2].checked).toBe(false);
+     70| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/42]⎯
+
+ FAIL  tests/browser-quirks.test.js > Browser Quirks > The "Input Type" Chaos > should handle m-model.lazy (update on change vs input)
+AssertionError: expected '' to be 'b' // Object.is equality
+
+- Expected
++ Received
+
+- b
+
+ ❯ tests/browser-quirks.test.js:146:26
+    144|       // Lazy m-model SHOULD update on 'change' event
+    145|       lazyInput.dispatchEvent(new Event('change'));
+    146|       expect(app.s.lazy).toBe('b'); // Now updated
+       |                          ^
+    147| 
+    148|       // Continue typing in normal input
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/42]⎯
+
+ FAIL  tests/browser-quirks.test.js > Browser Quirks > SVG & Namespace Handling > should handle camelCase vs kebab-case attribute binding on SVG (viewBox)
+AssertionError: expected null to be '0 0 100 100' // Object.is equality
+
+- Expected: 
+"0 0 100 100"
+
++ Received: 
+null
+
+ ❯ tests/browser-quirks.test.js:215:43
+    213| 
+    214|       // SVG attributes are case-sensitive: 'viewBox' not 'viewbox'
+    215|       expect(svg.getAttribute('viewBox')).toBe('0 0 100 100');
+       |                                           ^
+    216| 
+    217|       app.s.box = '0 0 200 200';
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/42]⎯
+
+ FAIL  tests/browser-quirks.test.js > Browser Quirks > SVG & Namespace Handling > should handle kebab-case version :view-box binding
+AssertionError: expected null to be '0 0 50 50' // Object.is equality
+
+- Expected: 
+"0 0 50 50"
+
++ Received: 
+null
+
+ ❯ tests/browser-quirks.test.js:235:43
+    233| 
+    234|       // When using kebab-case :view-box, it should be converted to vi…
+    235|       expect(svg.getAttribute('viewBox')).toBe('0 0 50 50');
+       |                                           ^
+    236|     });
+    237|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/42]⎯
+
+ FAIL  tests/browser-quirks.test.js > Browser Quirks > The "ContentEditable" Trap > should update contenteditable reactively without destroying selection
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/browser-quirks.test.js:274:37
+    272| 
+    273|       expect(div.textContent).toBe('Updated text');
+    274|       expect(div.isContentEditable).toBe(true);
+       |                                     ^
+    275|     });
+    276| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/42]⎯
+
+ FAIL  tests/browser-quirks.test.js > Browser Quirks > Radio button edge cases > should handle radio groups with same name across different models
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/browser-quirks.test.js:334:33
+    332|       // Verify correct radios are checked
+    333|       expect(radios[0].checked).toBe(false); // red
+    334|       expect(radios[1].checked).toBe(true);  // blue
+       |                                 ^
+    335|       expect(radios[2].checked).toBe(true);  // small
+    336|       expect(radios[3].checked).toBe(false); // large
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/42]⎯
+
+ FAIL  tests/browser-quirks.test.js > Browser Quirks > Checkbox arrays > should handle m-model on checkboxes with array binding
+AssertionError: expected true to be false // Object.is equality
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ tests/browser-quirks.test.js:367:37
+    365| 
+    366|       // Verify initial state
+    367|       expect(checkboxes[0].checked).toBe(false);
+       |                                     ^
+    368|       expect(checkboxes[1].checked).toBe(true);
+    369|       expect(checkboxes[2].checked).toBe(false);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/42]⎯
+
+ FAIL  tests/browser-quirks.test.js > Browser Quirks > Textarea edge cases > should handle textarea with m-model.lazy
+AssertionError: expected 'Initial' to be 'Typing...' // Object.is equality
+
+- Expected
++ Received
+
+- Typing...
++ Initial
+
+ ❯ tests/browser-quirks.test.js:472:33
+    470|       // Trigger change
+    471|       textarea.dispatchEvent(new Event('change'));
+    472|       expect(app.s.description).toBe('Typing...'); // Now updated
+       |                                 ^
+    473|     });
+    474|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/42]⎯
+
+ FAIL  tests/composition.test.js > Directive Composition > Structural Conflict > should handle m-for + m-if on same element
+AssertionError: expected +0 to be 2 // Object.is equality
+
+- Expected
++ Received
+
+- 2
++ 0
+
+ ❯ tests/composition.test.js:147:26
+    145|       // Only active items should render
+    146|       const lis = document.querySelectorAll('li');
+    147|       expect(lis.length).toBe(2);
+       |                          ^
+    148|       expect(lis[0].textContent).toBe('Alice');
+    149|       expect(lis[1].textContent).toBe('Charlie');
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[11/42]⎯
+
+ FAIL  tests/composition.test.js > Directive Composition > Structural Conflict > should handle nested m-for with inner m-if
+AssertionError: expected +0 to be 3 // Object.is equality
+
+- Expected
++ Received
+
+- 3
++ 0
+
+ ❯ tests/composition.test.js:187:28
+    185| 
+    186|       const spans = document.querySelectorAll('span');
+    187|       expect(spans.length).toBe(3); // A, C, D
+       |                            ^
+    188|       expect(spans[0].textContent).toBe('A');
+    189|       expect(spans[1].textContent).toBe('C');
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[12/42]⎯
+
+ FAIL  tests/composition.test.js > Directive Composition > Event Modifier Chaining > should handle @click.stop.prevent.once - all three modifiers
+AssertionError: expected true to be false // Object.is equality
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ tests/composition.test.js:248:29
+    246| 
+    247|       // .stop: event should not bubble to parent
+    248|       expect(parentClicked).toBe(false);
+       |                             ^
+    249| 
+    250|       // .prevent: default should be prevented
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[13/42]⎯
+
+ FAIL  tests/composition.test.js > Directive Composition > Event Modifier Chaining > should handle @click.stop - stops propagation
+AssertionError: expected true to be false // Object.is equality
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ tests/composition.test.js:301:29
+    299|       button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    300| 
+    301|       expect(parentClicked).toBe(false);
+       |                             ^
+    302|     });
+    303| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[14/42]⎯
+
+ FAIL  tests/composition.test.js > Directive Composition > Event Modifier Chaining > should handle @keydown.enter modifier
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/composition.test.js:322:28
+    320|       input.dispatchEvent(enterEvent);
+    321| 
+    322|       expect(enterPressed).toBe(true);
+       |                            ^
+    323| 
+    324|       // Press other key
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[15/42]⎯
+
+ FAIL  tests/composition.test.js > Directive Composition > Event Modifier Chaining > should handle @keydown.ctrl.enter - combined key modifiers
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/composition.test.js:354:25
+    352|       input.dispatchEvent(event);
+    353| 
+    354|       expect(triggered).toBe(true);
+       |                         ^
+    355| 
+    356|       // Just Enter without Ctrl
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[16/42]⎯
+
+ FAIL  tests/composition.test.js > Directive Composition > Event Modifier Chaining > should handle @click.self - only trigger when event target is element itself
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/composition.test.js:393:27
+    391|       // Click on container itself - should trigger
+    392|       container.dispatchEvent(new MouseEvent('click', { bubbles: true …
+    393|       expect(selfClicked).toBe(true);
+       |                           ^
+    394|     });
+    395| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[17/42]⎯
+
+ FAIL  tests/composition.test.js > Directive Composition > Event Handlers with Structural Directives > should handle @click with m-if toggling
+AssertionError: expected +0 to be 1 // Object.is equality
+
+- Expected
++ Received
+
+- 1
++ 0
+
+ ❯ tests/composition.test.js:590:26
+    588|       let button = document.querySelector('button');
+    589|       button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    590|       expect(clickCount).toBe(1);
+       |                          ^
+    591| 
+    592|       // Hide and show
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[18/42]⎯
+
+ FAIL  tests/composition.test.js > Directive Composition > Complex Nested Compositions > should handle deeply nested directive combinations
+AssertionError: expected [] to include 1
+ ❯ tests/composition.test.js:688:23
+    686| 
+    687|       expect(app.s.items[0].value).toBe('modified');
+    688|       expect(changes).toContain(1);
+       |                       ^
+    689| 
+    690|       // Hide list
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[19/42]⎯
+
+ FAIL  tests/error-handling.test.js > Error Handling & Resilience > Render Errors > should catch errors in interpolation and continue rendering
+AssertionError: expected null not to be null
+ ❯ tests/error-handling.test.js:55:31
+     53| 
+     54|       // Error should be caught
+     55|       expect(caughtError).not.toBeNull();
+       |                               ^
+     56|       expect(caughtError.error.message).toBe('Render crash!');
+     57| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[20/42]⎯
+
+ FAIL  tests/error-handling.test.js > Error Handling & Resilience > Render Errors > should handle errors in m-text directive
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/error-handling.test.js:92:27
+     90| 
+     91|       // Error should be caught
+     92|       expect(errorCaught).toBe(true);
+       |                           ^
+     93| 
+     94|       // Valid spans should still update
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[21/42]⎯
+
+ FAIL  tests/error-handling.test.js > Error Handling & Resilience > Render Errors > should handle errors in m-html directive
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/error-handling.test.js:152:27
+    150|       await app.nextTick();
+    151| 
+    152|       expect(errorCaught).toBe(true);
+       |                           ^
+    153| 
+    154|       // Rest of page should render
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[22/42]⎯
+
+ FAIL  tests/error-handling.test.js > Error Handling & Resilience > Render Errors > should handle errors in computed attribute bindings
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/error-handling.test.js:186:27
+    184|       await app.nextTick();
+    185| 
+    186|       expect(errorCaught).toBe(true);
+       |                           ^
+    187| 
+    188|       // Other links should still work
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[23/42]⎯
+
+ FAIL  tests/error-handling.test.js > Error Handling & Resilience > Handler Errors > should catch errors in @click handlers and continue app execution
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/error-handling.test.js:231:27
+    229|       // Click safe button
+    230|       document.getElementById('safe').click();
+    231|       expect(safeClicked).toBe(true);
+       |                           ^
+    232| 
+    233|       // Click crashing button
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[24/42]⎯
+
+ FAIL  tests/error-handling.test.js > Error Handling & Resilience > Handler Errors > should handle errors in event handler with arguments
+Error: Handler error: test
+ ❯ Proxy.handleClick tests/error-handling.test.js:249:17
+    247|       const app = new Reflex({
+    248|         handleClick(event, arg) {
+    249|           throw new Error(`Handler error: ${arg}`);
+       |                 ^
+    250|         }
+    251|       });
+ ❯ eval src/core/expr.ts:191:17
+ ❯ src/core/expr.ts:194:20
+ ❯ Reflex._hdl src/core/compiler.ts:758:9
+ ❯ HTMLElement.<anonymous> src/core/compiler.ts:741:47
+ ❯ HTMLElement.dispatchEvent node_modules/happy-dom/src/event/EventTarget.ts:203:42
+ ❯ HTMLElement.dispatchEvent node_modules/happy-dom/src/nodes/element/Element.ts:923:29
+ ❯ HTMLButtonElement.dispatchEvent node_modules/happy-dom/src/event/EventTarget.ts:130:22
+ ❯ HTMLButtonElement.dispatchEvent node_modules/happy-dom/src/nodes/element/Element.ts:923:29
+ ❯ HTMLButtonElement.dispatchEvent node_modules/happy-dom/src/nodes/html-button-element/HTMLButtonElement.ts:202:29
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[25/42]⎯
+
+ FAIL  tests/error-handling.test.js > Error Handling & Resilience > Handler Errors > should handle errors in inline event expressions
+Error: Inline error
+ ❯ Proxy.throwError tests/error-handling.test.js:275:17
+    273|         count: 0,
+    274|         throwError() {
+    275|           throw new Error('Inline error');
+       |                 ^
+    276|         }
+    277|       });
+ ❯ eval src/core/expr.ts:191:17
+ ❯ src/core/expr.ts:194:20
+ ❯ Reflex._hdl src/core/compiler.ts:758:9
+ ❯ HTMLElement.<anonymous> src/core/compiler.ts:741:47
+ ❯ HTMLElement.dispatchEvent node_modules/happy-dom/src/event/EventTarget.ts:203:42
+ ❯ HTMLElement.dispatchEvent node_modules/happy-dom/src/nodes/element/Element.ts:923:29
+ ❯ HTMLButtonElement.dispatchEvent node_modules/happy-dom/src/event/EventTarget.ts:130:22
+ ❯ HTMLButtonElement.dispatchEvent node_modules/happy-dom/src/nodes/element/Element.ts:923:29
+ ❯ HTMLButtonElement.dispatchEvent node_modules/happy-dom/src/nodes/html-button-element/HTMLButtonElement.ts:202:29
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[26/42]⎯
+
+ FAIL  tests/error-handling.test.js > Error Handling & Resilience > Handler Errors > should handle errors in nested event handlers
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/error-handling.test.js:325:27
+    323|       document.querySelector('button').click();
+    324| 
+    325|       expect(errorCaught).toBe(true);
+       |                           ^
+    326|       // .stop should prevent outer click even with error
+    327|       expect(outerClicked).toBe(false);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[27/42]⎯
+
+ FAIL  tests/error-handling.test.js > Error Handling & Resilience > Watcher Errors > should handle errors in immediate watcher
+Error: Immediate watcher error
+ ❯ app.watch.immediate tests/error-handling.test.js:493:15
+    491| 
+    492|       app.watch(() => app.s.value, () => {
+    493|         throw new Error('Immediate watcher error');
+       |               ^
+    494|       }, { immediate: true });
+    495| 
+ ❯ job src/core/scheduler.ts:206:9
+ ❯ Reflex.watch src/core/scheduler.ts:217:25
+ ❯ tests/error-handling.test.js:492:11
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[28/42]⎯
+
+ FAIL  tests/error-handling.test.js > Error Handling & Resilience > Effect Errors > should handle errors in effect cleanup functions
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/error-handling.test.js:570:27
+    568| 
+    569|       // Cleanup error should be caught
+    570|       expect(errorCaught).toBe(true);
+       |                           ^
+    571|     });
+    572|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[29/42]⎯
+
+ FAIL  tests/error-handling.test.js > Error Handling & Resilience > Computed Errors > should handle errors in computed getter
+Error: Computed crashed
+ ❯ tests/error-handling.test.js:587:17
+    585|       const computed = app.computed((s) => {
+    586|         if (s.shouldCrash) {
+    587|           throw new Error('Computed crashed');
+       |                 ^
+    588|         }
+    589|         return 'safe value';
+ ❯ runner._ef.lazy src/core/scheduler.ts:158:11
+ ❯ e src/core/scheduler.ts:54:20
+ ❯ Object.get value [as value] src/core/scheduler.ts:188:20
+ ❯ tests/error-handling.test.js:599:30
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[30/42]⎯
+
+ FAIL  tests/error-handling.test.js > Error Handling & Resilience > Error Recovery > should recover from error and continue normal operation
+AssertionError: expected +0 to be 1 // Object.is equality
+
+- Expected
++ Received
+
+- 1
++ 0
+
+ ❯ tests/error-handling.test.js:693:26
+    691| 
+    692|       await app.nextTick();
+    693|       expect(errorCount).toBe(1);
+       |                          ^
+    694| 
+    695|       // Fix the error
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[31/42]⎯
+
+ FAIL  tests/error-handling.test.js > Error Handling & Resilience > Error Recovery > should handle cascading errors gracefully
+AssertionError: expected +0 to be 3 // Object.is equality
+
+- Expected
++ Received
+
+- 3
++ 0
+
+ ❯ tests/error-handling.test.js:738:26
+    736| 
+    737|       // All errors should be caught individually
+    738|       expect(errorCount).toBe(3);
+       |                          ^
+    739|     });
+    740|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[32/42]⎯
+
+ FAIL  tests/error-handling.test.js > Error Handling & Resilience > Production Mode Error Handling > should not expose internal stack traces in production
+AssertionError: expected null not to be null
+ ❯ tests/error-handling.test.js:763:33
+    761| 
+    762|       // Error should be caught
+    763|       expect(capturedError).not.toBeNull();
+       |                                 ^
+    764|       expect(capturedError.message).toBe('User-facing error');
+    765| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[33/42]⎯
+
+ FAIL  tests/lifecycle.test.js > Lifecycle & Memory Leaks > Listener Count Verification > should clean up window and document listeners on unmount
+AssertionError: expected 0 to be less than 0
+ ❯ tests/lifecycle.test.js:130:36
+    128| 
+    129|       // Listeners should be cleaned up
+    130|       expect(windowListenersAfter).toBeLessThan(windowListenersBefore);
+       |                                    ^
+    131|       expect(documentListenersAfter).toBeLessThan(documentListenersBef…
+    132|     });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[34/42]⎯
+
+ FAIL  tests/lifecycle.test.js > Lifecycle & Memory Leaks > Async Component Teardown > should cancel pending effects when component unmounts
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/lifecycle.test.js:350:29
+    348| 
+    349|       // Cleanup should have been called
+    350|       expect(cleanupCalled).toBe(true);
+       |                             ^
+    351|     });
+    352| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[35/42]⎯
+
+ FAIL  tests/lifecycle.test.js > Lifecycle & Memory Leaks > DOM Node Cleanup > should fully remove m-for items from DOM when list is cleared
+AssertionError: expected 1 to be +0 // Object.is equality
+
+- Expected
++ Received
+
+- 0
++ 1
+
+ ❯ tests/lifecycle.test.js:469:36
+    467|       // No orphaned text nodes
+    468|       const ul = document.querySelector('ul');
+    469|       expect(ul.childNodes.length).toBe(0);
+       |                                    ^
+    470|     });
+    471| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[36/42]⎯
+
+ FAIL  tests/lifecycle.test.js > Lifecycle & Memory Leaks > Computed Property Cleanup > should stop computing when computed is no longer accessed
+AssertionError: expected "spy" to be called 2 times, but got 3 times
+ ❯ tests/lifecycle.test.js:540:25
+    538| 
+    539|       // Compute function should not have run again (lazy)
+    540|       expect(computeFn).toHaveBeenCalledTimes(2);
+       |                         ^
+    541|     });
+    542|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[37/42]⎯
+
+ FAIL  tests/lifecycle.test.js > Lifecycle & Memory Leaks > Effect Cleanup > should call cleanup function when effect dependencies change
+AssertionError: expected +0 to be 1 // Object.is equality
+
+- Expected
++ Received
+
+- 1
++ 0
+
+ ❯ tests/lifecycle.test.js:565:28
+    563|       await app.nextTick();
+    564| 
+    565|       expect(cleanupCount).toBe(1);
+       |                            ^
+    566| 
+    567|       // Change again
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[38/42]⎯
+
+ FAIL  tests/lifecycle.test.js > Lifecycle & Memory Leaks > Effect Cleanup > should call cleanup when effect element is removed
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tests/lifecycle.test.js:597:29
+    595|       await app.nextTick();
+    596| 
+    597|       expect(cleanupCalled).toBe(true);
+       |                             ^
+    598|     });
+    599|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[39/42]⎯
+
+ FAIL  tests/lifecycle.test.js > Lifecycle & Memory Leaks > Complex Lifecycle Scenarios > should clean up in correct order for nested components
+AssertionError: expected +0 to be 3 // Object.is equality
+
+- Expected
++ Received
+
+- 3
++ 0
+
+ ❯ tests/lifecycle.test.js:664:35
+    662| 
+    663|       // Cleanup should happen from innermost to outermost (or at leas…
+    664|       expect(cleanupOrder.length).toBe(3);
+       |                                   ^
+    665|       expect(cleanupOrder).toContain('outer');
+    666|       expect(cleanupOrder).toContain('middle');
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[40/42]⎯
+
+ FAIL  tests/membrane-benchmark.test.js > Iron Membrane Performance > should have minimal overhead for simple property access
+AssertionError: expected 0.0012484347100000014 to be less than 0.001
+ ❯ tests/membrane-benchmark.test.js:56:26
+     54|     // Each property access should take less than 0.001ms (1 microseco…
+     55|     // This is ~100x faster than a DOM operation, so it won't be the b…
+     56|     expect(avgPerAccess).toBeLessThan(0.001); // Less than 1 microseco…
+       |                          ^
+     57|   });
+     58| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[41/42]⎯
+
+ FAIL  tests/stress-reactivity.test.js > Stress Reactivity > Prototype Pollution Attempt > should block attempts to set constructor.prototype
+AssertionError: expected [Function] to throw an error
+ ❯ tests/stress-reactivity.test.js:227:10
+    225|       expect(() => {
+    226|         app.s.constructor = { prototype: { evil: true } };
+    227|       }).toThrow();
+       |          ^
+    228| 
+    229|       // Prototype should be clean
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[42/42]⎯
+
+⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯
+
+Vitest caught 10 unhandled errors during the test run.
+This might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.
+
+⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+Error: Render crash!
+ ❯ crashingFunction tests/error-handling.test.js:40:17
+     38|       const app = new Reflex({
+     39|         crashingFunction() {
+     40|           throw new Error('Render crash!');
+       |                 ^
+     41|         }
+     42|       });
+ ❯ eval src/core/expr.ts:246:15
+ ❯ src/core/expr.ts:250:18
+ ❯ src/core/compiler.ts:433:19
+ ❯ e src/core/scheduler.ts:54:20
+ ❯ Reflex._ef src/core/scheduler.ts:60:18
+ ❯ Reflex._txt src/core/compiler.ts:432:22
+ ❯ Reflex._w src/core/compiler.ts:136:18
+ ❯ Reflex.mount src/core/reflex.ts:188:10
+ ❯ src/core/reflex.ts:137:35
+
+This error originated in "tests/error-handling.test.js" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "should catch errors in interpolation and continue rendering". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+
+⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+TypeError: Function is not a function
+ ❯ eval src/core/expr.ts:246:15
+    244| 
+    245|     try {
+    246|       rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el'…
+       |               ^
+    247|       // Wrap to inject magic properties and apply security membrane
+    248|       return this._ec.set(k, (s, c, e, el) => {
+ ❯ src/core/expr.ts:250:18
+ ❯ src/core/compiler.ts:467:15
+ ❯ e src/core/scheduler.ts:54:20
+ ❯ Reflex._ef src/core/scheduler.ts:60:18
+ ❯ Reflex._at src/core/compiler.ts:466:20
+ ❯ Reflex._bnd src/core/compiler.ts:161:40
+ ❯ Reflex._w src/core/compiler.ts:124:26
+ ❯ Reflex.mount src/core/reflex.ts:188:10
+ ❯ src/core/reflex.ts:137:35
+
+This error originated in "tests/security.test.js" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "should block Function constructor calls". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+
+⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+Error: Getter crashed!
+ ❯ Proxy.get crashingGetter tests/error-handling.test.js:78:17
+     76|         anotherValid: 'Valid 2',
+     77|         get crashingGetter() {
+     78|           throw new Error('Getter crashed!');
+       |                 ^
+     79|         }
+     80|       });
+ ❯ Object.get src/core/reactivity.ts:171:23
+ ❯ src/core/expr.ts:124:45
+ ❯ src/core/compiler.ts:467:15
+ ❯ e src/core/scheduler.ts:54:20
+ ❯ Reflex._ef src/core/scheduler.ts:60:18
+ ❯ Reflex._at src/core/compiler.ts:466:20
+ ❯ Reflex._bnd src/core/compiler.ts:161:40
+ ❯ Reflex._w src/core/compiler.ts:124:26
+
+This error originated in "tests/error-handling.test.js" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "should handle errors in m-text directive". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+
+⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+TypeError: Cannot read properties of undefined (reading 'property')
+ ❯ eval src/core/expr.ts:246:15
+    244| 
+    245|     try {
+    246|       rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el'…
+       |               ^
+    247|       // Wrap to inject magic properties and apply security membrane
+    248|       return this._ec.set(k, (s, c, e, el) => {
+ ❯ src/core/expr.ts:250:18
+ ❯ src/core/compiler.ts:433:19
+ ❯ e src/core/scheduler.ts:54:20
+ ❯ Reflex._ef src/core/scheduler.ts:60:18
+ ❯ Reflex._txt src/core/compiler.ts:432:22
+ ❯ Reflex._w src/core/compiler.ts:136:18
+ ❯ Reflex.mount src/core/reflex.ts:188:10
+ ❯ src/core/reflex.ts:137:35
+ ❯ node:internal/process/task_queues:151:7
+
+This error originated in "tests/error-handling.test.js" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "should handle errors in expression evaluation". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+
+⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+Error: HTML generation failed
+ ❯ getHtml tests/error-handling.test.js:139:17
+    137|       const app = new Reflex({
+    138|         getHtml() {
+    139|           throw new Error('HTML generation failed');
+       |                 ^
+    140|         }
+    141|       });
+ ❯ eval src/core/expr.ts:246:15
+ ❯ src/core/expr.ts:250:18
+ ❯ src/core/compiler.ts:513:17
+ ❯ e src/core/scheduler.ts:54:20
+ ❯ Reflex._ef src/core/scheduler.ts:60:18
+ ❯ Reflex._html src/core/compiler.ts:512:20
+ ❯ Reflex._bnd src/core/compiler.ts:162:40
+ ❯ Reflex._w src/core/compiler.ts:124:26
+ ❯ Reflex.mount src/core/reflex.ts:188:10
+
+This error originated in "tests/error-handling.test.js" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "should handle errors in m-html directive". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+
+⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+Error: URL computation failed
+ ❯ Proxy.get crashingUrl tests/error-handling.test.js:173:17
+    171|         anotherSafe: 'https://other.com',
+    172|         get crashingUrl() {
+    173|           throw new Error('URL computation failed');
+       |                 ^
+    174|         }
+    175|       });
+ ❯ Object.get src/core/reactivity.ts:171:23
+ ❯ src/core/expr.ts:124:45
+ ❯ src/core/compiler.ts:467:15
+ ❯ e src/core/scheduler.ts:54:20
+ ❯ Reflex._ef src/core/scheduler.ts:60:18
+ ❯ Reflex._at src/core/compiler.ts:466:20
+ ❯ Reflex._bnd src/core/compiler.ts:156:14
+ ❯ Reflex._w src/core/compiler.ts:124:26
+
+This error originated in "tests/error-handling.test.js" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "should handle errors in computed attribute bindings". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+
+⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+TypeError: Cannot set property viewBox of [object Object] which has only a getter
+ ❯ src/core/compiler.ts:482:15
+    480|         if (next !== prev) { prev = next; el.style.cssText = next; }
+    481|       } else if (att in el) {
+    482|         el[att] = v ?? '';
+       |               ^
+    483|       } else {
+    484|         const next = v === null || v === false ? null : String(v);
+ ❯ e src/core/scheduler.ts:54:20
+ ❯ Reflex._ef src/core/scheduler.ts:60:18
+ ❯ Reflex._at src/core/compiler.ts:466:20
+ ❯ Reflex._bnd src/core/compiler.ts:156:14
+ ❯ Reflex._w src/core/compiler.ts:124:26
+ ❯ Reflex.mount src/core/reflex.ts:188:10
+ ❯ src/core/reflex.ts:137:35
+ ❯ node:internal/process/task_queues:151:7
+ ❯ AsyncResource.runInAsyncScope node:async_hooks:214:14
+
+This error originated in "tests/browser-quirks.test.js" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "should handle camelCase vs kebab-case attribute binding on SVG (viewBox)". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+
+⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+Error: Render
+ ❯ renderError tests/error-handling.test.js:612:17
+    610|       const app = new Reflex({
+    611|         renderError() {
+    612|           throw new Error('Render');
+       |                 ^
+    613|         },
+    614|         clickError() {
+ ❯ eval src/core/expr.ts:246:15
+ ❯ src/core/expr.ts:250:18
+ ❯ src/core/compiler.ts:433:19
+ ❯ e src/core/scheduler.ts:54:20
+ ❯ Reflex._ef src/core/scheduler.ts:60:18
+ ❯ Reflex._txt src/core/compiler.ts:432:22
+ ❯ Reflex._w src/core/compiler.ts:136:18
+ ❯ Reflex.mount src/core/reflex.ts:188:10
+ ❯ src/core/reflex.ts:137:35
+
+This error originated in "tests/error-handling.test.js" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "should call global onError handler for all error types". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+
+⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+Error: Temporary error
+ ❯ getMessage tests/error-handling.test.js:679:19
+    677|         getMessage() {
+    678|           if (shouldCrash) {
+    679|             throw new Error('Temporary error');
+       |                   ^
+    680|           }
+    681|           return 'Success';
+ ❯ eval src/core/expr.ts:246:15
+ ❯ src/core/expr.ts:250:18
+ ❯ src/core/compiler.ts:433:19
+ ❯ e src/core/scheduler.ts:54:20
+ ❯ Reflex._ef src/core/scheduler.ts:60:18
+ ❯ Reflex._txt src/core/compiler.ts:432:22
+ ❯ Reflex._w src/core/compiler.ts:136:18
+ ❯ Reflex.mount src/core/reflex.ts:188:10
+ ❯ src/core/reflex.ts:137:35
+
+This error originated in "tests/error-handling.test.js" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "should recover from error and continue normal operation". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+
+⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+Error: Error 3
+ ❯ error3 tests/error-handling.test.js:725:17
+    723|         },
+    724|         error3() {
+    725|           throw new Error('Error 3');
+       |                 ^
+    726|         }
+    727|       });
+ ❯ eval src/core/expr.ts:246:15
+ ❯ src/core/expr.ts:250:18
+ ❯ src/core/compiler.ts:433:19
+ ❯ e src/core/scheduler.ts:54:20
+ ❯ Reflex._ef src/core/scheduler.ts:60:18
+ ❯ Reflex._txt src/core/compiler.ts:432:22
+ ❯ Reflex._w src/core/compiler.ts:136:18
+ ❯ Reflex.mount src/core/reflex.ts:188:10
+ ❯ src/core/reflex.ts:137:35
+
+This error originated in "tests/error-handling.test.js" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "should handle cascading errors gracefully". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+
+ Test Files  6 failed | 9 passed (15)
+      Tests  42 failed | 345 passed (387)
+     Errors  10 errors
+   Start at  11:26:58
+   Duration  10.87s (transform 1.77s, setup 523ms, collect 4.88s, tests 10.88s, environment 13.56s, prepare 7.01s)
+
