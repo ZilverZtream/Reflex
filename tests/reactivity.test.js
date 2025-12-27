@@ -248,4 +248,175 @@ describe('Reactivity', () => {
       await result;
     });
   });
+
+  describe('Quantum Cloning (Optimized Deep Watchers)', () => {
+    it('should handle extremely deep objects without stack overflow (5000+ depth)', async () => {
+      // Create a deeply nested object (5000 levels)
+      let deep = { value: 'leaf' };
+      for (let i = 0; i < 5000; i++) {
+        deep = { nested: deep };
+      }
+
+      const app = new Reflex({ deep });
+      const callback = vi.fn();
+
+      // This should not throw a stack overflow error
+      expect(() => {
+        app.watch(() => app.s.deep, callback, { deep: true });
+      }).not.toThrow();
+    });
+
+    it('should use structural sharing for unchanged objects (performance)', async () => {
+      // Create a large object tree
+      const createLargeObject = (size) => {
+        const obj = { items: [] };
+        for (let i = 0; i < size; i++) {
+          obj.items.push({
+            id: i,
+            data: { value: i, nested: { deep: i * 2 } }
+          });
+        }
+        return obj;
+      };
+
+      const app = new Reflex(createLargeObject(1000));
+      const callback = vi.fn();
+
+      // Set up deep watcher
+      app.watch(() => app.s, callback, { deep: true });
+      await app.nextTick();
+
+      // First change - should trigger
+      app.s.items[0].data.value = 999;
+      await app.nextTick();
+      expect(callback).toHaveBeenCalledTimes(1);
+
+      // Measure performance: cloning without changes should be near-instant
+      const start = performance.now();
+
+      // Change the same value again (structure unchanged elsewhere)
+      app.s.items[0].data.value = 1000;
+      await app.nextTick();
+
+      const elapsed = performance.now() - start;
+
+      // Should be very fast (<50ms even for large objects)
+      // With structural sharing, unchanged subtrees are reused
+      expect(elapsed).toBeLessThan(50);
+      expect(callback).toHaveBeenCalledTimes(2);
+    });
+
+    it('should increment version on mutations', () => {
+      const app = new Reflex({ obj: { value: 1 } });
+
+      // Get the meta object
+      const meta = app.s.obj[Symbol.for('rx.meta')];
+      expect(meta.v).toBe(0); // Initial version
+
+      // Mutate the object
+      app.s.obj.value = 2;
+      expect(meta.v).toBe(1); // Version incremented
+
+      app.s.obj.value = 3;
+      expect(meta.v).toBe(2); // Version incremented again
+    });
+
+    it('should increment version on array mutations', () => {
+      const app = new Reflex({ arr: [1, 2, 3] });
+
+      const meta = app.s.arr[Symbol.for('rx.meta')];
+      expect(meta.v).toBe(0);
+
+      app.s.arr.push(4);
+      expect(meta.v).toBe(1);
+
+      app.s.arr[0] = 10;
+      expect(meta.v).toBe(2);
+    });
+
+    it('should increment version on Map mutations', () => {
+      const app = new Reflex({ map: new Map([['key', 'value']]) });
+
+      const meta = app.s.map[Symbol.for('rx.meta')];
+      expect(meta.v).toBe(0);
+
+      app.s.map.set('key2', 'value2');
+      expect(meta.v).toBe(1);
+
+      app.s.map.delete('key');
+      expect(meta.v).toBe(2);
+    });
+
+    it('should increment version on Set mutations', () => {
+      const app = new Reflex({ set: new Set([1, 2, 3]) });
+
+      const meta = app.s.set[Symbol.for('rx.meta')];
+      expect(meta.v).toBe(0);
+
+      app.s.set.add(4);
+      expect(meta.v).toBe(1);
+
+      app.s.set.delete(1);
+      expect(meta.v).toBe(2);
+    });
+
+    it('should reuse cached clones when version matches', () => {
+      const app = new Reflex({
+        obj: {
+          unchanged: { deep: { value: 1 } },
+          changed: { value: 2 }
+        }
+      });
+
+      // Set up deep watcher to trigger initial clone
+      const callback = vi.fn();
+      app.watch(() => app.s.obj, callback, { deep: true });
+
+      // Get meta for unchanged branch
+      const unchangedMeta = app.s.obj.unchanged[Symbol.for('rx.meta')];
+      const initialVersion = unchangedMeta.v;
+
+      // Mutate only the 'changed' branch
+      app.s.obj.changed.value = 3;
+
+      // The 'unchanged' branch should still have the same version
+      expect(unchangedMeta.v).toBe(initialVersion);
+
+      // The cached clone should be reused (structural sharing)
+      expect(unchangedMeta._cloneCache).toBeDefined();
+      expect(unchangedMeta._cloneCache.v).toBe(initialVersion);
+    });
+
+    it('should handle circular references in deep clone', () => {
+      const circular = { name: 'root' };
+      circular.self = circular;
+
+      const app = new Reflex({ circular });
+      const callback = vi.fn();
+
+      // Should not throw when cloning circular structure
+      expect(() => {
+        app.watch(() => app.s.circular, callback, { deep: true });
+      }).not.toThrow();
+    });
+
+    it('should handle mixed collection types in deep structures', async () => {
+      const app = new Reflex({
+        complex: {
+          map: new Map([['key', { nested: [1, 2, 3] }]]),
+          set: new Set([{ id: 1 }, { id: 2 }]),
+          array: [new Map([['a', 1]]), new Set([1, 2])]
+        }
+      });
+
+      const callback = vi.fn();
+      app.watch(() => app.s.complex, callback, { deep: true });
+
+      // Mutate nested structure
+      app.s.complex.map.get('key').nested.push(4);
+      await app.nextTick();
+
+      expect(callback).toHaveBeenCalled();
+    });
+  });
 });
