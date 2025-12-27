@@ -354,6 +354,13 @@ export class Reflex {
     // Collect cleanup functions registered via onCleanup
     const cleanupFns: Array<() => void> = [];
 
+    // Capture slot content BEFORE processing attributes
+    // Move (not clone) child nodes to preserve any existing bindings
+    const slotContent: Node[] = [];
+    while (el.firstChild) {
+      slotContent.push(el.removeChild(el.firstChild));
+    }
+
     const attrs = Array.from(el.attributes) as Attr[];
     for (const a of attrs) {
       const n = a.name, v = a.value;
@@ -420,6 +427,44 @@ export class Reflex {
 
     const scope = this._r(scopeRaw);
     el.replaceWith(inst);
+
+    // Project slot content into <slot> elements
+    // The slotted content uses the PARENT scope (o), not the component scope
+    if (slotContent.length > 0) {
+      const slots = inst.querySelectorAll('slot');
+      if (slots.length > 0) {
+        // Find default slot (no name attribute) or first slot
+        const defaultSlot = Array.from(slots).find(s => !s.hasAttribute('name')) || slots[0];
+        if (defaultSlot) {
+          // Move slot content into the slot location
+          const parent = defaultSlot.parentNode;
+          for (const node of slotContent) {
+            parent.insertBefore(node, defaultSlot);
+          }
+          // Remove the <slot> placeholder
+          defaultSlot.remove();
+        }
+      } else {
+        // No <slot> in template - append content to component root
+        for (const node of slotContent) {
+          inst.appendChild(node);
+        }
+      }
+
+      // Process bindings on slotted content using PARENT scope
+      // This is critical - slotted content should be reactive to parent state
+      for (const node of slotContent) {
+        if (node.nodeType === 1) {
+          this._bnd(node as Element, o);
+          this._w(node, o);
+        } else if (node.nodeType === 3) {
+          const nv = node.nodeValue;
+          if (typeof nv === 'string' && nv.indexOf('{{') !== -1) {
+            this._txt(node, o);
+          }
+        }
+      }
+    }
 
     // Register all cleanup functions on the component instance
     if (cleanupFns.length > 0) {
