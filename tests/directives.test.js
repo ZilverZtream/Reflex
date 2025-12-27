@@ -605,4 +605,275 @@ describe('Directives', () => {
       expect(app._refs.myInput).toBe(document.querySelector('input'));
     });
   });
+
+  describe('<template> support', () => {
+    describe('template with m-if', () => {
+      it('should render template content when condition is true', async () => {
+        document.body.innerHTML = `
+          <div id="container">
+            <template m-if="show">
+              <span>Item 1</span>
+              <span>Item 2</span>
+            </template>
+          </div>
+        `;
+        const app = new Reflex({ show: true });
+        await app.nextTick();
+
+        const container = document.getElementById('container');
+        const spans = container.querySelectorAll('span');
+        expect(spans.length).toBe(2);
+        expect(spans[0].textContent).toBe('Item 1');
+        expect(spans[1].textContent).toBe('Item 2');
+      });
+
+      it('should not render template element itself', async () => {
+        document.body.innerHTML = `
+          <div id="container">
+            <template m-if="show">
+              <span>Content</span>
+            </template>
+          </div>
+        `;
+        const app = new Reflex({ show: true });
+        await app.nextTick();
+
+        const container = document.getElementById('container');
+        const templates = container.querySelectorAll('template');
+        // Should only have the comment marker, no visible template tags
+        expect(templates.length).toBe(0);
+      });
+
+      it('should remove template content when condition becomes false', async () => {
+        document.body.innerHTML = `
+          <div id="container">
+            <template m-if="show">
+              <p>Paragraph 1</p>
+              <p>Paragraph 2</p>
+            </template>
+          </div>
+        `;
+        const app = new Reflex({ show: true });
+        await app.nextTick();
+
+        let container = document.getElementById('container');
+        let paragraphs = container.querySelectorAll('p');
+        expect(paragraphs.length).toBe(2);
+
+        app.s.show = false;
+        await app.nextTick();
+
+        paragraphs = container.querySelectorAll('p');
+        expect(paragraphs.length).toBe(0);
+      });
+
+      it('should re-render template content when condition becomes true again', async () => {
+        document.body.innerHTML = `
+          <div id="container">
+            <template m-if="show">
+              <div>{{ message }}</div>
+            </template>
+          </div>
+        `;
+        const app = new Reflex({ show: false, message: 'Hello' });
+        await app.nextTick();
+
+        let container = document.getElementById('container');
+        expect(container.textContent.trim()).toBe('');
+
+        app.s.show = true;
+        await app.nextTick();
+
+        expect(container.textContent.trim()).toBe('Hello');
+      });
+
+      it('should handle single element in template', async () => {
+        document.body.innerHTML = `
+          <template m-if="show">
+            <div>Single element</div>
+          </template>
+        `;
+        const app = new Reflex({ show: true });
+        await app.nextTick();
+
+        const divs = document.querySelectorAll('div');
+        expect(divs.length).toBe(1);
+        expect(divs[0].textContent).toBe('Single element');
+      });
+
+      it('should process bindings in template content', async () => {
+        document.body.innerHTML = `
+          <template m-if="show">
+            <span m-text="text"></span>
+            <input m-model="value">
+          </template>
+        `;
+        const app = new Reflex({ show: true, text: 'Hello', value: 'World' });
+        await app.nextTick();
+
+        const span = document.querySelector('span');
+        const input = document.querySelector('input');
+        expect(span.textContent).toBe('Hello');
+        expect(input.value).toBe('World');
+
+        app.s.text = 'Goodbye';
+        await app.nextTick();
+        expect(span.textContent).toBe('Goodbye');
+      });
+    });
+
+    describe('template with m-for', () => {
+      it('should render template content for each item', async () => {
+        document.body.innerHTML = `
+          <ul>
+            <template m-for="item in items">
+              <li class="item">{{ item }}</li>
+            </template>
+          </ul>
+        `;
+        const app = new Reflex({ items: ['A', 'B', 'C'] });
+        await app.nextTick();
+
+        const items = document.querySelectorAll('.item');
+        expect(items.length).toBe(3);
+        expect(items[0].textContent).toBe('A');
+        expect(items[1].textContent).toBe('B');
+        expect(items[2].textContent).toBe('C');
+      });
+
+      it('should render multiple elements per iteration', async () => {
+        document.body.innerHTML = `
+          <div id="container">
+            <template m-for="item in items">
+              <h3>{{ item.title }}</h3>
+              <p>{{ item.desc }}</p>
+            </template>
+          </div>
+        `;
+        const app = new Reflex({
+          items: [
+            { title: 'Title 1', desc: 'Desc 1' },
+            { title: 'Title 2', desc: 'Desc 2' }
+          ]
+        });
+        await app.nextTick();
+
+        const container = document.getElementById('container');
+        const h3s = container.querySelectorAll('h3');
+        const ps = container.querySelectorAll('p');
+
+        expect(h3s.length).toBe(2);
+        expect(ps.length).toBe(2);
+        expect(h3s[0].textContent).toBe('Title 1');
+        expect(ps[0].textContent).toBe('Desc 1');
+        expect(h3s[1].textContent).toBe('Title 2');
+        expect(ps[1].textContent).toBe('Desc 2');
+      });
+
+      it('should update when items change', async () => {
+        document.body.innerHTML = `
+          <template m-for="num in numbers">
+            <span>{{ num }}</span>
+          </template>
+        `;
+        const app = new Reflex({ numbers: [1, 2] });
+        await app.nextTick();
+
+        let spans = document.querySelectorAll('span');
+        expect(spans.length).toBe(2);
+
+        app.s.numbers.push(3);
+        await app.nextTick();
+
+        spans = document.querySelectorAll('span');
+        expect(spans.length).toBe(3);
+        expect(spans[2].textContent).toBe('3');
+      });
+
+      it('should handle empty list', async () => {
+        document.body.innerHTML = `
+          <template m-for="item in items">
+            <div>{{ item }}</div>
+          </template>
+        `;
+        const app = new Reflex({ items: [] });
+        await app.nextTick();
+
+        const divs = document.querySelectorAll('div');
+        expect(divs.length).toBe(0);
+      });
+
+      it('should work with keyed items', async () => {
+        document.body.innerHTML = `
+          <template m-for="item in items" m-key="item.id">
+            <div>{{ item.name }}</div>
+          </template>
+        `;
+        const app = new Reflex({
+          items: [
+            { id: 1, name: 'First' },
+            { id: 2, name: 'Second' }
+          ]
+        });
+        await app.nextTick();
+
+        const divs = document.querySelectorAll('div');
+        expect(divs.length).toBe(2);
+        expect(divs[0].textContent).toBe('First');
+        expect(divs[1].textContent).toBe('Second');
+      });
+
+      it('should handle nested templates', async () => {
+        document.body.innerHTML = `
+          <template m-for="group in groups">
+            <div class="group">
+              <template m-for="item in group.items">
+                <span>{{ item }}</span>
+              </template>
+            </div>
+          </template>
+        `;
+        const app = new Reflex({
+          groups: [
+            { items: ['A', 'B'] },
+            { items: ['C', 'D'] }
+          ]
+        });
+        await app.nextTick();
+
+        const groups = document.querySelectorAll('.group');
+        expect(groups.length).toBe(2);
+
+        const spans = document.querySelectorAll('span');
+        expect(spans.length).toBe(4);
+        expect(spans[0].textContent).toBe('A');
+        expect(spans[1].textContent).toBe('B');
+        expect(spans[2].textContent).toBe('C');
+        expect(spans[3].textContent).toBe('D');
+      });
+    });
+
+    describe('template without directives', () => {
+      it('should skip templates without m-if or m-for', async () => {
+        document.body.innerHTML = `
+          <div id="container">
+            <template id="my-template">
+              <span>This should not render</span>
+            </template>
+          </div>
+        `;
+        const app = new Reflex({});
+        await app.nextTick();
+
+        const container = document.getElementById('container');
+        const spans = container.querySelectorAll('span');
+        // Template without directives should remain inert
+        expect(spans.length).toBe(0);
+
+        // Template element should still exist
+        const template = document.getElementById('my-template');
+        expect(template).toBeTruthy();
+      });
+    });
+  });
 });
