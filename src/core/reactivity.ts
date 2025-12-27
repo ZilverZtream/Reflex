@@ -254,7 +254,10 @@ export const ReactivityMixin = {
     if ((t as ReactiveTarget)[SKIP]) return t;
     if (t instanceof Node) return t;
 
-    const existing = (t as ReactiveTarget)[META] || this._mf.get(t as object);
+    // Check for OWN META property to avoid inheriting from prototype chain
+    const existing = Object.prototype.hasOwnProperty.call(t, META)
+      ? (t as ReactiveTarget)[META]
+      : this._mf.get(t as object);
     if (existing) return existing.p;
 
     // Store engine reference on meta for static handler access

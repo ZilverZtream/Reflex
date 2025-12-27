@@ -110,6 +110,9 @@ export const CompilerMixin = {
                 const t = tag.toLowerCase();
                 if (this._cp.has(t)) {
                   this._comp(c, t, o);
+                } else if (this._acp.has(t)) {
+                  // Async component: lazy-load the handler
+                  this._asyncComp(c, t, o);
                 } else {
                   this._bnd(c, o);
                   this._w(c, o);
@@ -175,19 +178,58 @@ export const CompilerMixin = {
     el.replaceWith(cm);
     let cur, leaving = false;
 
+    // Check if the element is a component
+    const tag = el.tagName.toLowerCase();
+    const isSyncComp = this._cp.has(tag);
+    const isAsyncComp = this._acp.has(tag);
+
     const e = this._ef(() => {
       const ok = !!fn(this.s, o);
       if (ok && !cur && !leaving) {
-        cur = el.cloneNode(true);
-        cur.removeAttribute('m-if');
-        cur.removeAttribute('m-trans');
-        cm.after(cur);
-        this._bnd(cur, o);
-        this._w(cur, o);
+        const cloned = el.cloneNode(true);
+        cloned.removeAttribute('m-if');
+        cloned.removeAttribute('m-trans');
+        cm.after(cloned);
+
+        if (isSyncComp) {
+          // For sync components, track the returned instance
+          cur = this._comp(cloned, tag, o);
+        } else if (isAsyncComp) {
+          // For async components, track the marker that _asyncComp creates
+          // _asyncComp replaces cloned with marker (+ optional fallback)
+          this._asyncComp(cloned, tag, o);
+          // The marker is now at cloned's position (cm.nextSibling)
+          cur = cm.nextSibling;
+        } else {
+          cur = cloned;
+          this._bnd(cur, o);
+          this._w(cur, o);
+        }
         // Run enter transition
-        if (trans) runTransition(cur, trans, 'enter', null);
+        if (trans && cur) runTransition(cur, trans, 'enter', null);
       } else if (!ok && cur && !leaving) {
-        if (trans) {
+        // For async components, we need to find all nodes between marker and end
+        // For now, remove all siblings after the marker until we hit another comment/marker
+        if (isAsyncComp) {
+          // Remove all content from async component (marker, fallback, or loaded component)
+          let node = cm.nextSibling;
+          while (node) {
+            const next = node.nextSibling;
+            // Stop if we hit another structural directive marker
+            if (node.nodeType === 8 && ((node as Comment).nodeValue?.startsWith('if') ||
+                (node as Comment).nodeValue?.startsWith('for'))) {
+              break;
+            }
+            this._kill(node);
+            (node as ChildNode).remove();
+            // For async, remove only one element/marker set
+            if (node.nodeType === 1 || (node as Comment).nodeValue?.startsWith('async:')) {
+              break;
+            }
+            node = next;
+          }
+          cur = null;
+        } else if (trans) {
           // Run leave transition before removing
           leaving = true;
           const node = cur;
@@ -232,6 +274,11 @@ export const CompilerMixin = {
     const tpl = el.cloneNode(true);
     tpl.removeAttribute('m-for');
     tpl.removeAttribute('m-key');
+
+    // Check if the template is a component
+    const tag = el.tagName.toLowerCase();
+    const isSyncComp = this._cp.has(tag);
+    const isAsyncComp = this._acp.has(tag);
 
     let rows = new Map();     // key -> { node, oldIdx }
     let oldKeys = [];         // Track key order for LIS
@@ -282,10 +329,34 @@ export const CompilerMixin = {
           // Create new node
           const node = tpl.cloneNode(true);
           const scope = this._r(sc);
-          this._scopeMap.set(node, scope);
-          this._bnd(node, scope);
-          this._w(node, scope);
-          newNodes[i] = node;
+
+          if (isSyncComp) {
+            // For sync components, we need to insert the node first,
+            // call _comp which replaces it, then track the instance
+            const tempMarker = document.createComment('comp');
+            cm.after(tempMarker);
+            tempMarker.after(node);
+            const inst = this._comp(node, tag, scope);
+            this._scopeMap.set(inst, scope);
+            tempMarker.remove();
+            newNodes[i] = inst;
+          } else if (isAsyncComp) {
+            // For async components, insert and let _asyncComp handle it
+            const tempMarker = document.createComment('async');
+            cm.after(tempMarker);
+            tempMarker.after(node);
+            this._asyncComp(node, tag, scope);
+            // For async, we track the marker's next sibling (fallback or loaded component)
+            const tracked = tempMarker.nextSibling || node;
+            this._scopeMap.set(tracked, scope);
+            tempMarker.remove();
+            newNodes[i] = tracked;
+          } else {
+            this._scopeMap.set(node, scope);
+            this._bnd(node, scope);
+            this._w(node, scope);
+            newNodes[i] = node;
+          }
           oldIndices[i] = -1;
         }
       }
