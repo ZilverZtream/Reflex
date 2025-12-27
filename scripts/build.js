@@ -21,12 +21,15 @@ const rootDir = path.resolve(__dirname, '..');
 const distDir = path.join(rootDir, 'dist');
 const srcDir = path.join(rootDir, 'src');
 
-// Ensure dist directory exists
+// Ensure dist directories exist
 if (!fs.existsSync(distDir)) {
   fs.mkdirSync(distDir, { recursive: true });
 }
 if (!fs.existsSync(path.join(distDir, 'csp'))) {
   fs.mkdirSync(path.join(distDir, 'csp'), { recursive: true });
+}
+if (!fs.existsSync(path.join(distDir, 'hydration'))) {
+  fs.mkdirSync(path.join(distDir, 'hydration'), { recursive: true });
 }
 
 const isWatch = process.argv.includes('--watch');
@@ -104,6 +107,34 @@ const builds = [
       js: 'if(typeof window!=="undefined"){window.SafeExprParser=ReflexCSP.SafeExprParser;}'
     }
   },
+  // Hydration module - ESM
+  {
+    ...commonOptions,
+    entryPoints: [path.join(srcDir, 'hydration', 'index.js')],
+    outfile: path.join(distDir, 'hydration', 'index.esm.js'),
+    format: 'esm',
+    // Mark core modules as external to avoid duplication
+    external: ['../core/*'],
+  },
+  // Hydration module - CJS
+  {
+    ...commonOptions,
+    entryPoints: [path.join(srcDir, 'hydration', 'index.js')],
+    outfile: path.join(distDir, 'hydration', 'index.cjs'),
+    format: 'cjs',
+    external: ['../core/*'],
+  },
+  // Hydration module - IIFE (standalone, includes dependencies)
+  {
+    ...commonOptions,
+    entryPoints: [path.join(srcDir, 'hydration', 'index.js')],
+    outfile: path.join(distDir, 'hydration', 'index.iife.js'),
+    format: 'iife',
+    globalName: 'ReflexHydration',
+    footer: {
+      js: 'if(typeof window!=="undefined"){window.withHydration=ReflexHydration.withHydration;}'
+    }
+  },
 ];
 
 // Generate TypeScript declarations
@@ -168,6 +199,16 @@ export interface ComponentDefinition {
   setup?: (props: any, context: { emit: Function; props: any; slots: any }) => any;
 }
 
+/**
+ * Plugin interface for extending Reflex.
+ * A plugin can be a function, an object with install method,
+ * or an object with mixin property.
+ */
+export type ReflexPlugin =
+  | ((reflex: Reflex, options?: any) => void)
+  | { install: (reflex: Reflex, options?: any) => void }
+  | { mixin: Record<string, any>; init?: (reflex: Reflex, options?: any) => void };
+
 export declare class Reflex {
   /** Reactive state */
   s: any;
@@ -196,6 +237,12 @@ export declare class Reflex {
    * Register a custom directive
    */
   directive(name: string, callback: (el: Element, binding: DirectiveBinding, reflex: Reflex) => void | (() => void)): this;
+
+  /**
+   * Install a plugin to extend Reflex functionality.
+   * Plugins provide a tree-shakable way to extend Reflex.
+   */
+  use<T extends ReflexPlugin>(plugin: T, options?: any): this;
 
   /**
    * Create a computed property
@@ -254,8 +301,84 @@ export declare class SafeExprParser {
 }
 `;
 
+  const hydrationDts = `/**
+ * Reflex Hydration Module
+ *
+ * Provides SSR hydration support for Reflex applications.
+ * Tree-shakable: if not imported, hydration code won't be bundled.
+ */
+
+import { Reflex } from '../reflex';
+
+export interface HydrationPlugin {
+  mixin: {
+    /**
+     * Hydrate a server-rendered DOM tree.
+     *
+     * Unlike mount(), hydrate() assumes the DOM already exists and
+     * attaches reactive bindings to existing elements without
+     * modifying the DOM structure.
+     *
+     * @param el - Root element to hydrate
+     * @returns Reflex instance for chaining
+     */
+    hydrate(el?: Element): Reflex;
+
+    /**
+     * Internal: Walk DOM tree in hydration mode
+     */
+    _hydrateWalk(n: Node, o: any): void;
+
+    /**
+     * Internal: Hydrate bindings on a single element
+     */
+    _hydrateNode(n: Element, o: any): void;
+
+    /**
+     * Internal: Hydrate text interpolation
+     */
+    _hydrateText(n: Text, o: any): void;
+
+    /**
+     * Internal: Hydrate m-if directive
+     */
+    _hydrateIf(el: Element, o: any): void;
+
+    /**
+     * Internal: Hydrate m-for directive
+     */
+    _hydrateFor(el: Element, o: any): void;
+
+    /**
+     * Internal: Hydrate a component
+     */
+    _hydrateComponent(el: Element, tag: string, o: any): void;
+  };
+  init(reflex: Reflex): void;
+}
+
+/**
+ * Hydration plugin for Reflex.
+ *
+ * Adds hydration capabilities to Reflex instances.
+ * Tree-shakable: if not imported, hydration code won't be bundled.
+ *
+ * @example
+ * import { Reflex } from 'reflex';
+ * import { withHydration } from 'reflex/hydration';
+ *
+ * const app = new Reflex({ count: 0 });
+ * app.use(withHydration);
+ * app.hydrate(document.getElementById('app'));
+ */
+export declare const withHydration: HydrationPlugin;
+
+export default withHydration;
+`;
+
   fs.writeFileSync(path.join(distDir, 'reflex.d.ts'), mainDts);
   fs.writeFileSync(path.join(distDir, 'csp', 'index.d.ts'), cspDts);
+  fs.writeFileSync(path.join(distDir, 'hydration', 'index.d.ts'), hydrationDts);
   console.log('Generated TypeScript declarations');
 }
 
@@ -284,6 +407,9 @@ async function build() {
         'reflex.min.js',
         'csp/index.esm.js',
         'csp/index.cjs',
+        'hydration/index.esm.js',
+        'hydration/index.cjs',
+        'hydration/index.iife.js',
       ];
 
       for (const file of files) {

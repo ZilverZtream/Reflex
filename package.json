@@ -17,6 +17,11 @@
       "import": "./dist/csp/index.esm.js",
       "require": "./dist/csp/index.cjs",
       "types": "./dist/csp/index.d.ts"
+    },
+    "./hydration": {
+      "import": "./dist/hydration/index.esm.js",
+      "require": "./dist/hydration/index.cjs",
+      "types": "./dist/hydration/index.d.ts"
     }
   },
   "files": [
