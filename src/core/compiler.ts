@@ -204,6 +204,7 @@ export const CompilerMixin = {
         }
       }
     });
+    e.o = o;
     this._reg(cm, e.kill);
   },
 
@@ -325,6 +326,7 @@ export const CompilerMixin = {
       oldKeys = newKeys;
     });
 
+    eff.o = o;
     this._reg(cm, () => {
       rows.forEach(({ node }) => this._kill(node));
       eff.kill();
@@ -344,6 +346,7 @@ export const CompilerMixin = {
         const next = v == null ? '' : String(v);
         if (next !== prev) { prev = next; n.nodeValue = next; }
       });
+      e.o = o;
       this._reg(n, e.kill);
       return;
     }
@@ -359,6 +362,7 @@ export const CompilerMixin = {
       }
       if (out !== prev) { prev = out; n.nodeValue = out; }
     });
+    e.o = o;
     this._reg(n, e.kill);
   },
 
@@ -396,6 +400,7 @@ export const CompilerMixin = {
         }
       }
     });
+    e.o = o;
     this._reg(el, e.kill);
   },
 
@@ -420,6 +425,7 @@ export const CompilerMixin = {
 
       if (html !== prev) { prev = html; el.innerHTML = html; }
     });
+    e.o = o;
     this._reg(el, e.kill);
   },
 
@@ -453,6 +459,7 @@ export const CompilerMixin = {
         prev = next;
       }
     });
+    e.o = o;
     this._reg(el, e.kill);
   },
 
@@ -473,6 +480,7 @@ export const CompilerMixin = {
         if (el.value !== next) el.value = next;
       }
     });
+    e.o = o;
     this._reg(el, e.kill);
 
     const up = () => {
@@ -622,8 +630,9 @@ export const CompilerMixin = {
   _effect(el, exp, o) {
     const fn = this._fn(exp, true);
     const e = this._ef(() => {
-      try { fn(this.s, o, null, el); } catch (err) { console.error('Reflex: Error in m-effect:', err); }
+      try { fn(this.s, o, null, el); } catch (err) { this._handleError(err, o); }
     });
+    e.o = o;
     this._reg(el, e.kill);
   },
 
@@ -648,6 +657,7 @@ export const CompilerMixin = {
         self._reg(el, cleanup);
       }
     });
+    e.o = o;
     this._reg(el, e.kill);
     return true;
   },

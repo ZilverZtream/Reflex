@@ -79,6 +79,7 @@ export class Reflex {
     sanitize: boolean;
     cspSafe: boolean;
     cacheSize: number;
+    onError: ((err: any) => void) | null;
   };
 
   constructor(init = {}) {
@@ -116,7 +117,8 @@ export class Reflex {
     this.cfg = {
       sanitize: true,         // Sanitize HTML content
       cspSafe: false,         // CSP-safe mode (no new Function)
-      cacheSize: 1000         // Expression cache size
+      cacheSize: 1000,        // Expression cache size
+      onError: null           // Global error handler
     };
 
     // Initialize reactive state
@@ -141,6 +143,7 @@ export class Reflex {
    * @param {boolean} opts.cspSafe - Enable CSP-safe mode (default: false)
    * @param {number} opts.cacheSize - Expression cache size (default: 1000)
    * @param {Object} opts.parser - CSP-safe expression parser instance
+   * @param {Function} opts.onError - Global error handler
    * @returns {Reflex} This instance for chaining
    *
    * @example
@@ -158,6 +161,7 @@ export class Reflex {
       this._ec = new ExprCache(opts.cacheSize);
     }
     if (opts.parser !== undefined) this._parser = opts.parser;
+    if (opts.onError !== undefined) this.cfg.onError = opts.onError;
     return this;
   }
 
@@ -335,6 +339,9 @@ export class Reflex {
         }
       }
     }
+    if (typeof scopeRaw.catchError !== 'function' && typeof def.catchError === 'function') {
+      scopeRaw.catchError = def.catchError;
+    }
 
     const scope = this._r(scopeRaw);
     el.replaceWith(inst);
@@ -342,6 +349,7 @@ export class Reflex {
     for (const pd of propDefs) {
       const fn = this._fn(pd.exp);
       const e = this._ef(() => { props[pd.name] = fn(this.s, o); });
+      e.o = o;
       this._reg(inst, e.kill);
     }
 
