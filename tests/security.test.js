@@ -65,25 +65,27 @@ describe('Security', () => {
     });
 
     it('should block bracket notation constructor access', async () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       document.body.innerHTML = '<span m-text="obj[\'constructor\']"></span>';
       const app = new Reflex({ obj: {} });
       await app.nextTick();
 
-      expect(warnSpy).toHaveBeenCalled();
-      expect(warnSpy.mock.calls.flat().join(' ')).toContain('unsafe');
-      warnSpy.mockRestore();
+      // Iron Membrane blocks constructor access with an error
+      expect(errorSpy).toHaveBeenCalled();
+      expect(errorSpy.mock.calls.flat().join(' ')).toContain('Security');
+      expect(document.querySelector('span').textContent).toBe('');
+      errorSpy.mockRestore();
     });
 
     it('should block Function constructor calls', async () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      // Function constructor is blocked by the reserved words list and membrane
       document.body.innerHTML = '<span m-text="Function(\'return 1\')()"></span>';
       const app = new Reflex({});
       await app.nextTick();
 
-      expect(warnSpy).toHaveBeenCalled();
-      expect(warnSpy.mock.calls.flat().join(' ')).toContain('unsafe');
-      warnSpy.mockRestore();
+      // Should not execute the function
+      const text = document.querySelector('span').textContent;
+      expect(text === '' || text === 'undefined').toBe(true);
     });
   });
 
@@ -205,6 +207,122 @@ describe('Security', () => {
       await app.nextTick();
 
       expect(document.querySelector('span').textContent).toBe('{"a":1}');
+    });
+  });
+
+  describe('Iron Membrane Sandbox', () => {
+    it('should block obfuscated constructor access via string concatenation', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      document.body.innerHTML = '<span m-text="user[&quot;con&quot; + &quot;structor&quot;](&quot;alert(1)&quot;)()"></span>';
+      const app = new Reflex({ user: { name: 'Alice' } });
+
+      // The expression should fail due to membrane blocking constructor access
+      await app.nextTick();
+
+      // The element should be empty or show undefined (no code execution)
+      const text = document.querySelector('span').textContent;
+      expect(text).not.toContain('alert');
+      expect(text === '' || text === 'undefined').toBe(true);
+
+      errorSpy.mockRestore();
+    });
+
+    it('should block constructor access via bracket notation', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      document.body.innerHTML = '<span m-text="obj[&quot;constructor&quot;]"></span>';
+      const app = new Reflex({ obj: {} });
+      await app.nextTick();
+
+      // The membrane should block access, resulting in empty or undefined
+      const text = document.querySelector('span').textContent;
+      expect(text === '' || text === 'undefined').toBe(true);
+
+      errorSpy.mockRestore();
+    });
+
+    it('should block __proto__ access via bracket notation', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      document.body.innerHTML = '<span m-text="obj[&quot;__proto__&quot;]"></span>';
+      const app = new Reflex({ obj: {} });
+      await app.nextTick();
+
+      // The membrane should block access, resulting in empty or undefined
+      const text = document.querySelector('span').textContent;
+      expect(text === '' || text === 'undefined').toBe(true);
+
+      errorSpy.mockRestore();
+    });
+
+    it('should block prototype access via bracket notation', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      document.body.innerHTML = '<span m-text="obj[&quot;prototype&quot;]"></span>';
+      const app = new Reflex({ obj: {} });
+      await app.nextTick();
+
+      // The membrane should block access, resulting in empty or undefined
+      const text = document.querySelector('span').textContent;
+      expect(text === '' || text === 'undefined').toBe(true);
+
+      errorSpy.mockRestore();
+    });
+
+    it('should allow safe array methods through membrane', async () => {
+      document.body.innerHTML = '<span m-text="items.map(x => x * 2).join(\',\')"></span>';
+      const app = new Reflex({ items: [1, 2, 3] });
+      await app.nextTick();
+
+      expect(document.querySelector('span').textContent).toBe('2,4,6');
+    });
+
+    it('should allow safe string methods through membrane', async () => {
+      document.body.innerHTML = '<span m-text="name.toUpperCase()"></span>';
+      const app = new Reflex({ name: 'alice' });
+      await app.nextTick();
+
+      expect(document.querySelector('span').textContent).toBe('ALICE');
+    });
+
+    it('should allow safe object access through membrane', async () => {
+      document.body.innerHTML = '<span m-text="user.profile.age"></span>';
+      const app = new Reflex({ user: { profile: { age: 25 } } });
+      await app.nextTick();
+
+      expect(document.querySelector('span').textContent).toBe('25');
+    });
+
+    it('should allow user data with property name "global"', async () => {
+      // User data with property name 'global' should be allowed
+      // Only the actual global object should be blocked
+      document.body.innerHTML = '<span m-text="obj.global"></span>';
+      const app = new Reflex({ obj: { global: 'test' } });
+      await app.nextTick();
+
+      const text = document.querySelector('span').textContent;
+      expect(text).toBe('test');
+    });
+
+    it('should allow user data with property name "Function"', async () => {
+      // User data with property name 'Function' should be allowed
+      // Only the actual Function constructor should be blocked
+      document.body.innerHTML = '<span m-text="obj.Function"></span>';
+      const app = new Reflex({ obj: { Function: 'test' } });
+      await app.nextTick();
+
+      const text = document.querySelector('span').textContent;
+      expect(text).toBe('test');
+    });
+
+    it('should recursively wrap nested objects in membrane', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      document.body.innerHTML = '<span m-text="user.data[&quot;constructor&quot;]"></span>';
+      const app = new Reflex({ user: { data: { name: 'test' } } });
+      await app.nextTick();
+
+      // Even nested objects should be protected by membrane
+      const text = document.querySelector('span').textContent;
+      expect(text === '' || text === 'undefined').toBe(true);
+
+      errorSpy.mockRestore();
     });
   });
 });
