@@ -53,6 +53,7 @@ interface ReactiveMeta {
   ai: boolean;
   _am: Record<string | symbol, (...args: any[]) => any> | null;
   engine: ReactivityEngine;
+  v: number; // Version counter for structural sharing in deep clones
   [key: string | symbol]: any;
 }
 
@@ -115,6 +116,7 @@ export const ArrayHandler: ProxyHandler<any[]> = {
     const ok = Reflect.set(o, k, raw, rec);
     if (!ok) return false;
 
+    meta.v++; // Increment version on mutation
     // Trigger specific key change
     engine._tr(meta, k);
 
@@ -138,6 +140,7 @@ export const ArrayHandler: ProxyHandler<any[]> = {
     if (!(k in o)) return true;
     const res = Reflect.deleteProperty(o, k);
     if (res) {
+      meta.v++; // Increment version on mutation
       const engine = meta.engine;
       engine._tr(meta, k);
       engine._tr(meta, ITERATE);
@@ -180,6 +183,7 @@ export const ObjectHandler: ProxyHandler<ReactiveTarget> = {
     const ok = Reflect.set(o, k, raw, rec);
     if (!ok) return false;
 
+    meta.v++; // Increment version on mutation
     engine._tr(meta, k);
     if (!had) engine._tr(meta, ITERATE);
     return true;
@@ -190,6 +194,7 @@ export const ObjectHandler: ProxyHandler<ReactiveTarget> = {
     if (!(k in o)) return true;
     const res = Reflect.deleteProperty(o, k);
     if (res) {
+      meta.v++; // Increment version on mutation
       const engine = meta.engine;
       engine._tr(meta, k);
       engine._tr(meta, ITERATE);
@@ -302,7 +307,8 @@ export const ReactivityMixin = {
       d: new Map(),
       ai: false,
       _am: null,
-      engine: this
+      engine: this,
+      v: 0 // Initialize version counter for structural sharing
     };
     const isArr = Array.isArray(t);
     const isMap = t instanceof Map;
@@ -407,6 +413,7 @@ export const ReactivityMixin = {
       try {
         res = Array.prototype[m].apply(t, args);
 
+        meta.v++; // Increment version on array mutation
         let ks = self._pt.get(meta);
         if (!ks) self._pt.set(meta, ks = new Set());
         ks.add(ITERATE);
@@ -480,6 +487,7 @@ export const ReactivityMixin = {
       const old = had ? map.get(rk) : undefined;
       map.set(rk, rv);
       if (!had || !Object.is(old, rv)) {
+        meta.v++; // Increment version on mutation
         self._b++;
         try {
           let ks = self._pt.get(meta);
@@ -499,6 +507,7 @@ export const ReactivityMixin = {
       const set = t as Set<any>;
       if (!set.has(rv)) {
         set.add(rv);
+        meta.v++; // Increment version on mutation
         self._b++;
         try {
           let ks = self._pt.get(meta);
@@ -518,6 +527,7 @@ export const ReactivityMixin = {
       const had = (t as Map<any, any> | Set<any>).has(rk);
       const res = (t as Map<any, any> | Set<any>).delete(rk);
       if (had) {
+        meta.v++; // Increment version on mutation
         self._b++;
         try {
           let ks = self._pt.get(meta);
@@ -534,6 +544,7 @@ export const ReactivityMixin = {
 
     if (m === 'clear') return meta[m] = () => {
       if (!(t as Map<any, any> | Set<any>).size) return;
+      meta.v++; // Increment version on mutation
       self._b++;
       try {
         let ks = self._pt.get(meta);
