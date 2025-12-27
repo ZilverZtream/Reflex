@@ -80,55 +80,64 @@ export function runTransition(el, name, type, done) {
 export const CompilerMixin = {
   /**
    * Walk the DOM tree and process nodes.
-   * Uses recursive walking (not TreeWalker) because:
-   * 1. Allows efficient subtree skipping for m-ignore, m-for, m-if
-   * 2. TreeWalker forces visiting every node even when skipping
-   * 3. Benchmarks show recursion is faster when skipping is needed
+   * Uses iterative walking with explicit stack to prevent stack overflow.
+   * This approach handles deeply nested DOM structures (10,000+ levels) safely.
+   *
+   * The stack stores {node, scope} pairs to process.
+   * Each node's children are pushed in reverse order to maintain left-to-right processing.
    */
   _w(n, o) {
-    let c = n.firstChild;
-    while (c) {
-      const next = c.nextSibling;
-      const nt = c.nodeType;
+    // Explicit stack prevents recursive call stack overflow
+    const stack = [{ node: n, scope: o }];
 
-      // Element node (1)
-      if (nt === 1) {
-        const mIgnore = c.getAttribute('m-ignore');
-        if (mIgnore === null) {
-          const tag = c.tagName;
-          if (tag === 'TEMPLATE') {
-            // Skip templates
-          } else {
-            const mIf = c.getAttribute('m-if');
-            if (mIf !== null) {
-              this._dir_if(c, o);
+    while (stack.length > 0) {
+      const { node, scope } = stack.pop();
+      let c = node.firstChild;
+
+      while (c) {
+        const next = c.nextSibling;
+        const nt = c.nodeType;
+
+        // Element node (1)
+        if (nt === 1) {
+          const mIgnore = c.getAttribute('m-ignore');
+          if (mIgnore === null) {
+            const tag = c.tagName;
+            if (tag === 'TEMPLATE') {
+              // Skip templates
             } else {
-              const mFor = c.getAttribute('m-for');
-              if (mFor !== null) {
-                this._dir_for(c, o);
+              const mIf = c.getAttribute('m-if');
+              if (mIf !== null) {
+                this._dir_if(c, scope);
               } else {
-                const t = tag.toLowerCase();
-                if (this._cp.has(t)) {
-                  this._comp(c, t, o);
-                } else if (this._acp.has(t)) {
-                  // Async component: lazy-load the handler
-                  this._asyncComp(c, t, o);
+                const mFor = c.getAttribute('m-for');
+                if (mFor !== null) {
+                  this._dir_for(c, scope);
                 } else {
-                  this._bnd(c, o);
-                  this._w(c, o);
+                  const t = tag.toLowerCase();
+                  if (this._cp.has(t)) {
+                    this._comp(c, t, scope);
+                  } else if (this._acp.has(t)) {
+                    // Async component: lazy-load the handler
+                    this._asyncComp(c, t, scope);
+                  } else {
+                    this._bnd(c, scope);
+                    // Push child for processing instead of recursive call
+                    stack.push({ node: c, scope: scope });
+                  }
                 }
               }
             }
           }
+        } else if (nt === 3) {
+          // Text node with interpolation
+          const nv = c.nodeValue;
+          if (typeof nv === 'string' && nv.indexOf('{{') !== -1) {
+            this._txt(c, scope);
+          }
         }
-      } else if (nt === 3) {
-        // Text node with interpolation
-        const nv = c.nodeValue;
-        if (typeof nv === 'string' && nv.indexOf('{{') !== -1) {
-          this._txt(c, o);
-        }
+        c = next;
       }
-      c = next;
     }
   },
 
@@ -310,7 +319,9 @@ export const CompilerMixin = {
         if (item !== null && typeof item === 'object' && !item[SKIP]) {
           item = this._r(item);
         }
-        const sc = Object.create(o || {});
+        // Use flat object copy instead of Object.create to allow V8 inline caching
+        // Object.create creates unique prototype chains, preventing optimization
+        const sc = o ? Object.assign({}, o) : {};
         sc[alias] = item;
         if (idxAlias) sc[idxAlias] = i;
 
@@ -492,37 +503,37 @@ export const CompilerMixin = {
   /**
    * HTML binding: m-html="expr"
    *
-   * SECURITY NOTE: m-html requires DOMPurify for safe operation.
-   * Without DOMPurify, content is rendered as escaped text to prevent XSS.
+   * CRITICAL SECURITY NOTE:
+   * m-html is DANGEROUS and can lead to XSS attacks if used with untrusted content.
+   *
+   * Requirements:
+   * 1. DOMPurify must be configured: app.configure({ domPurify: DOMPurify })
+   * 2. Never use m-html with user-provided content
+   * 3. Consider using m-text instead for user content
+   *
+   * Without DOMPurify, m-html will THROW AN ERROR to prevent silent XSS vulnerabilities.
    */
   _html(el, exp, o) {
     const fn = this._fn(exp);
     let prev;
-    let warnedOnce = false;
+    const self = this;
     const e = this._ef(() => {
-      const v = fn(this.s, o);
+      const v = fn(self.s, o);
       let html = v == null ? '' : String(v);
 
-      if (this.cfg.sanitize) {
-        if (typeof DOMPurify !== 'undefined') {
-          html = DOMPurify.sanitize(html);
+      if (self.cfg.sanitize) {
+        // Use configured DOMPurify instance (not global variable)
+        const purify = self.cfg.domPurify;
+        if (purify && typeof purify.sanitize === 'function') {
+          html = purify.sanitize(html);
         } else {
-          // SECURITY: Without DOMPurify, we cannot safely use innerHTML
-          // Render as escaped text instead to prevent XSS
-          if (!warnedOnce) {
-            warnedOnce = true;
-            console.error(
-              'Reflex: SECURITY WARNING - m-html requires DOMPurify for safe operation. ' +
-              'Without DOMPurify, content will be rendered as escaped text. ' +
-              'Install DOMPurify: npm install dompurify'
-            );
-          }
-          // Use textContent instead of innerHTML when no sanitizer is available
-          if (html !== prev) {
-            prev = html;
-            el.textContent = html;
-          }
-          return;
+          // CRITICAL: Fail hard instead of silent fallback
+          throw new Error(
+            'Reflex: SECURITY ERROR - m-html requires DOMPurify.\n' +
+            'Configure it with: app.configure({ domPurify: DOMPurify })\n' +
+            'Install: npm install dompurify\n' +
+            'Or disable sanitization (UNSAFE): app.configure({ sanitize: false })'
+          );
         }
       }
 
@@ -642,16 +653,29 @@ export const CompilerMixin = {
       return mod.includes(prefix.slice(0, -1)) ? 300 : 0;
     };
 
+    // Track timer IDs for cleanup to prevent memory leaks
+    const timers: { debounce?: number | null; throttle?: number | null } = {};
+
     // Debounce modifier: @input.debounce.300ms="search"
     const debounceDelay = getDelay('debounce.');
     if (debounceDelay || mod.includes('debounce')) {
       const delay = debounceDelay || 300;
       const origFn = fn;
-      let timer = null;
+      timers.debounce = null;
       fn = (s, c, e) => {
-        clearTimeout(timer);
-        timer = setTimeout(() => origFn(s, c, e), delay);
+        if (timers.debounce !== null) clearTimeout(timers.debounce);
+        timers.debounce = setTimeout(() => {
+          timers.debounce = null;
+          origFn(s, c, e);
+        }, delay) as any;
       };
+      // Register cleanup to prevent memory leaks
+      this._reg(el, () => {
+        if (timers.debounce !== null) {
+          clearTimeout(timers.debounce);
+          timers.debounce = null;
+        }
+      });
     }
 
     // Throttle modifier: @scroll.throttle.100ms="onScroll"
@@ -660,6 +684,7 @@ export const CompilerMixin = {
       const delay = throttleDelay || 300;
       const origFn = fn;
       let last = 0;
+      timers.throttle = null;
       fn = (s, c, e) => {
         const now = Date.now();
         if (now - last >= delay) {

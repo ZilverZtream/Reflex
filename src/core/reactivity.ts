@@ -115,13 +115,21 @@ export const ArrayHandler: ProxyHandler<any[]> = {
     const ok = Reflect.set(o, k, raw, rec);
     if (!ok) return false;
 
+    // Trigger specific key change
     engine._tr(meta, k);
+
+    // OPTIMIZATION: Only trigger ITERATE when structure actually changes
+    // Setting existing array elements doesn't need ITERATE
     if (k === 'length') {
+      // Length change always affects iteration
       engine._tr(meta, ITERATE);
-    } else if (isIdx) {
+    } else if (isIdx && !had) {
+      // New index added (sparse array) - affects iteration and length
       engine._tr(meta, ITERATE);
-      if (!had) engine._tr(meta, 'length');
+      engine._tr(meta, 'length');
     }
+    // Note: Updating existing indices (arr[5] = x when arr.length > 5)
+    // does NOT trigger ITERATE, preventing O(N) over-reactivity
     return true;
   },
 
@@ -359,7 +367,8 @@ export const ReactivityMixin = {
       ks.add(k);
       return;
     }
-    if (process.env.NODE_ENV !== 'production') {
+    // Safe environment check without relying on global namespace
+    if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
       this._dtEmit('state:change', { target: m.r, key: k, state: this.s });
     }
     const s = m.d.get(k);

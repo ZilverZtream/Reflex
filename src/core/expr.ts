@@ -14,35 +14,39 @@
 import { META, RESERVED, UNSAFE_PROPS, UNSAFE_EXPR_RE, ID_RE, normalizeUnicodeEscapes } from './symbols.js';
 
 /**
- * Expression cache with FIFO eviction strategy.
- * Removes oldest 10% of entries when at capacity to prevent
- * cache thrashing that would cause compilation storms.
+ * Expression cache with LRU (Least Recently Used) eviction strategy.
+ * Uses Map's insertion order to track access recency.
+ * When cache is full, removes the least recently accessed entry.
+ * This prevents cache thrashing that would cause compilation storms.
  */
 export class ExprCache {
   declare max: number;
   declare cache: Map<string, any>;
-  declare _evictCount: number;
 
   constructor(maxSize = 1000) {
     this.max = maxSize;
     this.cache = new Map();
-    this._evictCount = Math.max(1, Math.floor(maxSize * 0.1));
   }
 
   get(key: string) {
-    return this.cache.get(key);
+    const value = this.cache.get(key);
+    if (value !== undefined) {
+      // Move to end (most recently used) by deleting and re-inserting
+      this.cache.delete(key);
+      this.cache.set(key, value);
+    }
+    return value;
   }
 
   set<T>(key: string, value: T): T {
-    // FIFO eviction: remove oldest entries when at capacity
-    // Map maintains insertion order, so first entries are oldest
-    if (this.cache.size >= this.max) {
-      let removed = 0;
-      for (const k of this.cache.keys()) {
-        if (removed >= this._evictCount) break;
-        this.cache.delete(k);
-        removed++;
-      }
+    // If key exists, delete it first so re-insertion moves it to end
+    if (this.cache.has(key)) {
+      this.cache.delete(key);
+    } else if (this.cache.size >= this.max) {
+      // LRU eviction: remove oldest (first) entry
+      // Map maintains insertion order, so first key is least recently used
+      const firstKey = this.cache.keys().next().value;
+      this.cache.delete(firstKey);
     }
     this.cache.set(key, value);
     return value;
@@ -73,11 +77,23 @@ export const ExprMixin = {
     const cached = this._ec.get(k);
     if (cached) return cached;
 
-    // Security: Block dangerous expression patterns
-    // Normalize Unicode escapes first to prevent bypass via \uXXXX encoding
+    // SECURITY WARNING: Regex-based expression validation provides only basic protection.
+    // It CANNOT fully prevent determined attackers from executing arbitrary code.
+    // For production applications handling untrusted user input:
+    // 1. Enable CSP-safe mode: app.configure({ cspSafe: true, parser: SafeExprParser })
+    // 2. Use strict Content Security Policy headers (no 'unsafe-eval')
+    // 3. Never render user-provided template expressions without sanitization
+    //
+    // This check blocks common attack patterns but is NOT a complete security solution.
     const normalizedExp = normalizeUnicodeEscapes(exp);
     if (UNSAFE_EXPR_RE.test(normalizedExp)) {
-      console.warn('Reflex: Blocked potentially unsafe expression:', exp);
+      if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+        console.error(
+          'Reflex: SECURITY - Blocked potentially unsafe expression pattern.\n' +
+          'Expression: ' + exp + '\n' +
+          'For production apps, use CSP-safe mode to prevent code injection.'
+        );
+      }
       return this._ec.set(k, () => undefined);
     }
 
@@ -171,12 +187,13 @@ export const ExprMixin = {
     }
 
     // Standard mode: use new Function (faster but requires unsafe-eval CSP)
-    // Inject magic properties: $refs, $dispatch, $nextTick, $el, $event
+    // WARNING: This violates strict Content Security Policy (CSP) headers.
+    // Enterprise environments (banks, gov, healthcare) often block 'unsafe-eval'.
+    // For CSP-compliant deployments, use: app.configure({ cspSafe: true, parser: SafeExprParser })
     const magicArgs = 'var $refs=_r,$dispatch=_d,$nextTick=_n,$el=_el;';
 
-    // For handlers that mutate state (like count++), we need to use 'with'
-    // to allow direct property access. For read expressions, we use local vars.
-    // Note: 'with' works in sloppy mode (new Function doesn't add 'use strict')
+    // Detect CSP violations and provide helpful error message
+    let rawFn;
     const self = this;
 
     if (isH) {
@@ -184,7 +201,7 @@ export const ExprMixin = {
       // First check if there's a context (c), fall back to state (s)
       const body = `${magicArgs}with(c||{}){with(s){${exp}}}`;
       try {
-        const rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el', body);
+        rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el', body);
         return this._ec.set(k, (s, c, e, el) => rawFn(
           s, c || {}, e,
           self._refs,
@@ -193,6 +210,19 @@ export const ExprMixin = {
           el
         ));
       } catch (err) {
+        // Check if this is a CSP violation
+        if (err instanceof EvalError || (err.message && err.message.includes('unsafe-eval'))) {
+          const cspError = new Error(
+            'Reflex: CSP VIOLATION - new Function() is blocked by Content Security Policy.\n' +
+            'Your environment blocks \'unsafe-eval\'. To fix this:\n' +
+            '1. Enable CSP-safe mode: app.configure({ cspSafe: true, parser: SafeExprParser })\n' +
+            '2. Import the parser: import { SafeExprParser } from \'reflex/csp\'\n' +
+            '3. Or update CSP headers to allow \'unsafe-eval\' (NOT recommended)\n' +
+            'Expression: ' + exp
+          );
+          console.error(cspError);
+          throw cspError;
+        }
         console.warn('Reflex compile error:', exp, err);
         return this._ec.set(k, () => undefined);
       }
@@ -213,7 +243,7 @@ export const ExprMixin = {
     const body = `${magicArgs}${arg}return(${exp});`;
 
     try {
-      const rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el', body);
+      rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el', body);
       // Wrap to inject magic properties
       return this._ec.set(k, (s, c, e, el) => rawFn(
         s, c, e,
@@ -223,6 +253,19 @@ export const ExprMixin = {
         el
       ));
     } catch (err) {
+      // Check if this is a CSP violation
+      if (err instanceof EvalError || (err.message && err.message.includes('unsafe-eval'))) {
+        const cspError = new Error(
+          'Reflex: CSP VIOLATION - new Function() is blocked by Content Security Policy.\n' +
+          'Your environment blocks \'unsafe-eval\'. To fix this:\n' +
+          '1. Enable CSP-safe mode: app.configure({ cspSafe: true, parser: SafeExprParser })\n' +
+          '2. Import the parser: import { SafeExprParser } from \'reflex/csp\'\n' +
+          '3. Or update CSP headers to allow \'unsafe-eval\' (NOT recommended)\n' +
+          'Expression: ' + exp
+        );
+        console.error(cspError);
+        throw cspError;
+      }
       console.warn('Reflex compile error:', exp, err);
       return this._ec.set(k, () => undefined);
     }

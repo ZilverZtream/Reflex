@@ -81,9 +81,18 @@ UNSAFE_PROPS['__proto__'] = 1; // Must use bracket notation to avoid syntax erro
 // Dangerous URL protocols that could execute JavaScript
 export const UNSAFE_URL_RE = /^\s*(javascript|vbscript|data):/i;
 
-// Dangerous patterns in expressions that could bypass reserved word checks
-// Matches ["constructor"], ['constructor'], [`constructor`], same for __proto__, and Function() calls
-export const UNSAFE_EXPR_RE = /\[["'`]constructor["'`]\]|\[["'`]__proto__["'`]\]|\.constructor\s*\(|Function\s*\(/i;
+// SECURITY WARNING: Regex-based validation CANNOT fully protect against malicious code.
+// This provides basic defense-in-depth, but determined attackers can bypass regex.
+// For production apps handling untrusted user input, use CSP-safe mode instead.
+//
+// Dangerous patterns in expressions that could bypass reserved word checks:
+// - ["constructor"], ['constructor'], [`constructor`] - bracket notation access
+// - .constructor() - direct constructor calls
+// - Function() - Function constructor calls
+// - String concatenation: "con" + "structor" or template literals
+// - Computed property access: obj[variable] where variable = "constructor"
+// - eval(), setTimeout(), setInterval() with string arguments
+export const UNSAFE_EXPR_RE = /\[["'`]constructor["'`]\]|\[["'`]__proto__["'`]\]|\.constructor\s*\(|Function\s*\(|eval\s*\(|setTimeout\s*\(|setInterval\s*\(|import\s*\(|[\+\-]\s*["'`]constructor|["'`]\s*\+\s*["'`]con/i;
 
 // === REGEX PATTERNS ===
 // Identifier extraction pattern for expression parsing

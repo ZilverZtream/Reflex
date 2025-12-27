@@ -267,8 +267,30 @@ export const SchedulerMixin = {
 
   /**
    * Deep clone a value for watch comparison
+   *
+   * PERFORMANCE WARNING: Deep cloning large objects blocks the main thread.
+   * This is a known limitation of deep watchers.
+   *
+   * Best practices:
+   * - Avoid deep watching large datasets (>1000 items)
+   * - Use shallow watchers when possible: watch(() => arr.length)
+   * - For large datasets, use computed values or manual dirty tracking
+   *
+   * Includes depth limit (default: 50) to prevent stack overflow and UI freezing.
    */
-  _clone(v, seen = new Map()) {
+  _clone(v, seen = new Map(), depth = 0) {
+    // Depth limit to prevent excessive recursion
+    const MAX_DEPTH = 50;
+    if (depth > MAX_DEPTH) {
+      if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+        console.warn(
+          'Reflex: Deep clone exceeded max depth (' + MAX_DEPTH + '). ' +
+          'This can cause performance issues. Consider using shallow watchers instead.'
+        );
+      }
+      return v; // Return as-is at max depth
+    }
+
     v = this.toRaw(v);
     if (v === null || typeof v !== 'object') return v;
     if (seen.has(v)) return seen.get(v);
@@ -276,21 +298,21 @@ export const SchedulerMixin = {
     if (v instanceof RegExp) return new RegExp(v.source, v.flags);
     if (v instanceof Map) {
       const o = new Map(); seen.set(v, o);
-      v.forEach((val, key) => o.set(key, this._clone(val, seen)));
+      v.forEach((val, key) => o.set(key, this._clone(val, seen, depth + 1)));
       return o;
     }
     if (v instanceof Set) {
       const o = new Set(); seen.set(v, o);
-      v.forEach(val => o.add(this._clone(val, seen)));
+      v.forEach(val => o.add(this._clone(val, seen, depth + 1)));
       return o;
     }
     if (Array.isArray(v)) {
       const o = []; seen.set(v, o);
-      for (let i = 0; i < v.length; i++) o[i] = this._clone(v[i], seen);
+      for (let i = 0; i < v.length; i++) o[i] = this._clone(v[i], seen, depth + 1);
       return o;
     }
     const o = {}; seen.set(v, o);
-    for (const k in v) o[k] = this._clone(v[k], seen);
+    for (const k in v) o[k] = this._clone(v[k], seen, depth + 1);
     return o;
   }
 };
