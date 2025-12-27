@@ -12,7 +12,7 @@
  */
 
 import { META, ITERATE, SKIP, UNSAFE_PROPS, UNSAFE_URL_RE } from './symbols.js';
-import { computeLIS, resolveDuplicateKey } from './reconcile.js';
+import { computeLIS, resolveDuplicateKey, reconcileKeyedList } from './reconcile.js';
 
 // Basic HTML entity escaping for when DOMPurify is unavailable
 const escapeHTML = s => s.replace(/[&<>"']/g, c => ({
@@ -262,7 +262,7 @@ export const CompilerMixin = {
   /**
    * m-for directive: keyed list rendering with LIS-optimized reconciliation.
    *
-   * Uses Longest Increasing Subsequence to minimize DOM moves.
+   * Uses reconcileKeyedList from reconcile.ts to eliminate code duplication.
    * See src/core/reconcile.js for algorithm details.
    */
   _dir_for(el, o) {
@@ -298,54 +298,34 @@ export const CompilerMixin = {
       if (listMeta) this._tk(listMeta, ITERATE);
 
       const raw = Array.isArray(list) ? this.toRaw(list) : Array.from(list);
-      const newLen = raw.length;
-
-      // Build key-to-oldIndex map for LIS calculation
-      const keyToOldIdx = new Map();
-      for (let i = 0; i < oldKeys.length; i++) {
-        keyToOldIdx.set(oldKeys[i], i);
-      }
-
-      // Prepare new nodes and collect old indices for LIS
-      const newNodes = new Array(newLen);
-      const newKeys = new Array(newLen);
-      const oldIndices = new Array(newLen);
 
       // Track seen keys to detect and handle duplicates
-      const seenKeys = new Map();
+      const seenKeys = new Set();
 
-      for (let i = 0; i < newLen; i++) {
-        let item = raw[i];
-        if (item !== null && typeof item === 'object' && !item[SKIP]) {
-          item = this._r(item);
-        }
-        // Use flat object copy instead of Object.create to allow V8 inline caching
-        // Object.create creates unique prototype chains, preventing optimization
-        const sc = o ? Object.assign({}, o) : {};
-        sc[alias] = item;
-        if (idxAlias) sc[idxAlias] = i;
+      // Configure reconciliation with Reflex-specific logic
+      const config = {
+        getKey: (item, index, scope) => {
+          let key = kAttr ? (keyIsProp ? (item && item[kAttr]) : keyFn(this.s, scope)) : index;
+          // Handle duplicate keys to prevent ghost nodes
+          return resolveDuplicateKey(seenKeys, key, index);
+        },
 
-        let key = kAttr ? (keyIsProp ? (item && item[kAttr]) : keyFn(this.s, sc)) : i;
-
-        // Handle duplicate keys to prevent ghost nodes
-        key = resolveDuplicateKey(seenKeys, key, i);
-        newKeys[i] = key;
-
-        const existing = rows.get(key);
-        if (existing) {
-          // Reuse existing node, update scope
-          const p = this._scopeMap.get(existing.node);
-          if (p) {
-            p[alias] = item;
-            if (idxAlias) p[idxAlias] = i;
+        createScope: (item, index) => {
+          let processedItem = item;
+          if (processedItem !== null && typeof processedItem === 'object' && !processedItem[SKIP]) {
+            processedItem = this._r(processedItem);
           }
-          newNodes[i] = existing.node;
-          oldIndices[i] = keyToOldIdx.get(key) ?? -1;
-          rows.delete(key);
-        } else {
-          // Create new node
+          // Use flat object copy instead of Object.create to allow V8 inline caching
+          // Object.create creates unique prototype chains, preventing optimization
+          const sc = o ? Object.assign({}, o) : {};
+          sc[alias] = processedItem;
+          if (idxAlias) sc[idxAlias] = index;
+          return this._r(sc);
+        },
+
+        createNode: (item, index) => {
+          const scope = config.createScope(item, index);
           const node = tpl.cloneNode(true);
-          const scope = this._r(sc);
 
           if (isSyncComp) {
             // For sync components, we need to insert the node first,
@@ -356,7 +336,7 @@ export const CompilerMixin = {
             const inst = this._comp(node, tag, scope);
             this._scopeMap.set(inst, scope);
             tempMarker.remove();
-            newNodes[i] = inst;
+            return inst;
           } else if (isAsyncComp) {
             // For async components, insert and let _asyncComp handle it
             const tempMarker = document.createComment('async');
@@ -367,51 +347,45 @@ export const CompilerMixin = {
             const tracked = tempMarker.nextSibling || node;
             this._scopeMap.set(tracked, scope);
             tempMarker.remove();
-            newNodes[i] = tracked;
+            return tracked;
           } else {
             this._scopeMap.set(node, scope);
             this._bnd(node, scope);
             this._w(node, scope);
-            newNodes[i] = node;
+            return node;
           }
-          oldIndices[i] = -1;
-        }
-      }
+        },
 
-      // Remove stale nodes
-      rows.forEach(({ node }) => {
-        this._kill(node);
-        node.remove();
+        updateNode: (node, item, index) => {
+          const scope = this._scopeMap.get(node);
+          if (scope) {
+            let processedItem = item;
+            if (processedItem !== null && typeof processedItem === 'object' && !processedItem[SKIP]) {
+              processedItem = this._r(processedItem);
+            }
+            scope[alias] = processedItem;
+            if (idxAlias) scope[idxAlias] = index;
+          }
+        },
+
+        removeNode: (node) => {
+          this._kill(node);
+          node.remove();
+        }
+      };
+
+      // Use centralized reconciliation logic
+      const result = reconcileKeyedList({
+        oldRows: rows,
+        oldKeys: oldKeys,
+        rawList: raw,
+        config: config,
+        engine: this,
+        marker: cm
       });
 
-      // Compute LIS for optimal moves - nodes in LIS don't need to move
-      const lis = computeLIS(oldIndices);
-      const lisSet = new Set(lis);
-
-      // Insert nodes - only move nodes NOT in LIS
-      let nextSibling = null;
-      for (let i = newLen - 1; i >= 0; i--) {
-        const node = newNodes[i];
-        if (!lisSet.has(i)) {
-          if (nextSibling) {
-            cm.parentNode.insertBefore(node, nextSibling);
-          } else {
-            let lastNode = cm;
-            for (let j = 0; j < i; j++) {
-              if (newNodes[j].parentNode) lastNode = newNodes[j];
-            }
-            lastNode.after(node);
-          }
-        }
-        nextSibling = node;
-      }
-
-      // Rebuild rows map
-      rows = new Map();
-      for (let i = 0; i < newLen; i++) {
-        rows.set(newKeys[i], { node: newNodes[i], oldIdx: i });
-      }
-      oldKeys = newKeys;
+      rows = result.rows;
+      oldKeys = result.keys;
     });
 
     eff.o = o;
