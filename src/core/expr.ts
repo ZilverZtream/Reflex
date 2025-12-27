@@ -88,7 +88,7 @@ export const ExprMixin = {
     const normalizedExp = normalizeUnicodeEscapes(exp);
     if (UNSAFE_EXPR_RE.test(normalizedExp)) {
       if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
-        console.error(
+        console.warn(
           'Reflex: SECURITY - Blocked potentially unsafe expression pattern.\n' +
           'Expression: ' + exp + '\n' +
           'For production apps, use CSP-safe mode to prevent code injection.'
