@@ -55,7 +55,13 @@
     "no-vdom",
     "lightweight",
     "csp-safe",
-    "zero-dependency"
+    "zero-dependency",
+    "universal",
+    "ssr",
+    "virtual-dom",
+    "fine-grained",
+    "time-slicing",
+    "security-focused"
   ],
   "author": "",
   "license": "MIT",
