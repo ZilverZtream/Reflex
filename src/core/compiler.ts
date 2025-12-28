@@ -44,6 +44,19 @@ const escapeHTML = s => s.replace(/[&<>"']/g, c => ({
  * @param reflex - Optional Reflex instance to register cleanup in lifecycle registry
  */
 export function runTransition(el, name, type, done, reflex?) {
+  // CRITICAL FIX: Transition Race Condition Prevention
+  // If a transition is already running on this element, cancel it first
+  // Example: m-if toggles from false->true (leave starts) then true->false (enter starts)
+  // Without cancellation, the leave's done callback would fire and remove the element!
+  if (el._transCb) {
+    // Cancel the previous transition's done callback
+    el._transCb.cancelled = true;
+    // Call cleanup to remove old classes and listeners
+    if (el._transCleanup) {
+      el._transCleanup();
+    }
+  }
+
   const from = `${name}-${type}-from`;
   const active = `${name}-${type}-active`;
   const to = `${name}-${type}-to`;
@@ -80,7 +93,25 @@ export function runTransition(el, name, type, done, reflex?) {
 
     // Remove transition classes
     el.classList.remove(from, active, to);
+
+    // Clear stored callbacks
+    if (el._transCb === transitionCallback) {
+      el._transCb = null;
+    }
+    if (el._transCleanup === cleanup) {
+      el._transCleanup = null;
+    }
   };
+
+  // Store cleanup for cancellation
+  el._transCleanup = cleanup;
+
+  // Create transition callback wrapper that can be cancelled
+  const transitionCallback = {
+    cancelled: false,
+    done: done
+  };
+  el._transCb = transitionCallback;
 
   // Register cleanup in element's lifecycle registry if Reflex instance provided
   if (reflex && typeof reflex._reg === 'function') {
@@ -91,7 +122,10 @@ export function runTransition(el, name, type, done, reflex?) {
   const onEnd = (e) => {
     if (e.target !== el || cleaned) return;
     cleanup();
-    if (done) done();
+    // Only call done if this transition wasn't cancelled
+    if (!transitionCallback.cancelled && done) {
+      done();
+    }
   };
 
   // Use renderer's requestAnimationFrame if available, otherwise use global
@@ -99,7 +133,7 @@ export function runTransition(el, name, type, done, reflex?) {
 
   // Next frame: start transition
   raf(() => {
-    if (cleaned) return; // Transition was cancelled before it started
+    if (cleaned || transitionCallback.cancelled) return; // Transition was cancelled before it started
 
     el.classList.remove(from);
     el.classList.add(to);
@@ -119,14 +153,18 @@ export function runTransition(el, name, type, done, reflex?) {
 
     if (timeout > 50) {
       timeoutId = setTimeout(() => {
-        if (cleaned) return;
+        if (cleaned || transitionCallback.cancelled) return;
         cleanup();
-        if (done) done();
+        if (!transitionCallback.cancelled && done) {
+          done();
+        }
       }, timeout) as any;
     } else {
       // No transition defined, complete immediately
       cleanup();
-      if (done) done();
+      if (!transitionCallback.cancelled && done) {
+        done();
+      }
     }
   });
 }
@@ -251,23 +289,59 @@ export const CompilerMixin = {
         else if (nm === 'm-show') this._show(n, v, o, trans);
         else if (nm === 'm-effect') this._effect(n, v, o);
         else if (nm === 'm-ref') {
-          // Register element in $refs
-          this._refs[v] = n;
-          // Also assign to state if the variable exists there
-          // This allows direct access via state.myRef instead of $refs.myRef
-          if (v in this.s) {
-            this.s[v] = n;
-          }
-          this._reg(n, () => {
-            // CRITICAL: Set to null before deleting to break references
-            // This prevents memory leaks from "Detached DOM Nodes"
-            this._refs[v] = null;
-            delete this._refs[v];
-            // Also null out state variable if it exists
-            if (v in this.s) {
-              this.s[v] = null;
+          // CRITICAL FIX: m-ref in loops (array ref support)
+          // If used inside m-for, every row would overwrite the same ref variable.
+          // Solution: If the ref is initialized as an array, push to it instead of replacing.
+          // Example: <div m-for="item in items" m-ref="itemRefs">
+          //   - state.itemRefs = [] (initialized as array)
+          //   - Each element gets pushed to the array
+          //   - Cleanup removes the element from the array
+
+          // Check if this ref should be an array (for m-for usage)
+          const isArrayRef = v in this.s && Array.isArray(this.s[v]);
+
+          if (isArrayRef) {
+            // Array mode: push element to array
+            this.s[v].push(n);
+            // Also add to $refs as array
+            if (!Array.isArray(this._refs[v])) {
+              this._refs[v] = [];
             }
-          });
+            this._refs[v].push(n);
+
+            this._reg(n, () => {
+              // Remove from array (find by reference)
+              const stateArray = this.s[v];
+              if (Array.isArray(stateArray)) {
+                const idx = stateArray.indexOf(n);
+                if (idx !== -1) {
+                  stateArray.splice(idx, 1);
+                }
+              }
+              const refsArray = this._refs[v];
+              if (Array.isArray(refsArray)) {
+                const idx = refsArray.indexOf(n);
+                if (idx !== -1) {
+                  refsArray.splice(idx, 1);
+                }
+              }
+            });
+          } else {
+            // Single mode: replace ref (original behavior)
+            this._refs[v] = n;
+            if (v in this.s) {
+              this.s[v] = n;
+            }
+            this._reg(n, () => {
+              // CRITICAL: Set to null before deleting to break references
+              // This prevents memory leaks from "Detached DOM Nodes"
+              this._refs[v] = null;
+              delete this._refs[v];
+              if (v in this.s) {
+                this.s[v] = null;
+              }
+            });
+          }
         } else {
           // Check for custom directives: m-name.mod1.mod2="value"
           const parts = nm.slice(2).split('.');
@@ -830,12 +904,35 @@ export const CompilerMixin = {
 
         // SECURITY FIX: Validate URL protocols using allowlist instead of blocklist
         // Only allow known-safe protocols (http, https, mailto, tel, etc.) and relative URLs
-        // Blocklist approach can be bypassed with HTML entities like jav&#x09;ascript:alert(1)
+        // CRITICAL: Decode HTML entities BEFORE checking regex to prevent bypass attacks
+        // Attack: :href="'j&#97;vascript:alert(1)'"
+        //   - Regex sees: j&#97;vascript: (passes as unrecognized protocol)
+        //   - Browser sees: javascript:alert(1) (executes!)
         if (isUrlAttr && v != null && typeof v === 'string') {
-          // Allow relative URLs and safe protocols
-          const isSafe = RELATIVE_URL_RE.test(v) || SAFE_URL_RE.test(v);
+          // Decode HTML entities by using a temporary DOM element
+          // This catches ALL entity forms: &#97; &#x61; &amp; etc.
+          let decodedUrl = v;
+          try {
+            // Create a temporary element to decode entities
+            const decoder = document.createElement('textarea');
+            decoder.innerHTML = v;
+            decodedUrl = decoder.value;
+          } catch (e) {
+            // If DOM is not available (SSR), do manual decoding of common entities
+            decodedUrl = v
+              .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+              .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+              .replace(/&amp;/g, '&')
+              .replace(/&lt;/g, '<')
+              .replace(/&gt;/g, '>')
+              .replace(/&quot;/g, '"')
+              .replace(/&#39;/g, "'");
+          }
+
+          // Check the DECODED URL against our allowlist
+          const isSafe = RELATIVE_URL_RE.test(decodedUrl) || SAFE_URL_RE.test(decodedUrl);
           if (!isSafe) {
-            console.warn('Reflex: Blocked unsafe URL protocol in', att + ':', v);
+            console.warn('Reflex: Blocked unsafe URL protocol in', att + ':', v, '(decoded:', decodedUrl + ')');
             v = 'about:blank';
           }
         }
@@ -859,8 +956,10 @@ export const CompilerMixin = {
             if (prevStyleKeys) {
               for (const key of prevStyleKeys) {
                 if (!currentKeys.has(key)) {
-                  // Convert camelCase to kebab-case for CSS property names
-                  const cssProp = key.replace(/([A-Z])/g, '-$1').toLowerCase();
+                  // Handle CSS variables (--custom-props) and regular properties
+                  const cssProp = key.startsWith('--')
+                    ? key
+                    : key.replace(/([A-Z])/g, '-$1').toLowerCase();
                   (el as HTMLElement).style.setProperty(cssProp, '');
                 }
               }
@@ -869,7 +968,16 @@ export const CompilerMixin = {
             // Apply new styles
             for (const key in v) {
               const val = v[key];
-              const cssProp = key.replace(/([A-Z])/g, '-$1').toLowerCase();
+              // CRITICAL FIX: CSS Variables (--custom-props) must use setProperty
+              // CSS custom properties cannot be set via property assignment:
+              // - el.style['--bg'] = 'red' FAILS (returns undefined, doesn't set)
+              // - el.style.setProperty('--bg', 'red') WORKS
+              // For regular properties, convert camelCase to kebab-case
+              // For CSS variables (already start with --), preserve as-is
+              const cssProp = key.startsWith('--')
+                ? key
+                : key.replace(/([A-Z])/g, '-$1').toLowerCase();
+
               if (val != null && val !== false) {
                 // CRITICAL FIX: !important Style Failure
                 // setProperty doesn't parse !important from value string
@@ -1109,7 +1217,16 @@ export const CompilerMixin = {
     e.o = o;
     this._reg(el, e.kill);
 
+    // CRITICAL FIX: IME Composition Support (Chinese/Japanese/Korean input)
+    // Track composition state to prevent updates during IME composition
+    // Without this, input events fire on every keystroke (e.g., "h", "ha", "han")
+    // causing state updates that abort the composition, making it impossible to type
+    let isComposing = false;
+
     const up = () => {
+      // CRITICAL: Skip update if IME composition is in progress
+      if (isComposing) return;
+
       let v;
       if (isChk) {
         // Handle checkbox array binding
@@ -1179,6 +1296,14 @@ export const CompilerMixin = {
       t[end] = v;
     };
 
+    // IME composition event handlers
+    const onCompositionStart = () => { isComposing = true; };
+    const onCompositionEnd = () => {
+      isComposing = false;
+      // Trigger update after composition completes
+      up();
+    };
+
     // Determine event type based on element type and .lazy modifier
     let evt;
     if (isLazy) {
@@ -1193,10 +1318,21 @@ export const CompilerMixin = {
       el.addEventListener('change', up);
     }
 
+    // Add IME composition listeners for text inputs
+    if (evt === 'input' && !isChk && !isRadio) {
+      el.addEventListener('compositionstart', onCompositionStart);
+      el.addEventListener('compositionend', onCompositionEnd);
+    }
+
     this._reg(el, () => {
       el.removeEventListener(evt, up);
       if (evt !== 'change' && !isLazy) {
         el.removeEventListener('change', up);
+      }
+      // Clean up IME composition listeners
+      if (evt === 'input' && !isChk && !isRadio) {
+        el.removeEventListener('compositionstart', onCompositionStart);
+        el.removeEventListener('compositionend', onCompositionEnd);
       }
     });
   },
@@ -1503,11 +1639,19 @@ export const CompilerMixin = {
 
   /**
    * Convert class binding value to string
+   *
+   * CRITICAL: Array check MUST come before object check!
+   * In JavaScript, Array.isArray([]) === true AND typeof [] === 'object'
+   * If we check typeof first, arrays would be treated as objects:
+   * - ['btn', 'active'] would become 'for (const k in arr)' → k='0', k='1'
+   * - Result: class="0 1" instead of class="btn active"
    */
   _cls(v) {
     if (!v) return '';
     if (typeof v === 'string') return v;
+    // CRITICAL: Check Array BEFORE object to prevent array indices becoming class names
     if (Array.isArray(v)) return v.map(x => this._cls(x)).filter(Boolean).join(' ');
+    // Object map: { btn: true, active: false } → 'btn'
     if (typeof v === 'object') return Object.keys(v).filter(k => v[k]).join(' ');
     return String(v);
   },
@@ -1523,8 +1667,11 @@ export const CompilerMixin = {
       for (const k in v) {
         const val = v[k];
         if (val != null && val !== false) {
-          // Convert camelCase to kebab-case (e.g., fontSize -> font-size)
-          const prop = k.replace(/([A-Z])/g, '-$1').toLowerCase();
+          // Handle CSS variables (--custom-props) - preserve as-is
+          // For regular properties, convert camelCase to kebab-case
+          const prop = k.startsWith('--')
+            ? k
+            : k.replace(/([A-Z])/g, '-$1').toLowerCase();
           s += prop + ':' + val + ';';
         }
       }
