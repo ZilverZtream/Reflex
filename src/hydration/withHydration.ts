@@ -7,6 +7,15 @@
  *
  * Tree-shakable: If not imported, this code won't be in the final bundle.
  *
+ * ARCHITECTURAL LIMITATION - "Ghost Template" Issue:
+ * If m-if was FALSE on the server (DOM node missing) but TRUE on the client
+ * (node should be rendered), Reflex CANNOT render it during hydration because
+ * the template wasn't in the server HTML. The content will be missing until
+ * the state toggles false -> true again, triggering a client-side render.
+ *
+ * Workaround: For critical conditional content, ensure server and client initial
+ * states match, or use m-show instead of m-if (m-show hides with CSS, keeping DOM).
+ *
  * @example
  * import { Reflex } from 'reflex';
  * import { withHydration } from 'reflex/hydration';

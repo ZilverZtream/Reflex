@@ -371,7 +371,10 @@ export const ReactivityMixin = {
     if (!s) m.d.set(k, s = new Set());
     if (!s.has(this._e)) {
       s.add(this._e);
-      this._e.d.push(s);
+      // MEMORY LEAK FIX: Store meta reference to enable pruning empty dependency sets
+      // Instead of just pushing the Set, store {meta, key, set} so _cln_eff can
+      // delete the key from meta.d when the Set becomes empty after cleanup
+      this._e.d.push({ m, k, s });
     }
   },
 

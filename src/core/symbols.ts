@@ -78,8 +78,17 @@ export const UNSAFE_PROPS = Object.assign(Object.create(null), {
 });
 UNSAFE_PROPS['__proto__'] = 1; // Must use bracket notation to avoid syntax error
 
-// Dangerous URL protocols that could execute JavaScript
-export const UNSAFE_URL_RE = /^\s*(javascript|vbscript|data):/i;
+// SECURITY FIX: Use allowlist instead of blocklist for URL protocols
+// Blocklist approach (blocking javascript:, vbscript:, data:) can be bypassed with:
+// - HTML entity encoding: jav&#x09;ascript:alert(1)
+// - Unicode escapes: \u006a\u0061\u0076\u0061script:alert(1)
+// - Case variations and whitespace: JAvasCRIPT:alert(1)
+//
+// Allowlist is safer: only permit known-safe protocols
+// Safe protocols: http, https, mailto, tel, sms, ftp, ftps
+// Relative URLs (starting with /, ./, ../, or alphanumeric) are also safe
+export const SAFE_URL_RE = /^\s*(https?|mailto|tel|sms|ftps?):/i;
+export const RELATIVE_URL_RE = /^\s*(\/|\.\/|\.\.\/|[a-z0-9])/i;
 
 // SECURITY WARNING: Regex-based validation CANNOT fully protect against malicious code.
 // This provides basic defense-in-depth, but determined attackers can bypass regex.

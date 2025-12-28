@@ -68,9 +68,26 @@ export const SchedulerMixin = {
 
   /**
    * Clean up effect dependencies
+   * MEMORY LEAK FIX: Prune empty dependency sets to prevent meta.d from growing unbounded
    */
   _cln_eff(e: EffectRunner) {
-    for (let i = 0; i < e.d.length; i++) e.d[i].delete(e);
+    for (let i = 0; i < e.d.length; i++) {
+      const dep = e.d[i];
+      // Handle both old format (bare Set) and new format ({m, k, s})
+      if (dep && typeof dep === 'object' && 'm' in dep) {
+        // New format with meta reference
+        const { m, k, s } = dep;
+        s.delete(e);
+        // CRITICAL: Prune empty sets to prevent memory leak
+        // Without this, meta.d accumulates keys for destroyed components (10k+ keys for nothing)
+        if (s.size === 0) {
+          m.d.delete(k);
+        }
+      } else {
+        // Old format (bare Set) - just delete, can't prune
+        dep.delete(e);
+      }
+    }
     e.d.length = 0;
   },
 
@@ -94,7 +111,10 @@ export const SchedulerMixin = {
    */
   flushQueue() {
     const start = performance.now();
-    let iterations = 0;
+    // CRITICAL FIX: Use class property instead of local variable
+    // Local variable resets to 0 on every resume, allowing slow circular dependencies
+    // to bypass the MAX_FLUSH_ITERATIONS safety check.
+    if (!this._flushIterations) this._flushIterations = 0;
 
     // Process queue, checking for circular dependencies
     while (true) {
@@ -105,7 +125,7 @@ export const SchedulerMixin = {
       if (q.length === 0) break;
 
       // Safety check: prevent infinite loops from circular dependencies
-      if (++iterations > MAX_FLUSH_ITERATIONS) {
+      if (++this._flushIterations > MAX_FLUSH_ITERATIONS) {
         // Clear remaining jobs to prevent further issues
         q.length = 0;
         const otherQ = this._qf ? this._qb : this._q;
@@ -119,6 +139,7 @@ export const SchedulerMixin = {
         console.error(error);
         this._handleError(error, null);
         this._p = false;
+        this._flushIterations = 0; // Reset counter after error
         return;
       }
 
@@ -159,6 +180,7 @@ export const SchedulerMixin = {
 
     // All jobs processed successfully
     this._p = false;
+    this._flushIterations = 0; // Reset counter after successful flush
   },
 
   /**
