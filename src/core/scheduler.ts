@@ -123,11 +123,16 @@ export const SchedulerMixin = {
       }
 
       // Process jobs one by one with time slicing
+      // PERFORMANCE: Use index-based iteration instead of shift() to avoid O(n²) complexity
+      // shift() is O(n) per call because it moves all remaining elements
+      // Using an index is O(1) per job, making the total O(n)
       let processedCount = 0;
-      while (q.length > 0) {
+      for (let i = 0; i < q.length; i++) {
         // Check if we've exceeded our time budget (skip check on first job to ensure progress)
         if (processedCount > 0 && performance.now() - start > YIELD_THRESHOLD) {
           // Time's up! Yield to browser for rendering
+          // Remove processed jobs and keep unprocessed ones
+          q.splice(0, i);
           // Toggle back to restore consistent state
           this._qf = !this._qf;
 
@@ -142,11 +147,14 @@ export const SchedulerMixin = {
           return;
         }
 
-        const j = q.shift();
+        const j = q[i];
         j.f &= ~QUEUED; // Clear queued flag before running
         try { j(); } catch (err) { this._handleError(err, j.o); }
         processedCount++;
       }
+
+      // All jobs in this queue processed - clear the array
+      q.length = 0;
     }
 
     // All jobs processed successfully
@@ -292,18 +300,48 @@ export const SchedulerMixin = {
 
   /**
    * Traverse value deeply for deep watch tracking
+   * PERFORMANCE: Uses iterative stack-based approach to avoid recursion limits
+   * Can handle deeply nested structures without stack overflow
    */
   _trv(v: any, s = new Set<any>()) {
-    if (v === null || typeof v !== 'object' || s.has(v)) return;
-    s.add(v);
-    const meta = v[META] || this._mf.get(v);
-    if (meta) this.trackDependency(meta, Symbol.for('rx.iterate'));
-    if (Array.isArray(v)) {
-      for (const i of v) this._trv(i, s);
-    } else if (v instanceof Map || v instanceof Set) {
-      v.forEach(x => this._trv(x, s));
-    } else {
-      for (const k in v) this._trv(v[k], s);
+    if (v === null || typeof v !== 'object') return;
+
+    // Use a stack to avoid recursion (prevents stack overflow on deep objects)
+    const stack = [v];
+
+    while (stack.length > 0) {
+      const current = stack.pop();
+
+      // Skip if already visited or not an object
+      if (current === null || typeof current !== 'object' || s.has(current)) continue;
+
+      s.add(current);
+
+      // Track dependency for this object
+      const meta = current[META] || this._mf.get(current);
+      if (meta) this.trackDependency(meta, Symbol.for('rx.iterate'));
+
+      // Add children to stack
+      if (Array.isArray(current)) {
+        for (const item of current) {
+          if (item !== null && typeof item === 'object') {
+            stack.push(item);
+          }
+        }
+      } else if (current instanceof Map || current instanceof Set) {
+        current.forEach(item => {
+          if (item !== null && typeof item === 'object') {
+            stack.push(item);
+          }
+        });
+      } else {
+        for (const k in current) {
+          const child = current[k];
+          if (child !== null && typeof child === 'object') {
+            stack.push(child);
+          }
+        }
+      }
     }
   },
 

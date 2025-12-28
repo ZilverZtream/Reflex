@@ -65,16 +65,16 @@ describe('Security', () => {
     });
 
     it('should block bracket notation constructor access', async () => {
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       document.body.innerHTML = '<span m-text="obj[\'constructor\']"></span>';
       const app = new Reflex({ obj: {} });
       await app.nextTick();
 
-      // Iron Membrane blocks constructor access with an error
-      expect(errorSpy).toHaveBeenCalled();
-      expect(errorSpy.mock.calls.flat().join(' ')).toContain('Security');
+      // Regex check blocks constructor access early with a warning
+      expect(warnSpy).toHaveBeenCalled();
+      expect(warnSpy.mock.calls.flat().join(' ')).toContain('unsafe');
       expect(document.querySelector('span').textContent).toBe('');
-      errorSpy.mockRestore();
+      warnSpy.mockRestore();
     });
 
     it('should block Function constructor calls', async () => {

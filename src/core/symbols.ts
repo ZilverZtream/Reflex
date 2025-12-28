@@ -88,11 +88,11 @@ export const UNSAFE_URL_RE = /^\s*(javascript|vbscript|data):/i;
 // Dangerous patterns in expressions that could bypass reserved word checks:
 // - ["constructor"], ['constructor'], [`constructor`] - bracket notation access
 // - .constructor() - direct constructor calls
-// - Function() - Function constructor calls
+// - Function() - Function constructor calls (use word boundary to avoid false positives)
 // - String concatenation: "con" + "structor" or template literals
 // - Computed property access: obj[variable] where variable = "constructor"
 // - eval(), setTimeout(), setInterval() with string arguments
-export const UNSAFE_EXPR_RE = /\[["'`]constructor["'`]\]|\[["'`]__proto__["'`]\]|\.constructor\s*\(|Function\s*\(|eval\s*\(|setTimeout\s*\(|setInterval\s*\(|import\s*\(|[\+\-]\s*["'`]constructor|["'`]\s*\+\s*["'`]con/i;
+export const UNSAFE_EXPR_RE = /\[["'`]constructor["'`]\]|\[["'`]__proto__["'`]\]|\.constructor\s*\(|\bFunction\s*\(|\beval\s*\(|\bsetTimeout\s*\(|\bsetInterval\s*\(|\bimport\s*\(|[\+\-]\s*["'`]constructor|["'`]\s*\+\s*["'`]con/i;
 
 // === REGEX PATTERNS ===
 // Identifier extraction pattern for expression parsing
@@ -282,13 +282,36 @@ export function createMembrane(target: any): any {
       return value;
     },
 
-    // Block has trap to prevent using 'in' operator to detect dangerous properties
+    // CRITICAL SECURITY: The 'has' trap prevents dangerous global access in 'with' blocks.
+    //
+    // When using 'with(proxy) { someVar }', JavaScript checks has(proxy, 'someVar').
+    // - If has() returns FALSE, JavaScript looks for 'someVar' in outer/global scope
+    // - If has() returns TRUE, JavaScript calls get(proxy, 'someVar')
+    //
+    // Strategy:
+    // 1. Return TRUE for properties that exist in the object (normal behavior)
+    // 2. Return TRUE for unsafe properties to force them through 'get' where we block them
+    // 3. Return FALSE for safe properties that don't exist (allow global scope lookup)
     has(obj, key) {
-      const keyStr = typeof key === 'symbol' ? key.toString() : String(key);
-      if (UNSAFE_PROPS[keyStr] || DANGEROUS_GLOBALS[keyStr]) {
-        return false;
+      // Special handling for Symbol.unscopables (used by with statement)
+      if (key === Symbol.unscopables) {
+        return Reflect.has(obj, key);
       }
-      return Reflect.has(obj, key);
+
+      const keyStr = typeof key === 'symbol' ? key.toString() : String(key);
+
+      // If property exists in object, return true (normal behavior)
+      if (Reflect.has(obj, keyStr)) {
+        return true;
+      }
+
+      // Block dangerous properties by returning true (forces 'get' trap where we throw)
+      if (UNSAFE_PROPS[keyStr] || DANGEROUS_GLOBALS[keyStr]) {
+        return true;
+      }
+
+      // Allow safe globals by returning false (allows outer scope lookup)
+      return false;
     },
 
     // Block set trap to prevent prototype pollution via assignment
