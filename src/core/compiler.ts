@@ -312,7 +312,7 @@ export const CompilerMixin = {
             if (trans && contentNodes.length > 0) {
               contentNodes.forEach(node => {
                 if (node.nodeType === 1) {
-                  runTransition(node as Element, trans, 'enter', null, this);
+                  this._runTrans(node as Element, trans, 'enter', null);
                 }
               });
             }
@@ -356,7 +356,7 @@ export const CompilerMixin = {
             }
           }
           // Run enter transition (skip for templates, already handled above)
-          if (trans && cur && !isTemplate) runTransition(cur, trans, 'enter', null, this);
+          if (trans && cur && !isTemplate) this._runTrans(cur, trans, 'enter', null);
           }
         } else if (!ok && cur && !leaving) {
           // Handle removal of template content (array of nodes) or single element
@@ -373,11 +373,11 @@ export const CompilerMixin = {
 
               cur.forEach((node: any) => {
                 if (node.nodeType === 1) {
-                  runTransition(node, trans, 'leave', () => {
+                  this._runTrans(node, trans, 'leave', () => {
                     this._kill(node);
                     if (node.parentNode) node.remove();
                     onComplete();
-                  }, this);
+                  });
                 } else {
                   this._kill(node);
                   if (node.parentNode) node.remove();
@@ -415,11 +415,11 @@ export const CompilerMixin = {
             // Run leave transition before removing
             leaving = true;
             const node = cur;
-            runTransition(node, trans, 'leave', () => {
+            this._runTrans(node, trans, 'leave', () => {
               this._kill(node);
               node.remove();
               leaving = false;
-            }, this);
+            });
             cur = null;
           } else {
             this._kill(cur);
@@ -924,12 +924,12 @@ export const CompilerMixin = {
             transitioning = true;
             if (show) {
               el.style.display = d;
-              runTransition(el, trans, 'enter', () => { transitioning = false; }, this);
+              this._runTrans(el, trans, 'enter', () => { transitioning = false; });
             } else {
-              runTransition(el, trans, 'leave', () => {
+              this._runTrans(el, trans, 'leave', () => {
                 el.style.display = 'none';
                 transitioning = false;
-              }, this);
+              });
             }
           } else {
             el.style.display = next;
@@ -1139,7 +1139,16 @@ export const CompilerMixin = {
 
     // Window/Document modifiers: @keydown.window="handleKey"
     if (mod.includes('window') || mod.includes('document')) {
-      const target = mod.includes('window') ? window : document;
+      // SSR/Node.js compatibility: use renderer to get target
+      let target;
+      if (this._ren.isBrowser) {
+        // Browser mode: use actual window/document
+        target = mod.includes('window') ? window : document;
+      } else {
+        // Virtual/SSR mode: bind to the virtual root
+        // VirtualRenderer doesn't have a 'window', but 'root' captures events
+        target = this._ren.getRoot();
+      }
       const self = this;
       const handler = (e) => {
         if (mod.includes('prevent')) e.preventDefault();
@@ -1158,6 +1167,8 @@ export const CompilerMixin = {
 
     // Outside modifier: @click.outside="closeModal"
     if (mod.includes('outside')) {
+      // SSR/Node.js compatibility: use renderer to get document root
+      const docTarget = this._ren.isBrowser ? document : this._ren.getRoot();
       const self = this;
       const handler = (e) => {
         if (!el.contains(e.target) && e.target !== el) {
@@ -1170,8 +1181,8 @@ export const CompilerMixin = {
           }
         }
       };
-      document.addEventListener(nm, handler);
-      this._reg(el, () => document.removeEventListener(nm, handler));
+      docTarget.addEventListener(nm, handler);
+      this._reg(el, () => docTarget.removeEventListener(nm, handler));
       return;
     }
 
@@ -1394,5 +1405,32 @@ export const CompilerMixin = {
       return s;
     }
     return String(v);
+  },
+
+  /**
+   * Run transition with renderer abstraction.
+   *
+   * Checks if the renderer has a runTransition method (e.g., VirtualRenderer).
+   * If yes, uses the renderer's implementation (instant for tests/SSR).
+   * If no, falls back to the internal runTransition (browser animations).
+   *
+   * This allows:
+   * - VirtualRenderer to "skip" animations instantly (essential for fast unit tests)
+   * - DOMRenderer to play animations smoothly in the browser
+   * - Custom renderers to implement their own animation systems
+   *
+   * @param el - The element to animate
+   * @param name - Transition name (e.g., 'fade', 'slide')
+   * @param type - 'enter' or 'leave'
+   * @param done - Callback when transition completes
+   */
+  _runTrans(el, name, type, done) {
+    if (this._ren.runTransition) {
+      // Use renderer's transition implementation (instant for virtual, animated for DOM)
+      this._ren.runTransition(el, { name, type, done }, this);
+    } else {
+      // Fallback to internal runTransition function
+      runTransition(el, name, type, done, this);
+    }
   }
 };
