@@ -185,20 +185,44 @@ export function reconcileKeyedList({
     // Skip null nodes (filtered by m-if)
     if (node === null) continue;
 
+    // CRITICAL FIX: Handle virtual containers (for strict parents like <table>)
+    const isVirtual = node._isVirtualContainer;
+    const actualNodes = isVirtual ? node._nodes : [node];
+    const firstNode = actualNodes[0];
+    const lastNode = actualNodes[actualNodes.length - 1];
+
     if (!lisSet.has(i)) {
       // Node needs to be moved/inserted
       if (nextSibling) {
-        marker.parentNode.insertBefore(node, nextSibling);
+        // Insert all nodes from virtual container before nextSibling
+        actualNodes.forEach(n => {
+          marker.parentNode.insertBefore(n, nextSibling);
+        });
       } else {
         // Insert at end (after last sibling or after comment marker)
         let lastNode = marker;
         for (let j = 0; j < i; j++) {
-          if (newNodes[j] && newNodes[j].parentNode) lastNode = newNodes[j];
+          const prevNode = newNodes[j];
+          if (prevNode) {
+            if (prevNode._isVirtualContainer) {
+              const prevActual = prevNode._nodes;
+              if (prevActual.length > 0 && prevActual[prevActual.length - 1].parentNode) {
+                lastNode = prevActual[prevActual.length - 1];
+              }
+            } else if (prevNode.parentNode) {
+              lastNode = prevNode;
+            }
+          }
         }
-        lastNode.after(node);
+        // Insert all nodes from virtual container after lastNode
+        actualNodes.forEach(n => {
+          lastNode.after(n);
+          lastNode = n;
+        });
       }
     }
-    nextSibling = node;
+    // Update nextSibling to the first node of this item (for backwards iteration)
+    nextSibling = firstNode;
   }
 
   // Build new rows map (excluding null nodes)
