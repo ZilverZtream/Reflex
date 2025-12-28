@@ -115,6 +115,24 @@ export const DOMRenderer: IRendererAdapter = {
   },
 
   createElement(tagName: string): Element {
+    // SVG elements require the SVG namespace
+    const svgTags = new Set([
+      'svg', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon',
+      'ellipse', 'g', 'text', 'tspan', 'defs', 'clipPath', 'mask',
+      'pattern', 'linearGradient', 'radialGradient', 'stop', 'use',
+      'symbol', 'marker', 'foreignObject', 'image', 'switch', 'animate',
+      'animateTransform', 'animateMotion', 'set', 'filter', 'feBlend',
+      'feColorMatrix', 'feComponentTransfer', 'feComposite', 'feConvolveMatrix',
+      'feDiffuseLighting', 'feDisplacementMap', 'feFlood', 'feGaussianBlur',
+      'feImage', 'feMerge', 'feMergeNode', 'feMorphology', 'feOffset',
+      'feSpecularLighting', 'feTile', 'feTurbulence', 'feDistantLight',
+      'fePointLight', 'feSpotLight'
+    ]);
+
+    const tag = tagName.toLowerCase();
+    if (svgTags.has(tag)) {
+      return document.createElementNS('http://www.w3.org/2000/svg', tagName);
+    }
     return document.createElement(tagName);
   },
 
