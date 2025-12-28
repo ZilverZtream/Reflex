@@ -116,17 +116,37 @@ export const DOMRenderer: IRendererAdapter = {
 
   createElement(tagName: string): Element {
     // SVG elements require the SVG namespace
+    // CRITICAL FIX: Expanded allowlist to include all common SVG elements
+    // This prevents rendering bugs where SVG elements become HTMLUnknownElement
     const svgTags = new Set([
-      'svg', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon',
-      'ellipse', 'g', 'text', 'tspan', 'defs', 'clipPath', 'mask',
-      'pattern', 'linearGradient', 'radialGradient', 'stop', 'use',
-      'symbol', 'marker', 'foreignObject', 'image', 'switch', 'animate',
-      'animateTransform', 'animateMotion', 'set', 'filter', 'feBlend',
-      'feColorMatrix', 'feComponentTransfer', 'feComposite', 'feConvolveMatrix',
-      'feDiffuseLighting', 'feDisplacementMap', 'feFlood', 'feGaussianBlur',
-      'feImage', 'feMerge', 'feMergeNode', 'feMorphology', 'feOffset',
-      'feSpecularLighting', 'feTile', 'feTurbulence', 'feDistantLight',
-      'fePointLight', 'feSpotLight'
+      // Core SVG
+      'svg', 'g', 'defs', 'symbol', 'use', 'foreignObject',
+      // Shapes
+      'path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse',
+      // Text
+      'text', 'tspan', 'textPath',
+      // Gradients & Patterns
+      'linearGradient', 'radialGradient', 'stop', 'pattern',
+      // Clipping & Masking
+      'clipPath', 'mask',
+      // Markers
+      'marker',
+      // Images & Media
+      'image', 'switch',
+      // Animation
+      'animate', 'animateTransform', 'animateMotion', 'set',
+      // Filters
+      'filter', 'feBlend', 'feColorMatrix', 'feComponentTransfer', 'feComposite',
+      'feConvolveMatrix', 'feDiffuseLighting', 'feDisplacementMap', 'feFlood',
+      'feGaussianBlur', 'feImage', 'feMerge', 'feMergeNode', 'feMorphology',
+      'feOffset', 'feSpecularLighting', 'feTile', 'feTurbulence',
+      'feDistantLight', 'fePointLight', 'feSpotLight',
+      // Metadata
+      'desc', 'title', 'metadata',
+      // Scripting
+      'script', 'style',
+      // Additional elements
+      'a', 'view', 'cursor'
     ]);
 
     const tag = tagName.toLowerCase();

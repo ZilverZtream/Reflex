@@ -264,6 +264,13 @@ export class Reflex {
     }
 
     this._dr = root;
+
+    // CRITICAL FIX: Store app reference on root element for cleanup
+    // This allows _kill to detect and unmount child Reflex instances
+    if (root && typeof root === 'object') {
+      (root as any).__rfx_app = this;
+    }
+
     this._bnd(root, null);
     this._w(root, null);
     if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
@@ -797,8 +804,26 @@ export class Reflex {
 
   /**
    * Kill a node and all its descendants' cleanup functions.
+   * CRITICAL FIX: Also unmounts any child Reflex instances to prevent memory leaks.
    */
   _kill(node) {
+    // CRITICAL: Check for child Reflex app instances and unmount them
+    // This prevents memory leaks when components with separate Reflex instances
+    // are removed via m-if or list reconciliation
+    if (node && typeof node === 'object') {
+      const childApp = (node as any).__rfx_app;
+      if (childApp && typeof childApp.unmount === 'function') {
+        try {
+          childApp.unmount();
+        } catch (err) {
+          console.warn('Reflex: Error unmounting child app:', err);
+        }
+        // Clear the reference to allow garbage collection
+        (node as any).__rfx_app = null;
+        delete (node as any).__rfx_app;
+      }
+    }
+
     const c = this._cl.get(node);
     if (c) {
       for (let i = 0; i < c.length; i++) {

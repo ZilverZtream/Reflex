@@ -495,7 +495,10 @@ export const CompilerMixin = {
 
       const raw = Array.isArray(list) ? this.toRaw(list) : Array.from(list);
 
-      // Track seen keys to detect and handle duplicates
+      // CRITICAL FIX: Track seen keys to detect and handle duplicates
+      // When users provide data with duplicate keys (e.g., two items with id: 1),
+      // the reconciler would corrupt the DOM by overwriting nodes in the Map.
+      // We detect duplicates and use a fallback key strategy to prevent crashes.
       const seenKeys = new Set();
 
       // Configure reconciliation with Reflex-specific logic
@@ -668,7 +671,16 @@ export const CompilerMixin = {
               processedItem = this._r(processedItem);
             }
             scope[alias] = processedItem;
-            if (idxAlias) scope[idxAlias] = index;
+            // CRITICAL FIX: Ensure index updates trigger reactivity
+            // When list order changes, child text nodes using {{ index }} must update
+            // Force reactivity by deleting then re-setting to trigger proxy set trap
+            if (idxAlias) {
+              if (scope[idxAlias] !== index) {
+                // Use delete + set pattern to ensure reactive notification
+                delete scope[idxAlias];
+                scope[idxAlias] = index;
+              }
+            }
           }
         },
 
@@ -802,6 +814,10 @@ export const CompilerMixin = {
     const initialClass = att === 'class' ? el.className : null;
     const initialStyle = att === 'style' ? el.getAttribute('style') || '' : null;
 
+    // Track previous style keys for cleanup (fixes "stale style" bug)
+    // When style object changes, we need to explicitly remove old properties
+    let prevStyleKeys = null;
+
     const e = this.createEffect(() => {
       try {
         let v = fn(this.s, o);
@@ -826,12 +842,48 @@ export const CompilerMixin = {
             : (initialClass || dynamicClass);
           if (next !== prev) { prev = next; el.className = next; }
         } else if (att === 'style') {
-          const dynamicStyle = this._sty(v);
-          // Merge static style with dynamic style to prevent fragmentation
-          const next = initialStyle && dynamicStyle
-            ? `${initialStyle}${dynamicStyle}`
-            : (initialStyle || dynamicStyle);
-          if (next !== prev) { prev = next; el.style.cssText = next; }
+          // CRITICAL FIX: Handle object-style bindings to prevent "stale style" bug
+          // When style changes from { color: 'red' } to { background: 'blue' },
+          // we must explicitly clear 'color' or it persists forever
+          if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+            // Track current keys to remove stale ones
+            const currentKeys = new Set(Object.keys(v));
+
+            // Clear previous keys that aren't in the new object
+            if (prevStyleKeys) {
+              for (const key of prevStyleKeys) {
+                if (!currentKeys.has(key)) {
+                  // Convert camelCase to kebab-case for CSS property names
+                  const cssProp = key.replace(/([A-Z])/g, '-$1').toLowerCase();
+                  (el as HTMLElement).style.setProperty(cssProp, '');
+                }
+              }
+            }
+
+            // Apply new styles
+            for (const key in v) {
+              const val = v[key];
+              const cssProp = key.replace(/([A-Z])/g, '-$1').toLowerCase();
+              if (val != null && val !== false) {
+                (el as HTMLElement).style.setProperty(cssProp, String(val));
+              } else {
+                (el as HTMLElement).style.setProperty(cssProp, '');
+              }
+            }
+
+            // Update tracked keys
+            prevStyleKeys = currentKeys;
+          } else {
+            // String-style binding: use cssText (original behavior)
+            const dynamicStyle = this._sty(v);
+            // Merge static style with dynamic style to prevent fragmentation
+            const next = initialStyle && dynamicStyle
+              ? `${initialStyle}${dynamicStyle}`
+              : (initialStyle || dynamicStyle);
+            if (next !== prev) { prev = next; el.style.cssText = next; }
+            // Clear tracked keys since we're using cssText
+            prevStyleKeys = null;
+          }
         } else if (isSVGAttr) {
           // SVG attributes must use setAttribute with proper camelCase
           const next = v === null || v === false ? null : String(v);
