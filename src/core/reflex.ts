@@ -280,6 +280,54 @@ export class Reflex {
   }
 
   /**
+   * Unmount the application and clean up all effects and listeners.
+   *
+   * This method gracefully tears down the Reflex application:
+   * - Kills all effects and cleanup functions
+   * - Removes the app reference from the root element
+   * - Resets the mounted flag
+   *
+   * This is critical for:
+   * - Micro-frontends (nested Reflex apps)
+   * - SPA routing (mounting/unmounting views)
+   * - Testing (clean teardown between tests)
+   *
+   * @returns {Reflex} This instance for chaining
+   *
+   * @example
+   * // Micro-frontend teardown
+   * const app = new Reflex({ count: 0 });
+   * app.mount(container);
+   * // Later...
+   * app.unmount(); // Clean up before removing container
+   */
+  unmount() {
+    // Prevent double-unmount
+    if (!this._m) {
+      console.warn('Reflex: unmount() called on non-mounted app. Ignoring.');
+      return this;
+    }
+
+    // Kill all effects and cleanup functions in the DOM tree
+    if (this._dr) {
+      this._kill(this._dr);
+
+      // Clear the app reference to allow garbage collection
+      if (typeof this._dr === 'object') {
+        (this._dr as any).__rfx_app = null;
+        delete (this._dr as any).__rfx_app;
+      }
+
+      this._dr = null;
+    }
+
+    // Reset mounted flag
+    this._m = false;
+
+    return this;
+  }
+
+  /**
    * Register a component definition.
    *
    * Supports both synchronous and asynchronous component definitions:

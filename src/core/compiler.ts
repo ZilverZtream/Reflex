@@ -1262,13 +1262,29 @@ export const CompilerMixin = {
         v = el.value === '' ? null : parseFloat(el.value);
       } else if (isMultiSelect) {
         // For multi-select, return array of selected values
+        // CRITICAL FIX: Preserve number types (like checkbox array binding)
+        // DOM values are always strings, but the model might contain numbers
+        // Check the original array type and coerce if needed
+        const currentValue = fn(this.s, o);
+        const shouldCoerceToNumber = Array.isArray(currentValue) &&
+          currentValue.length > 0 &&
+          typeof currentValue[0] === 'number';
+
         // Fallback for environments without selectedOptions (e.g., happy-dom)
+        let selectedValues;
         if (el.selectedOptions) {
-          v = Array.from(el.selectedOptions).map(opt => opt.value);
+          selectedValues = Array.from(el.selectedOptions).map(opt => opt.value);
         } else {
-          v = Array.from(el.options)
+          selectedValues = Array.from(el.options)
             .filter(opt => opt.selected)
             .map(opt => opt.value);
+        }
+
+        // Coerce to numbers if the original array contained numbers
+        if (shouldCoerceToNumber) {
+          v = selectedValues.map(val => !isNaN(Number(val)) ? Number(val) : val);
+        } else {
+          v = selectedValues;
         }
       } else v = el.value;
 

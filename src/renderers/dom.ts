@@ -146,7 +146,7 @@ export const DOMRenderer: IRendererAdapter = {
       // Scripting
       'script', 'style',
       // Additional elements
-      'a', 'view', 'cursor'
+      'view', 'cursor'
     ]);
 
     const tag = tagName.toLowerCase();
