@@ -20,6 +20,8 @@ import { ReactivityMixin } from './reactivity.js';
 import { SchedulerMixin } from './scheduler.js';
 import { ExprMixin, ExprCache } from './expr.js';
 import { CompilerMixin } from './compiler.js';
+import { DOMRenderer } from '../renderers/dom.js';
+import type { IRendererAdapter, RendererOptions } from '../renderers/types.js';
 
 type ReactivityMixinType = typeof ReactivityMixin;
 type SchedulerMixinType = typeof SchedulerMixin;
@@ -68,6 +70,7 @@ export class Reflex {
   declare _parser: any;
   declare _plugins: Set<any>;
   declare _m: boolean;
+  declare _ren: IRendererAdapter;  // Pluggable renderer adapter
   declare _hydrateMode?: boolean;
   declare hydrate?: (el?: Element | null) => this;
   declare _hydrateWalk?: (node: Node, scope: any) => void;
@@ -86,7 +89,26 @@ export class Reflex {
     domPurify: any | null;
   };
 
-  constructor(init = {}) {
+  constructor(init = {}, options: RendererOptions = {}) {
+    // === RENDERER ===
+    // Initialize the pluggable renderer adapter
+    // Supports: web (DOMRenderer), native (VirtualRenderer), or custom
+    if (options.renderer) {
+      // Custom renderer provided
+      this._ren = options.renderer;
+    } else if (options.target === 'native' || options.target === 'test') {
+      // Native/test targets require explicit renderer injection
+      // This allows tree-shaking of VirtualRenderer in web builds
+      throw new Error(
+        'Reflex: Native/test targets require a renderer to be provided.\n' +
+        'Example: new Reflex({}, { renderer: new VirtualRenderer() })\n' +
+        'Import: import { VirtualRenderer } from "reflex/renderers"'
+      );
+    } else {
+      // Default to DOMRenderer for web targets
+      this._ren = DOMRenderer;
+    }
+
     // === STATE ===
     this.s = null;            // Reactive state
 
@@ -149,8 +171,9 @@ export class Reflex {
     // Initialize reactive state
     this.s = this._r(init);
 
-    // Auto-mount on DOM ready
-    if (typeof document !== 'undefined') {
+    // Auto-mount on DOM ready (browser only)
+    // For non-browser targets, user must call mount() explicitly with a virtual root
+    if (this._ren.isBrowser && typeof document !== 'undefined') {
       const r = document.readyState;
       if (r === 'loading') {
         document.addEventListener('DOMContentLoaded', () => this.mount(), { once: true });
@@ -198,12 +221,26 @@ export class Reflex {
   }
 
   /**
-   * Mount the application to a DOM element.
+   * Mount the application to a DOM element or virtual node.
    *
-   * @param {Element} el - Root element (default: document.body)
+   * For web targets, defaults to document.body.
+   * For non-web targets (native/test), you must provide a root element.
+   *
+   * @param {Element|VNode} el - Root element (default: document.body for web)
    * @returns {Reflex} This instance for chaining
+   *
+   * @example
+   * // Web target (default)
+   * const app = new Reflex({ count: 0 });
+   * app.mount(); // Mounts to document.body
+   *
+   * @example
+   * // Virtual renderer (test/native)
+   * const renderer = new VirtualRenderer();
+   * const app = new Reflex({ count: 0 }, { renderer });
+   * app.mount(renderer.getRoot());
    */
-  mount(el = document.body) {
+  mount(el?: Element | any) {
     // Prevent double-mounting (could cause memory leaks and duplicate effects)
     if (this._m) {
       console.warn('Reflex: mount() called multiple times. Ignoring duplicate mount.');
@@ -211,11 +248,26 @@ export class Reflex {
     }
     this._m = true;
 
-    this._dr = el;
-    this._bnd(el, null);
-    this._w(el, null);
+    // Determine root element
+    let root = el;
+    if (!root) {
+      if (this._ren.isBrowser && typeof document !== 'undefined') {
+        root = document.body;
+      } else if (this._ren.getRoot) {
+        root = this._ren.getRoot();
+      } else {
+        throw new Error(
+          'Reflex: No root element provided for mount().\n' +
+          'For non-browser targets, call: app.mount(renderer.getRoot())'
+        );
+      }
+    }
+
+    this._dr = root;
+    this._bnd(root, null);
+    this._w(root, null);
     if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
-      this._dtRegister();
+      this._dtRegister?.();
     }
     return this;
   }
@@ -269,7 +321,7 @@ export class Reflex {
     }
 
     // Sync component: standard definition object
-    const t = document.createElement('template');
+    const t = this._ren.createElement('template') as HTMLTemplateElement;
     let template = def.template;
 
     // SECURITY: Fail closed - if sanitization is enabled but DOMPurify is missing, throw error
@@ -556,12 +608,13 @@ export class Reflex {
     }
 
     // Create a marker comment and optional fallback
-    const marker = document.createComment(`async:${tag}`);
+    // Use renderer for DOM operations (supports both web and virtual targets)
+    const marker = this._ren.createComment(`async:${tag}`);
     let fallbackNode: Element | null = null;
 
     if (asyncDef.fallback) {
       // Render fallback template
-      const fallbackTpl = document.createElement('template');
+      const fallbackTpl = this._ren.createElement('template') as HTMLTemplateElement;
       let fallbackHtml = asyncDef.fallback;
 
       // SECURITY: Fail closed - if sanitization is enabled but DOMPurify is missing, throw error
@@ -635,13 +688,13 @@ export class Reflex {
       }
 
       // Create a temporary element with saved attributes
-      const tempEl = document.createElement(tag);
+      const tempEl = self._ren.createElement(tag);
       for (const attr of savedAttrs) {
-        tempEl.setAttribute(attr.name, attr.value);
+        self._ren.setAttribute(tempEl, attr.name, attr.value);
       }
 
       // Register the resolved component in the sync map
-      const t = document.createElement('template');
+      const t = self._ren.createElement('template') as HTMLTemplateElement;
       let template = def.template;
 
       // SECURITY: Fail closed - if sanitization is enabled but DOMPurify is missing, throw error
