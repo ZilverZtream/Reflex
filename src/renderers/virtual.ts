@@ -221,9 +221,66 @@ function createVNode(
 
   if (nodeType === ELEMENT_NODE) {
     node.attributes = new Map();
-    node.innerHTML = '';
-    node.className = '';
     node.id = '';
+
+    // CRITICAL FIX: className and classList must be synced bidirectionally
+    // Use a property with getter/setter to ensure they stay in sync
+    // The classList is the source of truth; className is derived from it
+    let _classNameCache = '';
+
+    Object.defineProperty(node, 'className', {
+      get() {
+        // Return cached value if classList hasn't changed
+        const listStr = node.classList!.toString();
+        if (listStr !== _classNameCache) {
+          _classNameCache = listStr;
+        }
+        return _classNameCache;
+      },
+      set(value: string) {
+        // Clear existing classes and add new ones
+        const classList = node.classList!;
+        // Clear all existing classes
+        for (const cls of Array.from(classList)) {
+          classList.remove(cls);
+        }
+        // Add new classes from the string
+        if (value) {
+          value.split(/\s+/).filter(Boolean).forEach(cls => classList.add(cls));
+        }
+        _classNameCache = node.classList!.toString();
+      },
+      enumerable: true,
+      configurable: true
+    });
+
+    // CRITICAL FIX: innerHTML must parse HTML content into childNodes
+    // Previously only templates had this behavior, causing "ghost content" bug
+    // where m-html would set innerHTML but childNodes remained empty
+    Object.defineProperty(node, 'innerHTML', {
+      get() {
+        // Serialize childNodes back to HTML string
+        return node.childNodes.map(child => serializeVNode(child)).join('');
+      },
+      set(html: string) {
+        // Clear existing childNodes
+        node.childNodes = [];
+        node.firstChild = null;
+        node.lastChild = null;
+
+        // Parse HTML string into virtual DOM nodes
+        if (html) {
+          const parsedNodes = parseHTML(html);
+          for (const child of parsedNodes) {
+            child.parentNode = node;
+            node.childNodes.push(child);
+          }
+          updateRelationships(node);
+        }
+      },
+      enumerable: true,
+      configurable: true
+    });
 
     // Add DOM-like methods for compatibility with CompilerMixin
     (node as any).getAttribute = function(name: string): string | null {
@@ -422,8 +479,10 @@ function parseCSSText(cssText: string): Map<string, string> {
   const props = new Map<string, string>();
   if (!cssText) return props;
 
-  // Split by semicolons, handling potential edge cases
-  const declarations = cssText.split(';');
+  // CRITICAL FIX: Split by semicolons ONLY if not inside parentheses
+  // This prevents breaking data URIs like: background-image: url('data:image/png;base64,ABC')
+  // The regex /;(?![^(]*\))/ matches semicolons not followed by a closing paren without an opening paren
+  const declarations = cssText.split(/;(?![^(]*\))/g);
   for (const decl of declarations) {
     const trimmed = decl.trim();
     if (!trimmed) continue;
@@ -661,12 +720,19 @@ function cloneVNode(node: VNode, deep = true): VNode {
   }
 
   // Clone other element properties
-  clone.className = node.className;
+  // NOTE: className setter syncs with classList, so setting it after classList.add
+  // will overwrite the classList. Only set className if it differs from classList.
+  const classListStr = clone.classList?.toString() || '';
+  if (node.className && node.className !== classListStr) {
+    clone.className = node.className;
+  }
   clone.id = node.id;
   clone.value = node.value;
   clone.checked = node.checked;
   clone.type = node.type;
-  clone.innerHTML = node.innerHTML;
+  // NOTE: Do NOT copy innerHTML here - it now parses content into childNodes
+  // For deep clones, children are explicitly cloned below
+  // For shallow clones, we intentionally skip children
 
   // Deep clone children
   if (deep) {
@@ -1106,9 +1172,10 @@ function serializeVNode(node: VNode, indent = 0): string {
     const classList = node.classList?.toString();
     if (classList && !node.className) attrs += ` class="${classList}"`;
 
-    // Self-closing tags
-    const selfClosing = ['br', 'hr', 'img', 'input', 'meta', 'link'];
-    if (selfClosing.includes(tag) && node.childNodes.length === 0) {
+    // CRITICAL FIX: Use the single source of truth VOID_ELEMENTS Set
+    // Previously used incomplete hardcoded array, missing: source, track, wbr, col, embed, etc.
+    // This caused invalid HTML output like <source></source> instead of <source />
+    if (VOID_ELEMENTS.has(tag)) {
       return `<${tag}${attrs} />`;
     }
 
