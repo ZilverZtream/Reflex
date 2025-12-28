@@ -152,12 +152,66 @@ const HydrationMixin = {
   /**
    * Hydrate bindings on a single element.
    * Attaches event listeners and reactive bindings to existing DOM.
+   *
+   * CRITICAL FIX: Hydration Input Wipe
+   * On slow 3G networks, users might start typing into inputs before Reflex loads.
+   * We must preserve user input by reading DOM value into state instead of overwriting.
    */
   _hydrateNode(n, o) {
     const atts = n.attributes;
     if (!atts) return;
     const trans = n.getAttribute('m-trans');
 
+    // CRITICAL FIX: Check if element is an input/textarea/select with user-modified value
+    // If so, preserve the DOM value by updating state instead of overwriting DOM
+    const isFormControl = n.tagName === 'INPUT' || n.tagName === 'TEXTAREA' || n.tagName === 'SELECT';
+    let hasValueBinding = false;
+    let valueExpression = null;
+
+    // First pass: check for m-model or :value bindings
+    for (let i = atts.length - 1; i >= 0; i--) {
+      const a = atts[i], nm = a.name, v = a.value;
+      if (nm === 'm-model' || nm.startsWith('m-model.')) {
+        hasValueBinding = true;
+        valueExpression = v;
+        break;
+      } else if (nm === ':value') {
+        hasValueBinding = true;
+        valueExpression = v;
+        break;
+      }
+    }
+
+    // Preserve user input by reading DOM into state
+    if (isFormControl && hasValueBinding && valueExpression) {
+      try {
+        const fn = this._fn(valueExpression);
+        const stateValue = fn(this.s, o);
+        const domValue = n.value;
+
+        // If DOM value differs from state, user has modified it - preserve DOM value
+        if (domValue !== '' && String(stateValue) !== domValue) {
+          // Update state to match DOM instead of overwriting DOM
+          const paths = valueExpression.split('.'), end = paths.pop();
+          let t = o && paths[0] in o ? o : this.s;
+          for (const p of paths) {
+            if (t[p] == null) t[p] = {};
+            t = t[p];
+          }
+          // Preserve type: convert to number for number inputs
+          const type = (n.type || '').toLowerCase();
+          if (type === 'number' || type === 'range') {
+            t[end] = domValue === '' ? null : parseFloat(domValue);
+          } else {
+            t[end] = domValue;
+          }
+        }
+      } catch (err) {
+        // Ignore errors during state update, fall through to normal hydration
+      }
+    }
+
+    // Second pass: attach reactive bindings
     for (let i = atts.length - 1; i >= 0; i--) {
       const a = atts[i], nm = a.name, v = a.value;
 
@@ -166,10 +220,17 @@ const HydrationMixin = {
         this._at(n, nm.slice(1), v, o);
       } else if (nm.startsWith('@')) {
         // Event binding - attach listener
-        this._ev(n, nm.slice(1), v, o);
+        // Extract modifiers for consistency with compiler
+        const parts = nm.slice(1).split('.');
+        const eventName = parts[0];
+        const modifiers = parts.slice(1);
+        this._ev(n, eventName, v, o, modifiers);
       } else if (nm.startsWith('m-')) {
-        if (nm === 'm-model') this._mod(n, v, o);
-        else if (nm === 'm-text') this._at(n, 'textContent', v, o);
+        if (nm.startsWith('m-model')) {
+          // Extract modifiers from m-model (e.g., m-model.lazy)
+          const modifiers = nm.split('.').slice(1);
+          this._mod(n, v, o, modifiers);
+        } else if (nm === 'm-text') this._at(n, 'textContent', v, o);
         else if (nm === 'm-html') this._html(n, v, o);
         else if (nm === 'm-show') this._show(n, v, o, trans);
         else if (nm === 'm-effect') this._effect(n, v, o);

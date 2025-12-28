@@ -119,6 +119,13 @@ export const ArrayHandler: ProxyHandler<any[]> = {
     else if (isIdx) had = n < o.length;
     else had = k in o;
 
+    // CRITICAL FIX: Array Truncation Bug
+    // When setting array.length to a smaller value, we must trigger
+    // watchers on all deleted indices, not just the length property.
+    // Example: arr.length = 0 should trigger watchers on arr[0], arr[1], etc.
+    const oldLength = k === 'length' ? o.length : -1;
+    const newLength = k === 'length' ? Number(raw) : -1;
+
     const ok = Reflect.set(o, k, raw, rec);
     if (!ok) return false;
 
@@ -131,6 +138,14 @@ export const ArrayHandler: ProxyHandler<any[]> = {
     if (k === 'length') {
       // Length change always affects iteration
       engine.triggerEffects(meta, ITERATE);
+
+      // CRITICAL FIX: Trigger watchers on deleted indices when truncating
+      // If newLength < oldLength, indices from newLength to oldLength-1 are deleted
+      if (newLength < oldLength && newLength >= 0) {
+        for (let i = newLength; i < oldLength; i++) {
+          engine.triggerEffects(meta, String(i));
+        }
+      }
     } else if (isIdx && !had) {
       // New index added (sparse array) - affects iteration and length
       engine.triggerEffects(meta, ITERATE);
@@ -212,6 +227,18 @@ export const ObjectHandler: ProxyHandler<ReactiveTarget> = {
       engine.triggerEffects(meta, ITERATE);
     }
     return res;
+  },
+
+  // CRITICAL FIX: Incomplete Proxy Traps
+  // Object.keys(), for...in loops, and Object.getOwnPropertyNames() use ownKeys trap
+  // Without this, iteration over object keys doesn't track ITERATE dependency
+  // This causes computed properties and effects that use Object.keys() to miss updates
+  ownKeys(o) {
+    const meta = o[META] as ReactiveMeta;
+    const engine = meta.engine;
+    // Track ITERATE dependency so Object.keys(), for...in, etc. react to additions/deletions
+    engine.trackDependency(meta, ITERATE);
+    return Reflect.ownKeys(o);
   }
 };
 
