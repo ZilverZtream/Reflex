@@ -329,6 +329,15 @@ export class Reflex {
     if (this._dr) {
       this._kill(this._dr);
 
+      // CRITICAL FIX: Remove delegated event listeners from root
+      // Without this, listeners accumulate on repeated mount/unmount cycles
+      this._dh.forEach((eventData, eventName) => {
+        if (eventData && eventData.listener) {
+          this._dr.removeEventListener(eventName, eventData.listener);
+        }
+      });
+      this._dh.clear();
+
       // Clear the app reference to allow garbage collection
       if (typeof this._dr === 'object') {
         (this._dr as any).__rfx_app = null;
@@ -337,6 +346,13 @@ export class Reflex {
 
       this._dr = null;
     }
+
+    // CRITICAL FIX: Cancel pending scheduler tasks to prevent zombie execution
+    // Clear both job queues to prevent callbacks from running after unmount
+    this._q.length = 0;
+    this._qb.length = 0;
+    this._p = false;
+    if (this._flushIterations) this._flushIterations = 0;
 
     // Reset mounted flag
     this._m = false;
@@ -872,40 +888,55 @@ export class Reflex {
    * Kill a node and all its descendants' cleanup functions.
    * CRITICAL FIX: Also unmounts any child Reflex instances to prevent memory leaks.
    * CRITICAL FIX: Bottom-Up unmounting (children first) to prevent context collapse.
+   * CRITICAL FIX: Iterative approach to prevent stack overflow on deep DOM trees.
    */
   _kill(node) {
-    // CRITICAL FIX: Bottom-Up Unmounting - Kill children BEFORE parent
-    // Children often rely on parent context (services, connections, DOM hierarchy)
-    // during their cleanup. If we destroy the parent first, child cleanups may crash
-    // or fail to execute properly. Always unmount children → parent.
-    for (let ch = node.firstChild; ch; ch = ch.nextSibling) {
-      this._kill(ch);
+    // CRITICAL FIX: Use iterative stack-based approach instead of recursion
+    // This prevents "Maximum Call Stack Size Exceeded" errors on deeply nested DOM
+    // (e.g., >10,000 levels from recursive components or large visualizations)
+    const stack = [node];
+
+    // First pass: collect all nodes in post-order (children before parents)
+    const nodesToKill: any[] = [];
+    while (stack.length > 0) {
+      const current = stack.pop();
+      nodesToKill.push(current);
+
+      // Add children to stack (in reverse order for correct processing)
+      for (let ch = current.lastChild; ch; ch = ch.previousSibling) {
+        stack.push(ch);
+      }
     }
 
-    // CRITICAL: Check for child Reflex app instances and unmount them
-    // This prevents memory leaks when components with separate Reflex instances
-    // are removed via m-if or list reconciliation
-    if (node && typeof node === 'object') {
-      const childApp = (node as any).__rfx_app;
-      if (childApp && typeof childApp.unmount === 'function') {
-        try {
-          childApp.unmount();
-        } catch (err) {
-          console.warn('Reflex: Error unmounting child app:', err);
+    // Second pass: kill nodes in reverse order (children first)
+    for (let i = nodesToKill.length - 1; i >= 0; i--) {
+      const node = nodesToKill[i];
+
+      // CRITICAL: Check for child Reflex app instances and unmount them
+      // This prevents memory leaks when components with separate Reflex instances
+      // are removed via m-if or list reconciliation
+      if (node && typeof node === 'object') {
+        const childApp = (node as any).__rfx_app;
+        if (childApp && typeof childApp.unmount === 'function') {
+          try {
+            childApp.unmount();
+          } catch (err) {
+            console.warn('Reflex: Error unmounting child app:', err);
+          }
+          // Clear the reference to allow garbage collection
+          (node as any).__rfx_app = null;
+          delete (node as any).__rfx_app;
         }
-        // Clear the reference to allow garbage collection
-        (node as any).__rfx_app = null;
-        delete (node as any).__rfx_app;
       }
-    }
 
-    // Now run this node's cleanups (after children are cleaned up)
-    const c = this._cl.get(node);
-    if (c) {
-      for (let i = 0; i < c.length; i++) {
-        try { c[i](); } catch {} // eslint-disable-line no-empty
+      // Run this node's cleanups
+      const c = this._cl.get(node);
+      if (c) {
+        for (let i = 0; i < c.length; i++) {
+          try { c[i](); } catch {} // eslint-disable-line no-empty
+        }
+        this._cl.delete(node);
       }
-      this._cl.delete(node);
     }
   }
 }

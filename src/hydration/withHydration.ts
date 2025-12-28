@@ -97,16 +97,13 @@ const HydrationMixin = {
         const next = c.nextSibling;
         const nt = c.nodeType;
 
-        // CRITICAL FIX: Skip whitespace-only text nodes to prevent hydration crashes
-        // Server may include whitespace that client doesn't (or vice versa)
-        if (nt === 3) {
-          const text = c.nodeValue || '';
-          if (!text.trim()) {
-            // Skip whitespace-only text nodes
-            c = next;
-            continue;
-          }
-        }
+        // CRITICAL FIX: Do NOT skip whitespace-only text nodes
+        // While it may seem safe to skip them, whitespace is often semantically significant:
+        // - Space between inline elements: <span>A</span> <span>B</span>
+        // - Whitespace in <pre> tags
+        // - CSS white-space: pre-wrap
+        // Skipping them causes visual layout corruption (elements mashing together)
+        // Instead, hydration must preserve ALL text nodes exactly as the server rendered them
 
         // Element node (1)
         if (nt === 1) {
@@ -287,8 +284,40 @@ const HydrationMixin = {
         else if (nm === 'm-show') this._show(n, v, o, trans);
         else if (nm === 'm-effect') this._effect(n, v, o);
         else if (nm === 'm-ref') {
-          this._refs[v] = n;
-          this._reg(n, () => { delete this._refs[v]; });
+          // CRITICAL FIX: Hydration m-ref Array Mismatch
+          // Check if this ref should be an array (matching compiler behavior)
+          const isArrayRef = v in this.s && Array.isArray(this.s[v]);
+
+          if (isArrayRef) {
+            // Array mode: push element to array (consistent with compiler)
+            if (!Array.isArray(this._refs[v])) {
+              this._refs[v] = [];
+            }
+            this._refs[v].push(n);
+            this.s[v].push(n);
+
+            this._reg(n, () => {
+              // Remove from array (find by reference)
+              const refsArray = this._refs[v];
+              if (Array.isArray(refsArray)) {
+                const idx = refsArray.indexOf(n);
+                if (idx !== -1) {
+                  refsArray.splice(idx, 1);
+                }
+              }
+              const stateArray = this.s[v];
+              if (Array.isArray(stateArray)) {
+                const idx = stateArray.indexOf(n);
+                if (idx !== -1) {
+                  stateArray.splice(idx, 1);
+                }
+              }
+            });
+          } else {
+            // Single mode: replace ref (original behavior)
+            this._refs[v] = n;
+            this._reg(n, () => { delete this._refs[v]; });
+          }
         } else {
           // Custom directives
           const parts = nm.slice(2).split('.');
