@@ -114,10 +114,11 @@ export const DOMRenderer: IRendererAdapter = {
     return document.createComment(text);
   },
 
-  createElement(tagName: string): Element {
+  createElement(tagName: string, parent?: Element): Element {
     // SVG elements require the SVG namespace
-    // CRITICAL FIX: Expanded allowlist to include all common SVG elements
-    // This prevents rendering bugs where SVG elements become HTMLUnknownElement
+    // CRITICAL FIX: Context-aware element creation for ambiguous tags
+    // Tags like 'a', 'script', and 'style' exist in both HTML and SVG namespaces
+    // We must check the parent element's namespace to create the correct type
     const svgTags = new Set([
       // Core SVG
       'svg', 'g', 'defs', 'symbol', 'use', 'foreignObject',
@@ -143,16 +144,37 @@ export const DOMRenderer: IRendererAdapter = {
       'feDistantLight', 'fePointLight', 'feSpotLight',
       // Metadata
       'desc', 'title', 'metadata',
-      // Scripting
-      'script', 'style',
+      // Scripting - NOTE: Removed from main list, handled as ambiguous tags
       // Additional elements
       'view', 'cursor'
     ]);
 
+    // Ambiguous tags that exist in both HTML and SVG
+    // Must check parent context to determine correct namespace
+    const ambiguousTags = new Set(['a', 'script', 'style']);
+
     const tag = tagName.toLowerCase();
+
+    // Check if parent is an SVG element
+    const isParentSVG = parent && (
+      parent.namespaceURI === 'http://www.w3.org/2000/svg' ||
+      parent.tagName === 'svg' || parent.tagName === 'SVG'
+    );
+
+    // For ambiguous tags, use parent's namespace
+    if (ambiguousTags.has(tag)) {
+      if (isParentSVG) {
+        return document.createElementNS('http://www.w3.org/2000/svg', tagName);
+      } else {
+        return document.createElement(tagName);
+      }
+    }
+
+    // For unambiguous SVG tags, always create as SVG
     if (svgTags.has(tag)) {
       return document.createElementNS('http://www.w3.org/2000/svg', tagName);
     }
+
     return document.createElement(tagName);
   },
 

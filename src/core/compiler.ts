@@ -579,7 +579,8 @@ export const CompilerMixin = {
       // When users provide data with duplicate keys (e.g., two items with id: 1),
       // the reconciler would corrupt the DOM by overwriting nodes in the Map.
       // We detect duplicates and use a fallback key strategy to prevent crashes.
-      const seenKeys = new Set();
+      // CRITICAL: Use Map (not Set) to track duplicate counters for stable keys
+      const seenKeys = new Map();
 
       // Configure reconciliation with Reflex-specific logic
       const config = {
@@ -684,7 +685,8 @@ export const CompilerMixin = {
               // Create a wrapper using a custom element to contain template content
               // This acts as an "invisible" wrapper for reconciliation
               // Using 'rfx-tpl' custom element to avoid conflicts with normal element queries
-              const wrapper = this._ren.createElement('rfx-tpl');
+              // CRITICAL FIX: Pass parent context for SVG awareness (fixes SVG link hijack)
+              const wrapper = this._ren.createElement('rfx-tpl', cm.parentElement);
               wrapper.style.display = 'contents'; // Make wrapper invisible in layout
 
               // Clone and append all content nodes
@@ -949,6 +951,14 @@ export const CompilerMixin = {
           // When style changes from { color: 'red' } to { background: 'blue' },
           // we must explicitly clear 'color' or it persists forever
           if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+            // CRITICAL FIX: Zombie Styles - Clear ALL styles when transitioning from string to object
+            // If prevStyleKeys is null, we were previously using cssText (string mode)
+            // We must clear all inline styles before applying the object styles
+            if (prevStyleKeys === null) {
+              // Clear all inline styles to prevent zombie styles from string mode
+              el.style.cssText = '';
+            }
+
             // Track current keys to remove stale ones
             const currentKeys = new Set(Object.keys(v));
 
@@ -1241,8 +1251,22 @@ export const CompilerMixin = {
             // Try to preserve the original type if the array has a consistent type
             // If array contains numbers and value is numeric, push as number
             let valueToAdd = el.value;
-            if (arr.length > 0 && typeof arr[0] === 'number' && !isNaN(Number(el.value))) {
-              valueToAdd = Number(el.value);
+            if (arr.length > 0 && typeof arr[0] === 'number') {
+              // CRITICAL FIX: NaN Pollution - Validate numeric conversion
+              // Number("foo") results in NaN, which pollutes numeric arrays
+              // Only convert to number if the result is a valid number
+              const numValue = Number(el.value);
+              if (!isNaN(numValue)) {
+                valueToAdd = numValue;
+              } else {
+                // Value is not numeric - warn and skip adding it to numeric array
+                console.warn(
+                  `Reflex: Cannot add non-numeric value "${el.value}" to numeric array. ` +
+                  'Skipping to prevent NaN pollution.'
+                );
+                // Don't add the value - keep the array unchanged
+                return;
+              }
             }
             arr.push(valueToAdd);
           } else if (!el.checked && idx !== -1) {
@@ -1266,9 +1290,26 @@ export const CompilerMixin = {
         // DOM values are always strings, but the model might contain numbers
         // Check the original array type and coerce if needed
         const currentValue = fn(this.s, o);
-        const shouldCoerceToNumber = Array.isArray(currentValue) &&
-          currentValue.length > 0 &&
-          typeof currentValue[0] === 'number';
+
+        // CRITICAL FIX: Empty Multi-Select Type Trap
+        // If the array is empty, we can't infer type from currentValue[0]
+        // Instead, check if ALL option values are numeric to infer the type
+        let shouldCoerceToNumber = false;
+
+        if (Array.isArray(currentValue) && currentValue.length > 0) {
+          // Array has values - use first element's type
+          shouldCoerceToNumber = typeof currentValue[0] === 'number';
+        } else if (Array.isArray(currentValue) && currentValue.length === 0) {
+          // Empty array - infer type from option values
+          // If all option values are numeric strings, coerce to numbers
+          const allOptions = Array.from(el.options);
+          if (allOptions.length > 0) {
+            shouldCoerceToNumber = allOptions.every(opt => {
+              const val = opt.value;
+              return val !== '' && !isNaN(Number(val));
+            });
+          }
+        }
 
         // Fallback for environments without selectedOptions (e.g., happy-dom)
         let selectedValues;
@@ -1280,7 +1321,7 @@ export const CompilerMixin = {
             .map(opt => opt.value);
         }
 
-        // Coerce to numbers if the original array contained numbers
+        // Coerce to numbers if the original array contained numbers or all options are numeric
         if (shouldCoerceToNumber) {
           v = selectedValues.map(val => !isNaN(Number(val)) ? Number(val) : val);
         } else {

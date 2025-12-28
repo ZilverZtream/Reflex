@@ -191,19 +191,71 @@ const HydrationMixin = {
 
         // If DOM value differs from state, user has modified it - preserve DOM value
         if (domValue !== '' && String(stateValue) !== domValue) {
-          // Update state to match DOM instead of overwriting DOM
-          const paths = valueExpression.split('.'), end = paths.pop();
-          let t = o && paths[0] in o ? o : this.s;
-          for (const p of paths) {
-            if (t[p] == null) t[p] = {};
-            t = t[p];
-          }
+          // CRITICAL FIX: Properly handle bracket notation in expressions
+          // Expression: items[0].value should set state.items[0].value, NOT state['items[0]']['value']
+          // We need to manually traverse the path, correctly parsing brackets
+
           // Preserve type: convert to number for number inputs
           const type = (n.type || '').toLowerCase();
+          let finalValue = domValue;
           if (type === 'number' || type === 'range') {
-            t[end] = domValue === '' ? null : parseFloat(domValue);
-          } else {
-            t[end] = domValue;
+            finalValue = domValue === '' ? null : parseFloat(domValue);
+          }
+
+          // Parse path segments correctly, handling both dots and brackets
+          // Examples: "items[0].name" -> ["items", 0, "name"]
+          //           "user.address[0]" -> ["user", "address", 0]
+          const pathSegments = [];
+          let currentPath = valueExpression;
+
+          while (currentPath.length > 0) {
+            // Match: identifier, bracket notation, or dot notation
+            const dotMatch = currentPath.match(/^([^.[]+)/);
+            const bracketMatch = currentPath.match(/^\[(\d+|'[^']*'|"[^"]*")\]/);
+
+            if (bracketMatch) {
+              // Bracket notation: extract the index/key
+              let key = bracketMatch[1];
+              // Remove quotes if present
+              if ((key[0] === "'" && key[key.length - 1] === "'") ||
+                  (key[0] === '"' && key[key.length - 1] === '"')) {
+                key = key.slice(1, -1);
+              } else {
+                // Convert to number if it's a numeric index
+                key = parseInt(key, 10);
+              }
+              pathSegments.push(key);
+              currentPath = currentPath.slice(bracketMatch[0].length);
+            } else if (dotMatch) {
+              // Property name
+              pathSegments.push(dotMatch[1]);
+              currentPath = currentPath.slice(dotMatch[0].length);
+            } else {
+              // Skip unexpected characters (like dots)
+              currentPath = currentPath.slice(1);
+            }
+
+            // Skip leading dot
+            if (currentPath[0] === '.') {
+              currentPath = currentPath.slice(1);
+            }
+          }
+
+          // Navigate to the parent object and set the final property
+          if (pathSegments.length > 0) {
+            const finalKey = pathSegments.pop();
+            let target = o && pathSegments[0] in o ? o : this.s;
+
+            for (const segment of pathSegments) {
+              if (target[segment] == null) {
+                // Create intermediate objects/arrays as needed
+                const nextSegment = pathSegments[pathSegments.indexOf(segment) + 1];
+                target[segment] = typeof nextSegment === 'number' ? [] : {};
+              }
+              target = target[segment];
+            }
+
+            target[finalKey] = finalValue;
           }
         }
       } catch (err) {
