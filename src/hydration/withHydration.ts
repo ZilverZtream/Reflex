@@ -80,6 +80,10 @@ const HydrationMixin = {
    * Uses explicit stack to avoid "Maximum call stack size exceeded" errors
    * on large pages with deeply nested DOM (3000+ elements).
    * This matches the robustness of the core compiler's _trv method.
+   *
+   * CRITICAL FIX: Whitespace filtering to prevent hydration mismatches.
+   * Browsers and minifiers treat whitespace differently between server and client.
+   * We skip whitespace-only text nodes to align the trees.
    */
   _hydrateWalk(n, o) {
     // Stack of {node, scope} pairs to process
@@ -92,6 +96,17 @@ const HydrationMixin = {
       while (c) {
         const next = c.nextSibling;
         const nt = c.nodeType;
+
+        // CRITICAL FIX: Skip whitespace-only text nodes to prevent hydration crashes
+        // Server may include whitespace that client doesn't (or vice versa)
+        if (nt === 3) {
+          const text = c.nodeValue || '';
+          if (!text.trim()) {
+            // Skip whitespace-only text nodes
+            c = next;
+            continue;
+          }
+        }
 
         // Element node (1)
         if (nt === 1) {

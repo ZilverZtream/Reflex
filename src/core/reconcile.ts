@@ -239,8 +239,14 @@ export function reconcileKeyedList({
 /**
  * Handle duplicate keys in a list.
  *
- * When duplicate keys are detected, we warn in development and use
- * index-based fallback to prevent crashes.
+ * CRITICAL FIX: When duplicate keys are detected, we warn in development and use
+ * index-based fallback to prevent DOM corruption and crashes.
+ *
+ * Without this fix, duplicate keys cause the Map to silently overwrite entries,
+ * leading to the LIS algorithm breaking completely. This results in:
+ * - Random element deletion (thinking nodes don't exist)
+ * - Incorrect element reordering
+ * - Data integrity corruption
  *
  * @param {Map} seen - Set of already-seen keys
  * @param {*} key - Current key
@@ -250,9 +256,11 @@ export function reconcileKeyedList({
 export function resolveDuplicateKey(seen, key, index) {
   if (seen.has(key)) {
     if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
-      console.warn(
-        `Reflex: Duplicate key "${key}" in m-for. ` +
-        'Using index as fallback. This may cause incorrect behavior.'
+      console.error(
+        `⚠️ Reflex: CRITICAL - Duplicate key "${key}" detected in m-for list!\n` +
+        'This will cause DOM corruption and unpredictable behavior.\n' +
+        'Fix: Ensure each item has a unique key value.\n' +
+        'Temporarily using index-based fallback to prevent crashes.'
       );
     }
     // Use compound key to avoid collision
