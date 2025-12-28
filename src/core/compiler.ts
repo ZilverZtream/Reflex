@@ -24,8 +24,14 @@ const escapeHTML = s => s.replace(/[&<>"']/g, c => ({
  * Follows Vue/Alpine naming convention:
  * - {name}-enter-from, {name}-enter-active, {name}-enter-to
  * - {name}-leave-from, {name}-leave-active, {name}-leave-to
+ *
+ * @param el - The element to animate
+ * @param name - Transition name (e.g., 'fade', 'slide')
+ * @param type - 'enter' or 'leave'
+ * @param done - Callback when transition completes
+ * @param reflex - Optional Reflex instance to register cleanup in lifecycle registry
  */
-export function runTransition(el, name, type, done) {
+export function runTransition(el, name, type, done, reflex?) {
   const from = `${name}-${type}-from`;
   const active = `${name}-${type}-active`;
   const to = `${name}-${type}-to`;
@@ -36,17 +42,45 @@ export function runTransition(el, name, type, done) {
   // Force reflow to ensure initial state is applied
   el.offsetHeight; // eslint-disable-line no-unused-expressions
 
+  // Track cleanup state to prevent double execution
+  let cleaned = false;
+  let timeoutId = null;
+
+  // Cleanup function to cancel transition
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+
+    // Clear timeout
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+
+    // Remove event listeners
+    el.removeEventListener('transitionend', onEnd);
+    el.removeEventListener('animationend', onEnd);
+
+    // Remove transition classes
+    el.classList.remove(from, active, to);
+  };
+
+  // Register cleanup in element's lifecycle registry if Reflex instance provided
+  if (reflex && typeof reflex._reg === 'function') {
+    reflex._reg(el, cleanup);
+  }
+
   // Next frame: start transition
   requestAnimationFrame(() => {
+    if (cleaned) return; // Transition was cancelled before it started
+
     el.classList.remove(from);
     el.classList.add(to);
 
     // Listen for transition end
     const onEnd = (e) => {
-      if (e.target !== el) return;
-      el.removeEventListener('transitionend', onEnd);
-      el.removeEventListener('animationend', onEnd);
-      el.classList.remove(active, to);
+      if (e.target !== el || cleaned) return;
+      cleanup();
       if (done) done();
     };
 
@@ -60,15 +94,14 @@ export function runTransition(el, name, type, done) {
     const timeout = (duration + delay) * 1000 + 50; // Add 50ms buffer
 
     if (timeout > 50) {
-      setTimeout(() => {
-        el.removeEventListener('transitionend', onEnd);
-        el.removeEventListener('animationend', onEnd);
-        el.classList.remove(active, to);
+      timeoutId = setTimeout(() => {
+        if (cleaned) return;
+        cleanup();
         if (done) done();
-      }, timeout);
+      }, timeout) as any;
     } else {
       // No transition defined, complete immediately
-      el.classList.remove(active, to);
+      cleanup();
       if (done) done();
     }
   });
@@ -236,7 +269,7 @@ export const CompilerMixin = {
             if (trans && contentNodes.length > 0) {
               contentNodes.forEach(node => {
                 if (node.nodeType === 1) {
-                  runTransition(node as Element, trans, 'enter', null);
+                  runTransition(node as Element, trans, 'enter', null, this);
                 }
               });
             }
@@ -280,7 +313,7 @@ export const CompilerMixin = {
             }
           }
           // Run enter transition (skip for templates, already handled above)
-          if (trans && cur && !isTemplate) runTransition(cur, trans, 'enter', null);
+          if (trans && cur && !isTemplate) runTransition(cur, trans, 'enter', null, this);
           }
         } else if (!ok && cur && !leaving) {
           // Handle removal of template content (array of nodes) or single element
@@ -301,7 +334,7 @@ export const CompilerMixin = {
                     this._kill(node);
                     if (node.parentNode) node.remove();
                     onComplete();
-                  });
+                  }, this);
                 } else {
                   this._kill(node);
                   if (node.parentNode) node.remove();
@@ -343,7 +376,7 @@ export const CompilerMixin = {
               this._kill(node);
               node.remove();
               leaving = false;
-            });
+            }, this);
             cur = null;
           } else {
             this._kill(cur);
@@ -784,12 +817,12 @@ export const CompilerMixin = {
             transitioning = true;
             if (show) {
               el.style.display = d;
-              runTransition(el, trans, 'enter', () => { transitioning = false; });
+              runTransition(el, trans, 'enter', () => { transitioning = false; }, this);
             } else {
               runTransition(el, trans, 'leave', () => {
                 el.style.display = 'none';
                 transitioning = false;
-              });
+              }, this);
             }
           } else {
             el.style.display = next;
@@ -836,6 +869,13 @@ export const CompilerMixin = {
           const options = el.options;
           for (let i = 0; i < options.length; i++) {
             options[i].selected = selectedValues.includes(options[i].value);
+          }
+        } else if (isNum) {
+          // For number inputs, avoid cursor jumping by comparing loosely
+          // Allow "1." to equal "1" to prevent interrupting user input
+          const next = v == null ? '' : String(v);
+          if (el.value !== next && parseFloat(el.value) !== v) {
+            el.value = next;
           }
         } else {
           const next = v == null ? '' : String(v);
