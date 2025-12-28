@@ -108,6 +108,24 @@ export function runTransition(el, name, type, done, reflex?) {
 }
 
 /**
+ * Check if an element has a strict parent that doesn't allow wrapper elements.
+ * Strict parents include: table, tbody, thead, tfoot, tr, select, optgroup, ul, ol, dl, picture
+ *
+ * @param marker - The comment marker element to check
+ * @returns true if the parent is strict and doesn't allow wrapper elements
+ */
+function hasStrictParent(marker: Comment): boolean {
+  let parent = marker.parentElement;
+  if (!parent) return false;
+
+  const tag = parent.tagName;
+  // Elements that have strict child requirements
+  return tag === 'TABLE' || tag === 'TBODY' || tag === 'THEAD' || tag === 'TFOOT' ||
+         tag === 'TR' || tag === 'SELECT' || tag === 'OPTGROUP' ||
+         tag === 'UL' || tag === 'OL' || tag === 'DL' || tag === 'PICTURE';
+}
+
+/**
  * Compiler mixin for Reflex class.
  */
 export const CompilerMixin = {
@@ -453,12 +471,22 @@ export const CompilerMixin = {
           if (processedItem !== null && typeof processedItem === 'object' && !processedItem[SKIP]) {
             processedItem = this._r(processedItem);
           }
-          // Use flat object copy instead of Object.create to allow V8 inline caching
-          // Object.create creates unique prototype chains, preventing optimization
-          const sc = o ? Object.assign({}, o) : {};
-          sc[alias] = processedItem;
-          if (idxAlias) sc[idxAlias] = index;
-          return this._r(sc);
+
+          // CRITICAL FIX: Use prototype chain for scope inheritance instead of Object.assign
+          // Object.assign copies properties, breaking dynamic lookup and wasting memory
+          // Prototype chain allows dynamic lookup of parent properties without copying
+          const base = {
+            [alias]: processedItem
+          };
+          if (idxAlias) base[idxAlias] = index;
+
+          // Use prototype chain for inheritance
+          // This allows child scope to access parent properties dynamically
+          if (o) {
+            Object.setPrototypeOf(base, o);
+          }
+
+          return this._r(base);
         },
 
         createNode: (item, index) => {
@@ -491,15 +519,51 @@ export const CompilerMixin = {
             const contentNodes = Array.from(clonedTpl.content.childNodes);
             const elementNodes = contentNodes.filter(node => node.nodeType === 1);
 
+            // CRITICAL FIX: Detect strict parents (table, select, ul, etc.)
+            // These elements have strict child requirements and reject wrapper elements
+            const isStrictParent = hasStrictParent(cm);
+
             if (elementNodes.length === 1) {
-              // Single root element - use it directly without wrapper
+              // Single root element - ALWAYS use it directly without wrapper
+              // This works for both strict and non-strict parents
               const singleRoot = elementNodes[0].cloneNode(true) as Element;
               this._scopeMap.set(singleRoot, scope);
               this._bnd(singleRoot, scope);
               this._w(singleRoot, scope);
               return singleRoot;
+            } else if (isStrictParent) {
+              // CRITICAL FIX: For strict parents, NEVER use wrapper elements
+              // Instead, use comment-based anchors and manage nodes in a flat array
+              // Create a virtual container object to track all nodes
+              const nodes = contentNodes.map(node => node.cloneNode(true));
+
+              // Create a container object that acts as a virtual node for reconciliation
+              // This object stores all nodes but isn't inserted into the DOM
+              const container = {
+                _isVirtualContainer: true,
+                _nodes: nodes,
+                parentNode: null, // Will be set on insertion
+                remove: function() {
+                  // Remove all tracked nodes
+                  this._nodes.forEach((node: any) => {
+                    if (node.parentNode) node.remove();
+                  });
+                }
+              } as any;
+
+              this._scopeMap.set(container, scope);
+
+              // Process bindings and walk each child element
+              nodes.forEach(child => {
+                if (child.nodeType === 1) {
+                  this._bnd(child as Element, scope);
+                  this._w(child as Element, scope);
+                }
+              });
+
+              return container;
             } else {
-              // Multi-root or mixed content - use wrapper for reconciliation
+              // Multi-root or mixed content - use wrapper for reconciliation (non-strict parents only)
               // Create a wrapper using a custom element to contain template content
               // This acts as an "invisible" wrapper for reconciliation
               // Using 'rfx-tpl' custom element to avoid conflicts with normal element queries
@@ -575,8 +639,17 @@ export const CompilerMixin = {
         },
 
         removeNode: (node) => {
-          this._kill(node);
-          node.remove();
+          // CRITICAL FIX: Handle virtual containers (for strict parents like <table>)
+          if (node._isVirtualContainer) {
+            // Kill and remove all nodes in the virtual container
+            node._nodes.forEach(n => {
+              this._kill(n);
+              if (n.parentNode) n.remove();
+            });
+          } else {
+            this._kill(node);
+            node.remove();
+          }
         },
 
         // Optional: Check if item should be kept (for m-if filtering)
@@ -610,9 +683,17 @@ export const CompilerMixin = {
       // This is critical for m-if + m-for combinations where
       // removing the m-for comment marker must also remove list items
       rows.forEach(({ node }) => {
-        this._kill(node);
-        if (node.parentNode) {
-          node.remove();
+        // CRITICAL FIX: Handle virtual containers (for strict parents like <table>)
+        if (node._isVirtualContainer) {
+          node._nodes.forEach(n => {
+            this._kill(n);
+            if (n.parentNode) n.remove();
+          });
+        } else {
+          this._kill(node);
+          if (node.parentNode) {
+            node.remove();
+          }
         }
       });
       eff.kill();
