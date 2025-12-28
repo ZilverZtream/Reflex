@@ -663,10 +663,20 @@ export class Reflex {
     // Function to mount the real component once loaded
     const mountComponent = (def) => {
       // ROBUST ABORT CHECKS to prevent zombie components:
-      // 1. Check explicit abort flag (set when parent is destroyed)
-      // 2. Verify marker is still in the document (not detached)
-      // 3. Ensure marker's parent exists and is connected
+      // 1. Check if app instance is still mounted (prevents race condition)
+      // 2. Check explicit abort flag (set when parent is destroyed)
+      // 3. Verify marker is still in the document (not detached)
+      // 4. Ensure marker's parent exists and is connected
       // This prevents "zombie effects" when parent is destroyed/moved while loading
+      if (!self._m) {
+        // App was destroyed before async component loaded
+        if (fallbackNode?.parentNode) {
+          self._kill(fallbackNode);
+          fallbackNode.remove();
+        }
+        return;
+      }
+
       if (aborted) {
         // Explicitly aborted during cleanup
         if (fallbackNode?.parentNode) {

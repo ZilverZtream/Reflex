@@ -247,7 +247,21 @@ export const CompilerMixin = {
         else if (nm === 'm-ref') {
           // Register element in $refs
           this._refs[v] = n;
-          this._reg(n, () => { delete this._refs[v]; });
+          // Also assign to state if the variable exists there
+          // This allows direct access via state.myRef instead of $refs.myRef
+          if (v in this.s) {
+            this.s[v] = n;
+          }
+          this._reg(n, () => {
+            // CRITICAL: Set to null before deleting to break references
+            // This prevents memory leaks from "Detached DOM Nodes"
+            this._refs[v] = null;
+            delete this._refs[v];
+            // Also null out state variable if it exists
+            if (v in this.s) {
+              this.s[v] = null;
+            }
+          });
         } else {
           // Check for custom directives: m-name.mod1.mod2="value"
           const parts = nm.slice(2).split('.');
@@ -783,6 +797,11 @@ export const CompilerMixin = {
                       attrName === 'transform' || attrName === 'gradientTransform' ||
                       attrName === 'patternTransform';
 
+    // Cache initial static class/style to preserve when binding dynamic values
+    // This prevents the "class wipeout" bug where :class overwrites static classes
+    const initialClass = att === 'class' ? el.className : null;
+    const initialStyle = att === 'style' ? el.getAttribute('style') || '' : null;
+
     const e = this.createEffect(() => {
       try {
         let v = fn(this.s, o);
@@ -800,10 +819,18 @@ export const CompilerMixin = {
         }
 
         if (att === 'class') {
-          const next = this._cls(v);
+          const dynamicClass = this._cls(v);
+          // Merge static class with dynamic class to prevent wipeout
+          const next = initialClass && dynamicClass
+            ? `${initialClass} ${dynamicClass}`
+            : (initialClass || dynamicClass);
           if (next !== prev) { prev = next; el.className = next; }
         } else if (att === 'style') {
-          const next = this._sty(v);
+          const dynamicStyle = this._sty(v);
+          // Merge static style with dynamic style to prevent fragmentation
+          const next = initialStyle && dynamicStyle
+            ? `${initialStyle}${dynamicStyle}`
+            : (initialStyle || dynamicStyle);
           if (next !== prev) { prev = next; el.style.cssText = next; }
         } else if (isSVGAttr) {
           // SVG attributes must use setAttribute with proper camelCase
@@ -962,7 +989,10 @@ export const CompilerMixin = {
         if (isChk) {
           // Handle checkbox array binding
           if (Array.isArray(v)) {
-            el.checked = v.includes(el.value);
+            // CRITICAL FIX: Checkbox values are always strings, but array might contain
+            // numbers or other types. Use type coercion to match values correctly.
+            // Example: array [1, 2] should match <input value="1">
+            el.checked = v.some(item => String(item) === el.value);
           } else {
             el.checked = !!v;
           }
@@ -1003,11 +1033,19 @@ export const CompilerMixin = {
         // Handle checkbox array binding
         const currentValue = fn(this.s, o);
         if (Array.isArray(currentValue)) {
-          // Toggle value in array
+          // Toggle value in array with proper type coercion
           const arr = [...currentValue];
-          const idx = arr.indexOf(el.value);
+          // CRITICAL FIX: Use type coercion to find matching value
+          // Checkbox values are strings, but array might contain numbers
+          const idx = arr.findIndex(item => String(item) === el.value);
           if (el.checked && idx === -1) {
-            arr.push(el.value);
+            // Try to preserve the original type if the array has a consistent type
+            // If array contains numbers and value is numeric, push as number
+            let valueToAdd = el.value;
+            if (arr.length > 0 && typeof arr[0] === 'number' && !isNaN(Number(el.value))) {
+              valueToAdd = Number(el.value);
+            }
+            arr.push(valueToAdd);
           } else if (!el.checked && idx !== -1) {
             arr.splice(idx, 1);
           }
