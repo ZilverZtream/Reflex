@@ -111,11 +111,16 @@ function parseHTML(html: string): VNode[] {
             break;
           }
 
-          // Parse attribute
-          const attrMatch = html.slice(pos).match(/^([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/);
+          // Parse attribute - handle escaped quotes in values
+          const attrMatch = html.slice(pos).match(/^([^\s=/>]+)(?:\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|([^\s>]+)))?/);
           if (attrMatch) {
             const attrName = attrMatch[1];
-            const attrValue = attrMatch[2] ?? attrMatch[3] ?? attrMatch[4] ?? '';
+            // Unescape quotes in attribute values
+            let attrValue = attrMatch[2] ?? attrMatch[3] ?? attrMatch[4] ?? '';
+            if (attrMatch[2] !== undefined || attrMatch[3] !== undefined) {
+              // Unescape common escape sequences in quoted attributes
+              attrValue = attrValue.replace(/\\"/g, '"').replace(/\\'/g, "'").replace(/\\\\/g, '\\');
+            }
             attrs.push([attrName, attrValue]);
             pos += attrMatch[0].length;
           } else {
@@ -169,7 +174,8 @@ function parseHTML(html: string): VNode[] {
       addNode(textNode);
     }
 
-    pos = textEnd;
+    // Advance position - if textEnd === pos, skip the invalid '<' to prevent infinite loop
+    pos = textEnd === pos ? pos + 1 : textEnd;
   }
 
   // Close any remaining open tags
@@ -1074,16 +1080,15 @@ function querySelectorAll(root: VNode, selector: string): VNode[] {
 
 /**
  * Serialize a virtual node to HTML string.
+ * Note: Does not add formatting/indentation to preserve exact whitespace for SSR.
  */
 function serializeVNode(node: VNode, indent = 0): string {
-  const pad = '  '.repeat(indent);
-
   if (node.nodeType === TEXT_NODE) {
     return node.nodeValue ?? '';
   }
 
   if (node.nodeType === COMMENT_NODE) {
-    return `${pad}<!--${node.nodeValue}-->`;
+    return `<!--${node.nodeValue}-->`;
   }
 
   if (node.nodeType === ELEMENT_NODE) {
@@ -1104,24 +1109,18 @@ function serializeVNode(node: VNode, indent = 0): string {
     // Self-closing tags
     const selfClosing = ['br', 'hr', 'img', 'input', 'meta', 'link'];
     if (selfClosing.includes(tag) && node.childNodes.length === 0) {
-      return `${pad}<${tag}${attrs} />`;
+      return `<${tag}${attrs} />`;
     }
 
     // Regular elements
     if (node.childNodes.length === 0) {
-      return `${pad}<${tag}${attrs}></${tag}>`;
+      return `<${tag}${attrs}></${tag}>`;
     }
 
-    let children = '';
-    const hasElementChildren = node.childNodes.some(c => c.nodeType === ELEMENT_NODE);
+    // Serialize children without adding formatting to preserve whitespace
+    const children = node.childNodes.map(c => serializeVNode(c, 0)).join('');
 
-    if (hasElementChildren) {
-      children = '\n' + node.childNodes.map(c => serializeVNode(c, indent + 1)).join('\n') + '\n' + pad;
-    } else {
-      children = node.childNodes.map(c => serializeVNode(c, 0)).join('');
-    }
-
-    return `${pad}<${tag}${attrs}>${children}</${tag}>`;
+    return `<${tag}${attrs}>${children}</${tag}>`;
   }
 
   return '';
@@ -1363,23 +1362,36 @@ export class VirtualRenderer implements IRendererAdapter {
       return;
     }
 
-    // Default: call registered handlers
-    const handlers = node._listeners?.get(event);
-    if (handlers) {
-      const syntheticEvent = {
-        type: event,
-        target: node,
-        currentTarget: node,
-        detail,
-        preventDefault: () => {},
-        stopPropagation: () => {},
-        bubbles: true,
-        cancelBubble: false
-      };
+    // Create synthetic event with proper bubbling support
+    let propagationStopped = false;
+    const syntheticEvent = {
+      type: event,
+      target: node,
+      currentTarget: node,
+      detail,
+      preventDefault: () => {},
+      stopPropagation: () => { propagationStopped = true; },
+      bubbles: true,
+      cancelBubble: false
+    };
 
-      for (const handler of handlers) {
-        handler(syntheticEvent as any);
+    // Implement event bubbling - traverse up the parent chain
+    let currentNode: VNode | null = node;
+    while (currentNode && !propagationStopped) {
+      const handlers = currentNode._listeners?.get(event);
+      if (handlers) {
+        // Update currentTarget to the node being processed
+        syntheticEvent.currentTarget = currentNode;
+
+        // Call all handlers registered on this node
+        for (const handler of handlers) {
+          if (propagationStopped) break;
+          handler(syntheticEvent as any);
+        }
       }
+
+      // Move to parent for bubbling
+      currentNode = currentNode.parentNode;
     }
 
     if (this.debug) {
