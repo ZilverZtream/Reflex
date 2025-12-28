@@ -234,7 +234,13 @@ export const CompilerMixin = {
       if (nm.startsWith(':')) {
         this._at(n, nm.slice(1), v, o);
       } else if (nm.startsWith('@')) {
-        this._ev(n, nm.slice(1), v, o);
+        // CRITICAL FIX: Event Modifier Separation
+        // Extract modifiers here (like m-model) for consistency and clarity
+        // @click.stop.prevent becomes eventName="click", modifiers=["stop", "prevent"]
+        const parts = nm.slice(1).split('.');
+        const eventName = parts[0];
+        const modifiers = parts.slice(1);
+        this._ev(n, eventName, v, o, modifiers);
       } else if (nm.startsWith('m-')) {
         if (nm.startsWith('m-model')) {
           // Extract modifiers from m-model (e.g., m-model.lazy)
@@ -865,7 +871,18 @@ export const CompilerMixin = {
               const val = v[key];
               const cssProp = key.replace(/([A-Z])/g, '-$1').toLowerCase();
               if (val != null && val !== false) {
-                (el as HTMLElement).style.setProperty(cssProp, String(val));
+                // CRITICAL FIX: !important Style Failure
+                // setProperty doesn't parse !important from value string
+                // We must detect it and pass as the 3rd argument
+                const strVal = String(val);
+                const hasImportant = strVal.includes('!important');
+                if (hasImportant) {
+                  // Remove !important from value and pass as priority argument
+                  const cleanVal = strVal.replace(/\s*!important\s*$/, '').trim();
+                  (el as HTMLElement).style.setProperty(cssProp, cleanVal, 'important');
+                } else {
+                  (el as HTMLElement).style.setProperty(cssProp, strVal);
+                }
               } else {
                 (el as HTMLElement).style.setProperty(cssProp, '');
               }
@@ -892,7 +909,20 @@ export const CompilerMixin = {
             next === null ? el.removeAttribute(attrName) : el.setAttribute(attrName, next);
           }
         } else if (att in el && !isSVGAttr) {
-          el[att] = v ?? '';
+          // CRITICAL FIX: Read-Only Property Crash
+          // Many DOM properties are read-only (e.g., input.list, video.duration, element.clientTop)
+          // In strict mode (ES modules), assigning to read-only properties throws TypeError
+          // Use try-catch to gracefully fall back to setAttribute for read-only properties
+          try {
+            el[att] = v ?? '';
+          } catch (err) {
+            // Property is read-only, fall back to setAttribute
+            const next = v === null || v === false ? null : String(v ?? '');
+            if (next !== prev) {
+              prev = next;
+              next === null ? el.removeAttribute(att) : el.setAttribute(att, next);
+            }
+          }
         } else {
           // ARIA boolean attributes need explicit "true"/"false" string values
           // They should not be removed when value is false
@@ -1173,9 +1203,13 @@ export const CompilerMixin = {
 
   /**
    * Event binding: @event.mod1.mod2="expr"
+   * @param el - Element to bind event to
+   * @param nm - Event name (e.g., "click")
+   * @param exp - Expression to evaluate
+   * @param o - Scope object
+   * @param mod - Array of modifiers (e.g., ["stop", "prevent"])
    */
-  _ev(el, evt, exp, o) {
-    const [nm, ...mod] = evt.split('.');
+  _ev(el, nm, exp, o, mod = []) {
     let fn = this._fn(exp, true);
 
     // Parse debounce/throttle timing from modifiers
