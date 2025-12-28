@@ -375,11 +375,13 @@ export const SchedulerMixin = {
 
       const meta = obj[META] || this._mf.get(obj);
 
-      // STRUCTURAL SHARING: Check if we have a cached clone with matching version
-      if (meta && meta._cloneCache && meta._cloneCache.v === meta.v) {
-        seen.set(obj, meta._cloneCache.clone);
-        continue; // Skip processing children - they're already in the cached clone
-      }
+      // NOTE: Structural sharing optimization removed for correctness.
+      // The previous optimization checked only parent version (meta.v) but skipped
+      // processing children entirely. This caused "Time Travel" bugs where nested
+      // object changes (e.g., state.user.name) didn't propagate because parent.v
+      // didn't change, returning stale cached clones to deep watchers.
+      // A proper fix would require bubbling versions up the tree or checking all
+      // descendant versions before using cache. For now, we always do a fresh clone.
 
       // Create clone shell
       let clone;

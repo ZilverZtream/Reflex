@@ -66,49 +66,62 @@ const HydrationMixin = {
   /**
    * Walk DOM tree in hydration mode.
    * Similar to _w() but for hydrating existing nodes.
+   *
+   * ITERATIVE IMPLEMENTATION:
+   * Uses explicit stack to avoid "Maximum call stack size exceeded" errors
+   * on large pages with deeply nested DOM (3000+ elements).
+   * This matches the robustness of the core compiler's _trv method.
    */
   _hydrateWalk(n, o) {
-    let c = n.firstChild;
-    while (c) {
-      const next = c.nextSibling;
-      const nt = c.nodeType;
+    // Stack of {node, scope} pairs to process
+    const stack = [{ node: n, scope: o }];
 
-      // Element node (1)
-      if (nt === 1) {
-        const mIgnore = c.getAttribute('m-ignore');
-        if (mIgnore === null) {
-          const tag = c.tagName;
-          if (tag === 'TEMPLATE') {
-            // Skip templates
-          } else {
-            const mIf = c.getAttribute('m-if');
-            if (mIf !== null) {
-              this._hydrateIf(c, o);
+    while (stack.length > 0) {
+      const { node: parent, scope: parentScope } = stack.pop();
+
+      let c = parent.firstChild;
+      while (c) {
+        const next = c.nextSibling;
+        const nt = c.nodeType;
+
+        // Element node (1)
+        if (nt === 1) {
+          const mIgnore = c.getAttribute('m-ignore');
+          if (mIgnore === null) {
+            const tag = c.tagName;
+            if (tag === 'TEMPLATE') {
+              // Skip templates
             } else {
-              const mFor = c.getAttribute('m-for');
-              if (mFor !== null) {
-                this._hydrateFor(c, o);
+              const mIf = c.getAttribute('m-if');
+              if (mIf !== null) {
+                this._hydrateIf(c, parentScope);
               } else {
-                const t = tag.toLowerCase();
-                if (this._cp.has(t)) {
-                  // Components in hydration mode
-                  this._hydrateComponent(c, t, o);
+                const mFor = c.getAttribute('m-for');
+                if (mFor !== null) {
+                  this._hydrateFor(c, parentScope);
                 } else {
-                  this._hydrateNode(c, o);
-                  this._hydrateWalk(c, o);
+                  const t = tag.toLowerCase();
+                  if (this._cp.has(t)) {
+                    // Components in hydration mode
+                    this._hydrateComponent(c, t, parentScope);
+                  } else {
+                    this._hydrateNode(c, parentScope);
+                    // Push child onto stack for iterative processing instead of recursion
+                    stack.push({ node: c, scope: parentScope });
+                  }
                 }
               }
             }
           }
+        } else if (nt === 3) {
+          // Text node with interpolation
+          const nv = c.nodeValue;
+          if (typeof nv === 'string' && nv.indexOf('{{') !== -1) {
+            this._hydrateText(c, parentScope);
+          }
         }
-      } else if (nt === 3) {
-        // Text node with interpolation
-        const nv = c.nodeValue;
-        if (typeof nv === 'string' && nv.indexOf('{{') !== -1) {
-          this._hydrateText(c, o);
-        }
+        c = next;
       }
-      c = next;
     }
   },
 
@@ -389,6 +402,14 @@ const HydrationMixin = {
       });
     } else {
       // No matching nodes or mismatch - fall back to normal m-for
+      // FIX: Remove all existing server-rendered nodes to prevent "Zombie Siblings"
+      // Without this cleanup, mismatched server nodes remain in DOM alongside
+      // newly rendered client nodes, causing duplicate/ghost content.
+      existingNodes.forEach(node => {
+        if (node !== el) {
+          node.remove();
+        }
+      });
       this._dir_for(el, o);
     }
   },
