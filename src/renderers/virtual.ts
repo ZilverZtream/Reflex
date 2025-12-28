@@ -174,6 +174,59 @@ function createVNode(
         handlers.splice(index, 1);
       }
     };
+
+    // Mock form element properties for SSR/testing compatibility
+    // This prevents "Cannot read property 'length' of undefined" errors
+    const upperTag = tagName?.toUpperCase();
+
+    if (upperTag === 'SELECT') {
+      // Mock 'options' getter - returns OPTION child elements
+      Object.defineProperty(node, 'options', {
+        get() {
+          return this.childNodes.filter((n: VNode) => n.tagName === 'OPTION');
+        }
+      });
+      // Mock 'selectedOptions' getter - returns selected OPTION elements
+      Object.defineProperty(node, 'selectedOptions', {
+        get() {
+          return this.options.filter((n: VNode) => n.attributes?.get('selected') !== undefined);
+        }
+      });
+    }
+
+    if (upperTag === 'INPUT') {
+      // Mock ValidityState for inputs (prevents NaN crashes with number inputs)
+      (node as any).validity = {
+        badInput: false,
+        customError: false,
+        patternMismatch: false,
+        rangeOverflow: false,
+        rangeUnderflow: false,
+        stepMismatch: false,
+        tooLong: false,
+        tooShort: false,
+        typeMismatch: false,
+        valid: true,
+        valueMissing: false
+      };
+    }
+
+    if (upperTag === 'TEXTAREA') {
+      // Mock ValidityState for textareas as well
+      (node as any).validity = {
+        badInput: false,
+        customError: false,
+        patternMismatch: false,
+        rangeOverflow: false,
+        rangeUnderflow: false,
+        stepMismatch: false,
+        tooLong: false,
+        tooShort: false,
+        typeMismatch: false,
+        valid: true,
+        valueMissing: false
+      };
+    }
   }
 
   return node;
