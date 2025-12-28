@@ -265,9 +265,26 @@ export class Reflex {
 
     this._dr = root;
 
-    // CRITICAL FIX: Store app reference on root element for cleanup
-    // This allows _kill to detect and unmount child Reflex instances
+    // CRITICAL FIX: Double Mount Leak - Check for existing app and unmount it first
+    // If mount() is called on an element that already hosts a Reflex app,
+    // the old app must be unmounted to prevent memory leaks and ghost behavior
     if (root && typeof root === 'object') {
+      const existingApp = (root as any).__rfx_app;
+      if (existingApp && existingApp !== this) {
+        // Another app is mounted here - unmount it first
+        if (typeof existingApp.unmount === 'function') {
+          try {
+            console.warn(
+              'Reflex: Detected existing app on mount root. Unmounting previous app to prevent memory leak.'
+            );
+            existingApp.unmount();
+          } catch (err) {
+            console.warn('Reflex: Error unmounting existing app:', err);
+          }
+        }
+      }
+      // Store app reference on root element for cleanup
+      // This allows _kill to detect and unmount child Reflex instances
       (root as any).__rfx_app = this;
     }
 
@@ -753,7 +770,8 @@ export class Reflex {
       }
 
       // Create a temporary element with saved attributes
-      const tempEl = self._ren.createElement(tag);
+      // CRITICAL FIX: Pass parent context for SVG awareness (fixes SVG link hijack)
+      const tempEl = self._ren.createElement(tag, marker.parentElement);
       for (const attr of savedAttrs) {
         self._ren.setAttribute(tempEl, attr.name, attr.value);
       }
@@ -853,8 +871,17 @@ export class Reflex {
   /**
    * Kill a node and all its descendants' cleanup functions.
    * CRITICAL FIX: Also unmounts any child Reflex instances to prevent memory leaks.
+   * CRITICAL FIX: Bottom-Up unmounting (children first) to prevent context collapse.
    */
   _kill(node) {
+    // CRITICAL FIX: Bottom-Up Unmounting - Kill children BEFORE parent
+    // Children often rely on parent context (services, connections, DOM hierarchy)
+    // during their cleanup. If we destroy the parent first, child cleanups may crash
+    // or fail to execute properly. Always unmount children → parent.
+    for (let ch = node.firstChild; ch; ch = ch.nextSibling) {
+      this._kill(ch);
+    }
+
     // CRITICAL: Check for child Reflex app instances and unmount them
     // This prevents memory leaks when components with separate Reflex instances
     // are removed via m-if or list reconciliation
@@ -872,15 +899,13 @@ export class Reflex {
       }
     }
 
+    // Now run this node's cleanups (after children are cleaned up)
     const c = this._cl.get(node);
     if (c) {
       for (let i = 0; i < c.length; i++) {
         try { c[i](); } catch {} // eslint-disable-line no-empty
       }
       this._cl.delete(node);
-    }
-    for (let ch = node.firstChild; ch; ch = ch.nextSibling) {
-      this._kill(ch);
     }
   }
 }

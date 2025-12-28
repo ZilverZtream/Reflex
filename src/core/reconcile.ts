@@ -240,7 +240,7 @@ export function reconcileKeyedList({
  * Handle duplicate keys in a list.
  *
  * CRITICAL FIX: When duplicate keys are detected, we warn in development and use
- * index-based fallback to prevent DOM corruption and crashes.
+ * a stable counter-based fallback to prevent DOM corruption and crashes.
  *
  * Without this fix, duplicate keys cause the Map to silently overwrite entries,
  * leading to the LIS algorithm breaking completely. This results in:
@@ -248,24 +248,38 @@ export function reconcileKeyedList({
  * - Incorrect element reordering
  * - Data integrity corruption
  *
- * @param {Map} seen - Set of already-seen keys
+ * CRITICAL FIX: Do NOT include index in duplicate key generation.
+ * Including the index causes keys to change when the list is reordered, which
+ * defeats the purpose of keyed reconciliation and forces full DOM recreation.
+ *
+ * @param {Map} seen - Set of already-seen keys with counter tracking
  * @param {*} key - Current key
- * @param {number} index - Current index
+ * @param {number} index - Current index (NOT used in key generation)
  * @returns {*} Unique key (original or fallback)
  */
 export function resolveDuplicateKey(seen, key, index) {
-  if (seen.has(key)) {
+  // Check if we've seen this key before
+  const seenEntry = seen.get(key);
+
+  if (seenEntry !== undefined) {
+    // Duplicate detected - increment counter for stable key
+    const counter = seenEntry + 1;
+    seen.set(key, counter);
+
     if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
       console.error(
         `⚠️ Reflex: CRITICAL - Duplicate key "${key}" detected in m-for list!\n` +
         'This will cause DOM corruption and unpredictable behavior.\n' +
         'Fix: Ensure each item has a unique key value.\n' +
-        'Temporarily using index-based fallback to prevent crashes.'
+        `Temporarily using counter-based fallback (occurrence #${counter}).`
       );
     }
-    // Use compound key to avoid collision
-    return `__dup_${index}_${key}`;
+
+    // CRITICAL: Use counter instead of index for stable keys across reorders
+    return `__dup_${counter}_${key}`;
   }
-  seen.add(key);
+
+  // First occurrence of this key - track it with counter 1
+  seen.set(key, 1);
   return key;
 }

@@ -306,9 +306,22 @@ export const SchedulerMixin = {
 
   /**
    * Execute callback after next DOM update
+   * CRITICAL FIX: Prevent deadlock by handling errors properly
    */
   nextTick(fn?: () => void) {
-    return new Promise<void>(r => queueMicrotask(() => { this.flushQueue(); fn?.(); r(); }));
+    return new Promise<void>((resolve, reject) => {
+      queueMicrotask(() => {
+        try {
+          this.flushQueue();
+          fn?.();
+          resolve();
+        } catch (err) {
+          // CRITICAL: Always resolve/reject to prevent deadlock
+          // If fn() throws, the promise must still settle
+          reject(err);
+        }
+      });
+    });
   },
 
   /**
@@ -409,8 +422,25 @@ export const SchedulerMixin = {
       let clone;
       if (obj instanceof Date) {
         clone = new Date(obj);
+        // CRITICAL FIX: Deep Watch Data Loss - Preserve custom properties
+        // Developers may attach metadata to Date objects (e.g., date.label = "Birthday")
+        // Copy all enumerable properties to prevent data loss in deep watchers
+        for (const key in obj) {
+          if (obj.hasOwnProperty(key)) {
+            clone[key] = obj[key];
+            stack.push(obj[key]); // Queue for deep cloning
+          }
+        }
       } else if (obj instanceof RegExp) {
         clone = new RegExp(obj.source, obj.flags);
+        // CRITICAL FIX: Deep Watch Data Loss - Preserve custom properties
+        // Copy all enumerable properties to preserve metadata
+        for (const key in obj) {
+          if (obj.hasOwnProperty(key)) {
+            clone[key] = obj[key];
+            stack.push(obj[key]); // Queue for deep cloning
+          }
+        }
       } else if (obj instanceof Map) {
         clone = new Map();
         obj.forEach(v => stack.push(v)); // Queue children for processing
