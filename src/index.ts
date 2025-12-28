@@ -6,10 +6,22 @@
  * A lightweight reactive framework that compiles templates directly
  * to DOM operations without a virtual DOM intermediate.
  *
+ * Now with pluggable renderer architecture for multi-platform support:
+ * - Web (DOMRenderer) - Zero-cost direct DOM manipulation
+ * - Native (VirtualRenderer) - Abstract VDOM for iOS/Android
+ * - Test (VirtualRenderer) - Fast, deterministic testing
+ *
  * @example
- * // ESM
+ * // ESM (Web target - default)
  * import { Reflex } from 'reflex';
  * const app = new Reflex({ count: 0 });
+ *
+ * // Non-web target (Native/Test)
+ * import { Reflex } from 'reflex';
+ * import { VirtualRenderer } from 'reflex/renderers';
+ * const renderer = new VirtualRenderer();
+ * const app = new Reflex({ count: 0 }, { renderer });
+ * app.mount(renderer.getRoot());
  *
  * // CSP-safe mode
  * import { SafeExprParser } from 'reflex/csp';
@@ -39,3 +51,14 @@ export {
   UNSAFE_URL_RE,
   UNSAFE_EXPR_RE
 } from './core/symbols.js';
+
+// Renderer exports (for pluggable architecture)
+export { DOMRenderer, runTransition as runDOMTransition } from './renderers/dom.js';
+export { VirtualRenderer, createVirtualRenderer } from './renderers/virtual.js';
+export type {
+  IRendererAdapter,
+  IRendererMixin,
+  VNode,
+  TransitionConfig,
+  RendererOptions
+} from './renderers/types.js';

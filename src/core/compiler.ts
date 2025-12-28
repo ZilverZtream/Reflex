@@ -9,10 +9,18 @@
  * - Two-way binding (m-model)
  * - Text interpolation ({{ expr }})
  * - Transitions (m-trans)
+ *
+ * RENDERER ABSTRACTION:
+ * This module uses a pluggable renderer architecture. All DOM operations
+ * go through `this._ren` (the renderer adapter) to support:
+ * - Web targets (DOMRenderer - zero-cost browser DOM)
+ * - Native targets (VirtualRenderer - abstract VDOM)
+ * - Test environments (Mock rendering)
  */
 
 import { META, ITERATE, SKIP, UNSAFE_PROPS, UNSAFE_URL_RE } from './symbols.js';
 import { computeLIS, resolveDuplicateKey, reconcileKeyedList } from './reconcile.js';
+import type { IRendererAdapter } from '../renderers/types.js';
 
 // Basic HTML entity escaping for when DOMPurify is unavailable
 const escapeHTML = s => s.replace(/[&<>"']/g, c => ({
@@ -25,6 +33,10 @@ const escapeHTML = s => s.replace(/[&<>"']/g, c => ({
  * - {name}-enter-from, {name}-enter-active, {name}-enter-to
  * - {name}-leave-from, {name}-leave-active, {name}-leave-to
  *
+ * This function supports both direct DOM usage and the pluggable renderer.
+ * When a Reflex instance with a renderer is provided, it uses the renderer's
+ * animation frame and computed style methods.
+ *
  * @param el - The element to animate
  * @param name - Transition name (e.g., 'fade', 'slide')
  * @param type - 'enter' or 'leave'
@@ -36,11 +48,16 @@ export function runTransition(el, name, type, done, reflex?) {
   const active = `${name}-${type}-active`;
   const to = `${name}-${type}-to`;
 
+  // Get renderer from reflex instance if available
+  const renderer: IRendererAdapter | undefined = reflex?._ren;
+
   // Add initial classes
   el.classList.add(from, active);
 
-  // Force reflow to ensure initial state is applied
-  el.offsetHeight; // eslint-disable-line no-unused-expressions
+  // Force reflow to ensure initial state is applied (browser only)
+  if (typeof el.offsetHeight !== 'undefined') {
+    el.offsetHeight; // eslint-disable-line no-unused-expressions
+  }
 
   // Track cleanup state to prevent double execution
   let cleaned = false;
@@ -70,25 +87,32 @@ export function runTransition(el, name, type, done, reflex?) {
     reflex._reg(el, cleanup);
   }
 
+  // End handler
+  const onEnd = (e) => {
+    if (e.target !== el || cleaned) return;
+    cleanup();
+    if (done) done();
+  };
+
+  // Use renderer's requestAnimationFrame if available, otherwise use global
+  const raf = renderer?.requestAnimationFrame ?? requestAnimationFrame;
+
   // Next frame: start transition
-  requestAnimationFrame(() => {
+  raf(() => {
     if (cleaned) return; // Transition was cancelled before it started
 
     el.classList.remove(from);
     el.classList.add(to);
 
     // Listen for transition end
-    const onEnd = (e) => {
-      if (e.target !== el || cleaned) return;
-      cleanup();
-      if (done) done();
-    };
-
     el.addEventListener('transitionend', onEnd);
     el.addEventListener('animationend', onEnd);
 
+    // Use renderer's getComputedStyle if available, otherwise use global
+    const getStyle = renderer?.getComputedStyle ?? getComputedStyle;
+
     // Fallback timeout (in case transitionend doesn't fire)
-    const style = getComputedStyle(el);
+    const style = getStyle(el);
     const duration = parseFloat(style.transitionDuration) || parseFloat(style.animationDuration) || 0;
     const delay = parseFloat(style.transitionDelay) || parseFloat(style.animationDelay) || 0;
     const timeout = (duration + delay) * 1000 + 50; // Add 50ms buffer
@@ -241,8 +265,9 @@ export const CompilerMixin = {
   _dir_if(el, o) {
     const fn = this._fn(el.getAttribute('m-if'));
     const trans = el.getAttribute('m-trans');
-    const cm = document.createComment('if');
-    el.replaceWith(cm);
+    // Use renderer for DOM operations (supports both web and virtual targets)
+    const cm = this._ren.createComment('if');
+    this._ren.replaceWith(el, cm);
     let cur, leaving = false;
 
     // Check if the element is a template or component
@@ -429,8 +454,9 @@ export const CompilerMixin = {
     const keyIsProp = !!kAttr && /^[a-zA-Z_$][\w$]*$/.test(kAttr);
     const keyFn = (!kAttr || keyIsProp) ? null : this._fn(kAttr);
 
-    const cm = document.createComment('for');
-    el.replaceWith(cm);
+    // Use renderer for DOM operations (supports both web and virtual targets)
+    const cm = this._ren.createComment('for');
+    this._ren.replaceWith(el, cm);
     const tpl = el.cloneNode(true);
     tpl.removeAttribute('m-for');
     tpl.removeAttribute('m-key');
@@ -567,7 +593,7 @@ export const CompilerMixin = {
               // Create a wrapper using a custom element to contain template content
               // This acts as an "invisible" wrapper for reconciliation
               // Using 'rfx-tpl' custom element to avoid conflicts with normal element queries
-              const wrapper = document.createElement('rfx-tpl');
+              const wrapper = this._ren.createElement('rfx-tpl');
               wrapper.style.display = 'contents'; // Make wrapper invisible in layout
 
               // Clone and append all content nodes
@@ -599,8 +625,8 @@ export const CompilerMixin = {
             if (isSyncComp) {
               // For sync components, we need to insert the node first,
               // call _comp which replaces it, then track the instance
-              const tempMarker = document.createComment('comp');
-              cm.after(tempMarker);
+              const tempMarker = this._ren.createComment('comp');
+              this._ren.insertAfter(cm, tempMarker);
               tempMarker.after(node);
               const inst = this._comp(node, tag.toLowerCase(), scope);
               this._scopeMap.set(inst, scope);
@@ -608,8 +634,8 @@ export const CompilerMixin = {
               return inst;
             } else if (isAsyncComp) {
               // For async components, insert and let _asyncComp handle it
-              const tempMarker = document.createComment('async');
-              cm.after(tempMarker);
+              const tempMarker = this._ren.createComment('async');
+              this._ren.insertAfter(cm, tempMarker);
               tempMarker.after(node);
               this._asyncComp(node, tag.toLowerCase(), scope);
               // For async, we track the marker's next sibling (fallback or loaded component)
