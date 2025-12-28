@@ -18,7 +18,7 @@
  * - Test environments (Mock rendering)
  */
 
-import { META, ITERATE, SKIP, UNSAFE_PROPS, UNSAFE_URL_RE } from './symbols.js';
+import { META, ITERATE, SKIP, UNSAFE_PROPS, SAFE_URL_RE, RELATIVE_URL_RE } from './symbols.js';
 import { computeLIS, resolveDuplicateKey, reconcileKeyedList } from './reconcile.js';
 import type { IRendererAdapter } from '../renderers/types.js';
 
@@ -498,19 +498,13 @@ export const CompilerMixin = {
             processedItem = this._r(processedItem);
           }
 
-          // CRITICAL FIX: Use prototype chain for scope inheritance instead of Object.assign
-          // Object.assign copies properties, breaking dynamic lookup and wasting memory
-          // Prototype chain allows dynamic lookup of parent properties without copying
-          const base = {
-            [alias]: processedItem
-          };
+          // CRITICAL FIX: Use Object.create for scope inheritance (PERFORMANCE)
+          // Object.create is fast in V8; Object.setPrototypeOf is a de-optimization operation
+          // setPrototypeOf forces V8 to throw away optimizations for that object
+          // In a loop with 1000 items, setPrototypeOf creates a massive performance bottleneck
+          const base = o ? Object.create(o) : {};
+          base[alias] = processedItem;
           if (idxAlias) base[idxAlias] = index;
-
-          // Use prototype chain for inheritance
-          // This allows child scope to access parent properties dynamically
-          if (o) {
-            Object.setPrototypeOf(base, o);
-          }
 
           return this._r(base);
         },
@@ -793,10 +787,16 @@ export const CompilerMixin = {
       try {
         let v = fn(this.s, o);
 
-        // Security: validate URL protocols
-        if (isUrlAttr && v != null && typeof v === 'string' && UNSAFE_URL_RE.test(v)) {
-          console.warn('Reflex: Blocked unsafe URL protocol in', att + ':', v);
-          v = 'about:blank';
+        // SECURITY FIX: Validate URL protocols using allowlist instead of blocklist
+        // Only allow known-safe protocols (http, https, mailto, tel, etc.) and relative URLs
+        // Blocklist approach can be bypassed with HTML entities like jav&#x09;ascript:alert(1)
+        if (isUrlAttr && v != null && typeof v === 'string') {
+          // Allow relative URLs and safe protocols
+          const isSafe = RELATIVE_URL_RE.test(v) || SAFE_URL_RE.test(v);
+          if (!isSafe) {
+            console.warn('Reflex: Blocked unsafe URL protocol in', att + ':', v);
+            v = 'about:blank';
+          }
         }
 
         if (att === 'class') {
@@ -973,9 +973,11 @@ export const CompilerMixin = {
           // For multi-select, v should be an array of selected values
           const selectedValues = Array.isArray(v) ? v : [];
           // Update the selected options
+          // CRITICAL FIX: DOM option.value is always a string, but model data might contain numbers
+          // Use String() conversion to handle type coercion (e.g., [1, 2] should match <option value="1">)
           const options = el.options;
           for (let i = 0; i < options.length; i++) {
-            options[i].selected = selectedValues.includes(options[i].value);
+            options[i].selected = selectedValues.some(val => String(val) === options[i].value);
           }
         } else if (isNum) {
           // For number inputs, avoid cursor jumping by comparing loosely

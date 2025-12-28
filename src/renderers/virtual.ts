@@ -1280,13 +1280,16 @@ function serializeVNode(node: VNode, indent = 0): string {
     let attrs = '';
     if (node.attributes) {
       for (const [key, value] of node.attributes) {
-        attrs += ` ${key}="${value}"`;
+        // SECURITY: Escape double quotes to prevent XSS in SSR output
+        // Without escaping, title='"><script>alert(1)</script>' becomes: <div title=""><script>alert(1)</script>">
+        const escapedValue = String(value).replace(/"/g, '&quot;');
+        attrs += ` ${key}="${escapedValue}"`;
       }
     }
-    if (node.id) attrs += ` id="${node.id}"`;
-    if (node.className) attrs += ` class="${node.className}"`;
+    if (node.id) attrs += ` id="${String(node.id).replace(/"/g, '&quot;')}"`;
+    if (node.className) attrs += ` class="${String(node.className).replace(/"/g, '&quot;')}"`;
     const classList = node.classList?.toString();
-    if (classList && !node.className) attrs += ` class="${classList}"`;
+    if (classList && !node.className) attrs += ` class="${classList.replace(/"/g, '&quot;')}"`;
 
     // CRITICAL FIX: Use the single source of truth VOID_ELEMENTS Set
     // Previously used incomplete hardcoded array, missing: source, track, wbr, col, embed, etc.
