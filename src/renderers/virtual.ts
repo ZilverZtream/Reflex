@@ -31,6 +31,19 @@ const VOID_ELEMENTS = new Set([
 ]);
 
 /**
+ * Raw text elements - these elements should NOT have their content parsed as HTML.
+ * Their content is treated as raw text until the closing tag is found.
+ * See: https://html.spec.whatwg.org/multipage/syntax.html#raw-text-elements
+ */
+const RAW_TEXT_ELEMENTS = new Set(['script', 'style']);
+
+/**
+ * Escapable raw text elements - similar to raw text, but certain entities are decoded.
+ * See: https://html.spec.whatwg.org/multipage/syntax.html#escapable-raw-text-elements
+ */
+const ESCAPABLE_RAW_TEXT_ELEMENTS = new Set(['title', 'textarea']);
+
+/**
  * Parse an HTML string into a virtual DOM tree.
  * Handles nested elements, attributes, text nodes, and comments.
  */
@@ -149,13 +162,84 @@ function parseHTML(html: string): VNode[] {
 
         // Handle void elements and self-closing tags
         if (!selfClosing && !VOID_ELEMENTS.has(tagName)) {
-          stack.push({ node: elemNode, tagName });
+          // CRITICAL FIX: Handle raw text elements (script, style, title, textarea)
+          // Their content should NOT be parsed as HTML - it's treated as raw text
+          if (RAW_TEXT_ELEMENTS.has(tagName) || ESCAPABLE_RAW_TEXT_ELEMENTS.has(tagName)) {
+            // Find the closing tag for this element (case-insensitive)
+            const closingTagPattern = new RegExp(`</${tagName}>`, 'i');
+            const closingMatch = html.slice(pos).match(closingTagPattern);
+
+            if (closingMatch && closingMatch.index !== undefined) {
+              // Extract raw content between opening and closing tag
+              const rawContent = html.slice(pos, pos + closingMatch.index);
+
+              if (rawContent) {
+                // For escapable raw text elements, decode basic HTML entities
+                let textContent = rawContent;
+                if (ESCAPABLE_RAW_TEXT_ELEMENTS.has(tagName)) {
+                  textContent = rawContent
+                    .replace(/&lt;/g, '<')
+                    .replace(/&gt;/g, '>')
+                    .replace(/&amp;/g, '&')
+                    .replace(/&quot;/g, '"')
+                    .replace(/&#39;/g, "'")
+                    .replace(/&nbsp;/g, '\u00A0');
+                }
+
+                // Add raw content as a single text node
+                const textNode = createVNode(TEXT_NODE, undefined, textContent);
+                textNode.parentNode = elemNode;
+                elemNode.childNodes.push(textNode);
+              }
+
+              // Move position past the closing tag
+              pos = pos + closingMatch.index + closingMatch[0].length;
+              updateRelationships(elemNode);
+            } else {
+              // No closing tag found - treat rest of content as raw text
+              const remainingContent = html.slice(pos);
+              if (remainingContent) {
+                const textNode = createVNode(TEXT_NODE, undefined, remainingContent);
+                textNode.parentNode = elemNode;
+                elemNode.childNodes.push(textNode);
+              }
+              pos = len;
+              updateRelationships(elemNode);
+            }
+          } else {
+            // Normal elements - push to stack for recursive parsing
+            stack.push({ node: elemNode, tagName });
+          }
         } else {
           updateRelationships(elemNode);
         }
 
         continue;
       }
+
+      // CRITICAL FIX: If '<' is not followed by a valid tag, treat it as text content
+      // Previously, this would skip the '<' entirely, losing data (e.g., "1 < 2" became "1  2")
+      // Now we find the next potential tag and include the '<' in the text content
+      const nextPotentialTag = html.slice(pos + 1).search(/<(?:[a-zA-Z/!]|$)/);
+      const textEnd = nextPotentialTag === -1 ? len : pos + 1 + nextPotentialTag;
+      const text = html.slice(pos, textEnd);
+
+      if (text) {
+        // Decode basic HTML entities
+        const decodedText = text
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .replace(/&amp;/g, '&')
+          .replace(/&quot;/g, '"')
+          .replace(/&#39;/g, "'")
+          .replace(/&nbsp;/g, '\u00A0');
+
+        const textNode = createVNode(TEXT_NODE, undefined, decodedText);
+        addNode(textNode);
+      }
+
+      pos = textEnd;
+      continue;
     }
 
     // Text content - find the next tag
@@ -177,8 +261,7 @@ function parseHTML(html: string): VNode[] {
       addNode(textNode);
     }
 
-    // Advance position - if textEnd === pos, skip the invalid '<' to prevent infinite loop
-    pos = textEnd === pos ? pos + 1 : textEnd;
+    pos = textEnd;
   }
 
   // Close any remaining open tags
