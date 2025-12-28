@@ -48,6 +48,11 @@ export interface VNode {
     add: (...classes: string[]) => void;
     remove: (...classes: string[]) => void;
     contains: (cls: string) => boolean;
+    toggle: (cls: string, force?: boolean) => boolean;
+    toString: () => string;
+    length: number;
+    item: (index: number) => string | null;
+    [Symbol.iterator]: () => IterableIterator<string>;
   };
   /** Is element connected to a root */
   isConnected?: boolean;

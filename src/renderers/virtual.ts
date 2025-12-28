@@ -24,6 +24,169 @@ const COMMENT_NODE = 8;
 /** Counter for unique node IDs */
 let nodeIdCounter = 0;
 
+/** Self-closing HTML tags */
+const VOID_ELEMENTS = new Set([
+  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+  'link', 'meta', 'param', 'source', 'track', 'wbr'
+]);
+
+/**
+ * Parse an HTML string into a virtual DOM tree.
+ * Handles nested elements, attributes, text nodes, and comments.
+ */
+function parseHTML(html: string): VNode[] {
+  const nodes: VNode[] = [];
+  let pos = 0;
+  const len = html.length;
+
+  // Stack of open elements for nesting
+  const stack: { node: VNode; tagName: string }[] = [];
+
+  function currentParent(): VNode[] {
+    return stack.length > 0 ? stack[stack.length - 1].node.childNodes : nodes;
+  }
+
+  function addNode(node: VNode): void {
+    const parent = currentParent();
+    parent.push(node);
+    if (stack.length > 0) {
+      node.parentNode = stack[stack.length - 1].node;
+    }
+  }
+
+  while (pos < len) {
+    // Check for comment
+    if (html.slice(pos, pos + 4) === '<!--') {
+      const endComment = html.indexOf('-->', pos + 4);
+      if (endComment !== -1) {
+        const commentText = html.slice(pos + 4, endComment);
+        const commentNode = createVNode(COMMENT_NODE, undefined, commentText);
+        addNode(commentNode);
+        pos = endComment + 3;
+        continue;
+      }
+    }
+
+    // Check for tag
+    if (html[pos] === '<') {
+      // Closing tag
+      if (html[pos + 1] === '/') {
+        const closeEnd = html.indexOf('>', pos);
+        if (closeEnd !== -1) {
+          const closingTag = html.slice(pos + 2, closeEnd).trim().toLowerCase();
+          // Pop from stack until we find the matching tag
+          while (stack.length > 0) {
+            const top = stack.pop()!;
+            updateRelationships(top.node);
+            if (top.tagName === closingTag) break;
+          }
+          pos = closeEnd + 1;
+          continue;
+        }
+      }
+
+      // Opening tag
+      const tagMatch = html.slice(pos).match(/^<([a-zA-Z][\w-]*)/);
+      if (tagMatch) {
+        const tagName = tagMatch[1].toLowerCase();
+        pos += tagMatch[0].length;
+
+        // Parse attributes
+        const attrs: [string, string][] = [];
+        let selfClosing = false;
+
+        // Skip whitespace and parse attributes until > or />
+        while (pos < len) {
+          // Skip whitespace
+          while (pos < len && /\s/.test(html[pos])) pos++;
+
+          // Check for end of tag
+          if (html[pos] === '>') {
+            pos++;
+            break;
+          }
+          if (html.slice(pos, pos + 2) === '/>') {
+            selfClosing = true;
+            pos += 2;
+            break;
+          }
+
+          // Parse attribute
+          const attrMatch = html.slice(pos).match(/^([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/);
+          if (attrMatch) {
+            const attrName = attrMatch[1];
+            const attrValue = attrMatch[2] ?? attrMatch[3] ?? attrMatch[4] ?? '';
+            attrs.push([attrName, attrValue]);
+            pos += attrMatch[0].length;
+          } else {
+            pos++; // Skip invalid character
+          }
+        }
+
+        // Create element node
+        const elemNode = createVNode(ELEMENT_NODE, tagName);
+        for (const [name, value] of attrs) {
+          elemNode.attributes!.set(name, value);
+          if (name === 'id') elemNode.id = value;
+          if (name === 'class') {
+            elemNode.className = value;
+            value.split(/\s+/).filter(Boolean).forEach(cls => elemNode.classList!.add(cls));
+          }
+          if (name === 'value') elemNode.value = value;
+          if (name === 'type') elemNode.type = value;
+          if (name === 'checked') elemNode.checked = true;
+        }
+
+        addNode(elemNode);
+
+        // Handle void elements and self-closing tags
+        if (!selfClosing && !VOID_ELEMENTS.has(tagName)) {
+          stack.push({ node: elemNode, tagName });
+        } else {
+          updateRelationships(elemNode);
+        }
+
+        continue;
+      }
+    }
+
+    // Text content - find the next tag
+    const nextTag = html.indexOf('<', pos);
+    const textEnd = nextTag === -1 ? len : nextTag;
+    const text = html.slice(pos, textEnd);
+
+    if (text.trim() || (text && stack.length > 0)) {
+      // Decode basic HTML entities
+      const decodedText = text
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&nbsp;/g, '\u00A0');
+
+      const textNode = createVNode(TEXT_NODE, undefined, decodedText);
+      addNode(textNode);
+    }
+
+    pos = textEnd;
+  }
+
+  // Close any remaining open tags
+  while (stack.length > 0) {
+    const top = stack.pop()!;
+    updateRelationships(top.node);
+  }
+
+  // Update relationships for top-level nodes
+  for (let i = 0; i < nodes.length; i++) {
+    nodes[i].previousSibling = nodes[i - 1] ?? null;
+    nodes[i].nextSibling = nodes[i + 1] ?? null;
+  }
+
+  return nodes;
+}
+
 /**
  * Create a virtual node with the standard DOM-like interface.
  * Includes DOM-like methods for compatibility with CompilerMixin.
@@ -46,10 +209,7 @@ function createVNode(
     isConnected: false,
     props: {},
     _listeners: new Map(),
-    style: {
-      display: '',
-      cssText: ''
-    },
+    style: createStyleObject(),
     classList: createClassList()
   };
 
@@ -120,6 +280,22 @@ function createVNode(
       for (const n of nodes) {
         updateConnected(n, parent.isConnected ?? false);
       }
+    };
+
+    (node as any).insertBefore = function(newChild: VNode, refChild: VNode | null): VNode {
+      if (!refChild) {
+        this.childNodes.push(newChild);
+      } else {
+        const index = this.childNodes.indexOf(refChild);
+        if (index === -1) {
+          this.childNodes.push(newChild);
+        } else {
+          this.childNodes.splice(index, 0, newChild);
+        }
+      }
+      updateRelationships(this);
+      updateConnected(newChild, this.isConnected ?? false);
+      return newChild;
     };
 
     (node as any).appendChild = function(child: VNode): VNode {
@@ -233,6 +409,144 @@ function createVNode(
 }
 
 /**
+ * Parse a CSS string into a map of property-value pairs.
+ * Handles both camelCase and kebab-case property names.
+ */
+function parseCSSText(cssText: string): Map<string, string> {
+  const props = new Map<string, string>();
+  if (!cssText) return props;
+
+  // Split by semicolons, handling potential edge cases
+  const declarations = cssText.split(';');
+  for (const decl of declarations) {
+    const trimmed = decl.trim();
+    if (!trimmed) continue;
+
+    const colonIdx = trimmed.indexOf(':');
+    if (colonIdx === -1) continue;
+
+    const prop = trimmed.slice(0, colonIdx).trim();
+    const value = trimmed.slice(colonIdx + 1).trim();
+    if (prop && value) {
+      // Store both kebab-case and camelCase versions
+      props.set(prop, value);
+
+      // Convert kebab-case to camelCase for JS access
+      const camelCase = prop.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      if (camelCase !== prop) {
+        props.set(camelCase, value);
+      }
+    }
+  }
+  return props;
+}
+
+/**
+ * Convert a map of CSS properties back to cssText string.
+ */
+function serializeCSSText(props: Map<string, string>): string {
+  const seen = new Set<string>();
+  let result = '';
+
+  for (const [prop, value] of props) {
+    // Skip camelCase duplicates (only output kebab-case)
+    const kebabCase = prop.replace(/([A-Z])/g, '-$1').toLowerCase();
+    if (seen.has(kebabCase)) continue;
+    seen.add(kebabCase);
+
+    if (result) result += ' ';
+    result += `${kebabCase}: ${value};`;
+  }
+  return result;
+}
+
+/**
+ * Create a reactive style object for virtual nodes.
+ * Properly parses and tracks CSS properties.
+ */
+function createStyleObject(): Record<string, any> {
+  const props = new Map<string, string>();
+  let cachedCssText = '';
+
+  // Create a proxy to handle dynamic property access
+  const handler: ProxyHandler<object> = {
+    get(target, prop: string) {
+      if (prop === 'cssText') {
+        return cachedCssText;
+      }
+      if (prop === 'setProperty') {
+        return (name: string, value: string) => {
+          if (value === null || value === '') {
+            props.delete(name);
+            const camelCase = name.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+            props.delete(camelCase);
+          } else {
+            props.set(name, value);
+            const camelCase = name.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+            if (camelCase !== name) props.set(camelCase, value);
+          }
+          cachedCssText = serializeCSSText(props);
+        };
+      }
+      if (prop === 'getPropertyValue') {
+        return (name: string) => props.get(name) ?? '';
+      }
+      if (prop === 'removeProperty') {
+        return (name: string) => {
+          const value = props.get(name);
+          props.delete(name);
+          const camelCase = name.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+          props.delete(camelCase);
+          cachedCssText = serializeCSSText(props);
+          return value ?? '';
+        };
+      }
+      // Return the property value or empty string
+      return props.get(prop) ?? '';
+    },
+    set(target, prop: string, value: string) {
+      if (prop === 'cssText') {
+        // Parse the entire cssText and update all properties
+        props.clear();
+        const parsed = parseCSSText(value);
+        for (const [k, v] of parsed) {
+          props.set(k, v);
+        }
+        cachedCssText = value;
+        return true;
+      }
+      // Setting individual property
+      if (value === null || value === '' || value === undefined) {
+        props.delete(prop);
+        const kebabCase = prop.replace(/([A-Z])/g, '-$1').toLowerCase();
+        props.delete(kebabCase);
+      } else {
+        props.set(prop, value);
+        // Also store kebab-case version
+        const kebabCase = prop.replace(/([A-Z])/g, '-$1').toLowerCase();
+        if (kebabCase !== prop) props.set(kebabCase, value);
+      }
+      cachedCssText = serializeCSSText(props);
+      return true;
+    },
+    has(target, prop: string) {
+      return prop === 'cssText' || props.has(prop);
+    },
+    ownKeys(): (string | symbol)[] {
+      return ['cssText', ...Array.from(props.keys())];
+    },
+    getOwnPropertyDescriptor(target, prop: string | symbol) {
+      if (typeof prop === 'string' && (prop === 'cssText' || props.has(prop))) {
+        return { enumerable: true, configurable: true, writable: true };
+      }
+      return undefined;
+    }
+  };
+
+  return new Proxy({}, handler);
+}
+
+/**
  * Create a classList-like object for virtual nodes.
  */
 function createClassList() {
@@ -328,9 +642,9 @@ function cloneVNode(node: VNode, deep = true): VNode {
     clone.props = { ...node.props };
   }
 
-  // Clone style
-  if (node.style) {
-    clone.style = { ...node.style };
+  // Clone style - copy cssText to properly initialize the new reactive style object
+  if (node.style && node.style.cssText) {
+    clone.style.cssText = node.style.cssText;
   }
 
   // Clone class list
@@ -366,68 +680,367 @@ function cloneVNode(node: VNode, deep = true): VNode {
 }
 
 /**
- * Simple CSS selector matcher for virtual nodes.
- * Supports: tag, #id, .class, [attr], [attr="value"]
+ * Parse a simple selector (no combinators) into parts.
+ * Returns null if invalid.
+ */
+interface SimpleSelectorParts {
+  tag?: string;
+  id?: string;
+  classes: string[];
+  attrs: { name: string; op?: string; value?: string }[];
+  pseudos: { name: string; arg?: string }[];
+}
+
+function parseSimpleSelector(selector: string): SimpleSelectorParts | null {
+  const parts: SimpleSelectorParts = { classes: [], attrs: [], pseudos: [] };
+  let pos = 0;
+  const len = selector.length;
+
+  while (pos < len) {
+    const char = selector[pos];
+
+    // Tag name (must be first if present)
+    if (pos === 0 && /[a-zA-Z*]/.test(char)) {
+      const match = selector.slice(pos).match(/^([a-zA-Z][\w-]*|\*)/);
+      if (match) {
+        parts.tag = match[1] === '*' ? '*' : match[1].toUpperCase();
+        pos += match[0].length;
+        continue;
+      }
+    }
+
+    // ID selector
+    if (char === '#') {
+      const match = selector.slice(pos + 1).match(/^[\w-]+/);
+      if (match) {
+        parts.id = match[0];
+        pos += match[0].length + 1;
+        continue;
+      }
+    }
+
+    // Class selector
+    if (char === '.') {
+      const match = selector.slice(pos + 1).match(/^[\w-]+/);
+      if (match) {
+        parts.classes.push(match[0]);
+        pos += match[0].length + 1;
+        continue;
+      }
+    }
+
+    // Attribute selector
+    if (char === '[') {
+      const closeIdx = selector.indexOf(']', pos);
+      if (closeIdx !== -1) {
+        const attrContent = selector.slice(pos + 1, closeIdx);
+        const attrMatch = attrContent.match(/^([\w-]+)(?:([~|^$*]?=)["']?([^"'\]]+)["']?)?$/);
+        if (attrMatch) {
+          parts.attrs.push({
+            name: attrMatch[1],
+            op: attrMatch[2],
+            value: attrMatch[3]
+          });
+        }
+        pos = closeIdx + 1;
+        continue;
+      }
+    }
+
+    // Pseudo-class
+    if (char === ':') {
+      const match = selector.slice(pos + 1).match(/^([\w-]+)(?:\(([^)]*)\))?/);
+      if (match) {
+        parts.pseudos.push({
+          name: match[1],
+          arg: match[2]
+        });
+        pos += match[0].length + 1;
+        continue;
+      }
+    }
+
+    pos++;
+  }
+
+  return parts;
+}
+
+/**
+ * Check if a node matches a simple selector (no combinators).
+ */
+function matchesSimpleSelector(node: VNode, parts: SimpleSelectorParts): boolean {
+  if (node.nodeType !== ELEMENT_NODE) return false;
+
+  // Check tag
+  if (parts.tag && parts.tag !== '*' && node.tagName !== parts.tag) {
+    return false;
+  }
+
+  // Check ID
+  if (parts.id && node.id !== parts.id) {
+    return false;
+  }
+
+  // Check classes
+  for (const cls of parts.classes) {
+    if (!node.classList?.contains(cls)) {
+      return false;
+    }
+  }
+
+  // Check attributes
+  for (const attr of parts.attrs) {
+    const nodeValue = node.attributes?.get(attr.name);
+    if (!attr.op) {
+      // Presence check
+      if (nodeValue === undefined && !node.attributes?.has(attr.name)) {
+        return false;
+      }
+    } else if (attr.op === '=') {
+      if (nodeValue !== attr.value) return false;
+    } else if (attr.op === '~=') {
+      // Contains word
+      if (!nodeValue?.split(/\s+/).includes(attr.value!)) return false;
+    } else if (attr.op === '|=') {
+      // Starts with or equals
+      if (nodeValue !== attr.value && !nodeValue?.startsWith(attr.value + '-')) return false;
+    } else if (attr.op === '^=') {
+      // Starts with
+      if (!nodeValue?.startsWith(attr.value!)) return false;
+    } else if (attr.op === '$=') {
+      // Ends with
+      if (!nodeValue?.endsWith(attr.value!)) return false;
+    } else if (attr.op === '*=') {
+      // Contains
+      if (!nodeValue?.includes(attr.value!)) return false;
+    }
+  }
+
+  // Check pseudo-classes
+  for (const pseudo of parts.pseudos) {
+    if (!matchesPseudoClass(node, pseudo.name, pseudo.arg)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Check if a node matches a pseudo-class.
+ */
+function matchesPseudoClass(node: VNode, name: string, arg?: string): boolean {
+  const parent = node.parentNode;
+  if (!parent) return false;
+
+  const siblings = parent.childNodes.filter(n => n.nodeType === ELEMENT_NODE);
+  const index = siblings.indexOf(node);
+
+  switch (name) {
+    case 'first-child':
+      return index === 0;
+
+    case 'last-child':
+      return index === siblings.length - 1;
+
+    case 'only-child':
+      return siblings.length === 1;
+
+    case 'nth-child': {
+      if (!arg) return false;
+      return matchesNth(index + 1, arg);
+    }
+
+    case 'nth-last-child': {
+      if (!arg) return false;
+      return matchesNth(siblings.length - index, arg);
+    }
+
+    case 'first-of-type': {
+      const sameType = siblings.filter(n => n.tagName === node.tagName);
+      return sameType[0] === node;
+    }
+
+    case 'last-of-type': {
+      const sameType = siblings.filter(n => n.tagName === node.tagName);
+      return sameType[sameType.length - 1] === node;
+    }
+
+    case 'nth-of-type': {
+      if (!arg) return false;
+      const sameType = siblings.filter(n => n.tagName === node.tagName);
+      const typeIndex = sameType.indexOf(node);
+      return matchesNth(typeIndex + 1, arg);
+    }
+
+    case 'empty':
+      return node.childNodes.length === 0 ||
+             node.childNodes.every(c =>
+               c.nodeType === TEXT_NODE && !c.nodeValue?.trim()
+             );
+
+    case 'not': {
+      if (!arg) return true;
+      const notParts = parseSimpleSelector(arg);
+      return notParts ? !matchesSimpleSelector(node, notParts) : true;
+    }
+
+    default:
+      return true; // Unknown pseudo-classes pass by default
+  }
+}
+
+/**
+ * Match nth-child formula (e.g., "odd", "even", "3", "2n+1").
+ */
+function matchesNth(pos: number, formula: string): boolean {
+  formula = formula.trim().toLowerCase();
+
+  if (formula === 'odd') return pos % 2 === 1;
+  if (formula === 'even') return pos % 2 === 0;
+
+  // Simple number
+  const simpleNum = parseInt(formula, 10);
+  if (!isNaN(simpleNum) && formula === String(simpleNum)) {
+    return pos === simpleNum;
+  }
+
+  // an+b formula
+  const match = formula.match(/^(-?\d*)?n([+-]\d+)?$/);
+  if (match) {
+    const a = match[1] === '' || match[1] === undefined ? 1 :
+              match[1] === '-' ? -1 : parseInt(match[1], 10);
+    const b = match[2] ? parseInt(match[2], 10) : 0;
+
+    if (a === 0) return pos === b;
+    return (pos - b) % a === 0 && (pos - b) / a >= 0;
+  }
+
+  return false;
+}
+
+/**
+ * Parse a selector into parts with combinators.
+ */
+interface SelectorPart {
+  selector: SimpleSelectorParts;
+  combinator?: ' ' | '>' | '+' | '~';
+}
+
+function parseSelectorWithCombinators(selector: string): SelectorPart[] {
+  const parts: SelectorPart[] = [];
+  let lastCombinator: ' ' | '>' | '+' | '~' | undefined;
+
+  // Normalize whitespace around combinators
+  const normalized = selector
+    .replace(/\s*>\s*/g, ' > ')
+    .replace(/\s*\+\s*/g, ' + ')
+    .replace(/\s*~\s*/g, ' ~ ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const tokens = normalized.split(' ');
+
+  for (const token of tokens) {
+    if (token === '>') {
+      lastCombinator = '>';
+    } else if (token === '+') {
+      lastCombinator = '+';
+    } else if (token === '~') {
+      lastCombinator = '~';
+    } else if (token) {
+      const parsed = parseSimpleSelector(token);
+      if (parsed) {
+        parts.push({
+          selector: parsed,
+          combinator: lastCombinator ?? (parts.length > 0 ? ' ' : undefined)
+        });
+      }
+      lastCombinator = undefined;
+    }
+  }
+
+  return parts;
+}
+
+/**
+ * CSS selector matcher for virtual nodes.
+ * Supports: tag, #id, .class, [attr], [attr="value"],
+ * descendant combinator (space), child combinator (>),
+ * adjacent sibling (+), general sibling (~),
+ * and pseudo-classes (:first-child, :nth-child, etc.)
  */
 function matchesSelector(node: VNode, selector: string): boolean {
   if (node.nodeType !== ELEMENT_NODE) return false;
 
+  // Handle comma-separated selectors (OR)
   const selectors = selector.split(',').map(s => s.trim());
 
   for (const sel of selectors) {
-    // Tag selector
-    if (/^[a-zA-Z][\w-]*$/.test(sel)) {
-      if (node.tagName === sel.toUpperCase()) return true;
-      continue;
-    }
+    const parts = parseSelectorWithCombinators(sel);
+    if (parts.length === 0) continue;
 
-    // ID selector
-    if (sel.startsWith('#')) {
-      if (node.id === sel.slice(1)) return true;
-      continue;
-    }
-
-    // Class selector
-    if (sel.startsWith('.')) {
-      if (node.classList?.contains(sel.slice(1))) return true;
-      continue;
-    }
-
-    // Attribute selector
-    const attrMatch = sel.match(/^\[([^\]=]+)(?:="([^"]*)")?\]$/);
-    if (attrMatch) {
-      const [, attr, value] = attrMatch;
-      if (value !== undefined) {
-        if (node.attributes?.get(attr) === value) return true;
-      } else {
-        if (node.attributes?.has(attr)) return true;
-      }
-      continue;
-    }
-
-    // Compound selector (e.g., "tag.class", "tag#id")
-    const parts = sel.match(/^([a-zA-Z][\w-]*)?(#[\w-]+)?((?:\.[\w-]+)*)$/);
-    if (parts) {
-      const [, tag, id, classes] = parts;
-      let matches = true;
-
-      if (tag && node.tagName !== tag.toUpperCase()) matches = false;
-      if (id && node.id !== id.slice(1)) matches = false;
-      if (classes) {
-        const classList = classes.split('.').filter(Boolean);
-        for (const cls of classList) {
-          if (!node.classList?.contains(cls)) {
-            matches = false;
-            break;
-          }
-        }
-      }
-
-      if (matches) return true;
+    // Match from right to left
+    if (matchesSelectorParts(node, parts, parts.length - 1)) {
+      return true;
     }
   }
 
   return false;
+}
+
+/**
+ * Match selector parts recursively from right to left.
+ */
+function matchesSelectorParts(node: VNode, parts: SelectorPart[], index: number): boolean {
+  if (index < 0) return true;
+
+  const part = parts[index];
+  if (!matchesSimpleSelector(node, part.selector)) {
+    return false;
+  }
+
+  // If this is the first part (leftmost), we're done
+  if (index === 0) return true;
+
+  const prevPart = parts[index];
+  const combinator = prevPart.combinator;
+
+  if (combinator === '>') {
+    // Direct parent
+    const parent = node.parentNode;
+    return parent !== null && matchesSelectorParts(parent, parts, index - 1);
+  } else if (combinator === '+') {
+    // Adjacent sibling - find previous element sibling
+    let prevElem = node.previousSibling;
+    while (prevElem && prevElem.nodeType !== ELEMENT_NODE) {
+      prevElem = prevElem.previousSibling;
+    }
+    return prevElem !== null &&
+           matchesSelectorParts(prevElem, parts, index - 1);
+  } else if (combinator === '~') {
+    // General sibling
+    let sibling = node.previousSibling;
+    while (sibling) {
+      if (sibling.nodeType === ELEMENT_NODE &&
+          matchesSelectorParts(sibling, parts, index - 1)) {
+        return true;
+      }
+      sibling = sibling.previousSibling;
+    }
+    return false;
+  } else {
+    // Descendant (space)
+    let ancestor = node.parentNode;
+    while (ancestor) {
+      if (matchesSelectorParts(ancestor, parts, index - 1)) {
+        return true;
+      }
+      ancestor = ancestor.parentNode;
+    }
+    return false;
+  }
 }
 
 /**
@@ -559,15 +1172,16 @@ export class VirtualRenderer implements IRendererAdapter {
       node.content = createVNode(ELEMENT_NODE, 'fragment');
       node.content.isConnected = false;
 
-      // Define innerHTML setter to parse content
+      // Define innerHTML setter to parse content using real HTML parser
       Object.defineProperty(node, 'innerHTML', {
         set(html: string) {
-          // Simple HTML parsing for templates
+          // Parse HTML string into virtual DOM nodes
           node.content!.childNodes = [];
-          // In a real implementation, you'd parse the HTML
-          // For now, store as a text node
-          const textNode = createVNode(TEXT_NODE, undefined, html);
-          node.content!.childNodes.push(textNode);
+          const parsedNodes = parseHTML(html);
+          for (const child of parsedNodes) {
+            child.parentNode = node.content!;
+            node.content!.childNodes.push(child);
+          }
           updateRelationships(node.content!);
         },
         get() {
