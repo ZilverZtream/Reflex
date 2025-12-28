@@ -112,7 +112,10 @@ function parseHTML(html: string): VNode[] {
           }
 
           // Parse attribute - handle escaped quotes in values
-          const attrMatch = html.slice(pos).match(/^([^\s=/>]+)(?:\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|([^\s>]+)))?/);
+          // CRITICAL FIX: Use ([^\s/>]+) for unquoted values instead of ([^\s>]+)
+          // Previously, unquoted values consumed the trailing slash in self-closing tags
+          // e.g., <div val=1/> would capture "1/" as the value, breaking the /> detection
+          const attrMatch = html.slice(pos).match(/^([^\s=/>]+)(?:\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|([^\s/>]+)))?/);
           if (attrMatch) {
             const attrName = attrMatch[1];
             // Unescape quotes in attribute values
@@ -254,6 +257,29 @@ function createVNode(
       configurable: true
     });
 
+    // CRITICAL FIX: textContent must update childNodes like real DOM
+    // Previously missing, causing m-text directive to fail silently
+    // Setting textContent would just add a plain property, not update children
+    Object.defineProperty(node, 'textContent', {
+      get() {
+        // For element nodes, recursively get text content of all children
+        return node.childNodes.map(child => {
+          if (child.nodeType === TEXT_NODE) {
+            return child.nodeValue ?? '';
+          }
+          // Recursively get textContent from element children
+          return (child as any).textContent ?? '';
+        }).join('');
+      },
+      set(text: string) {
+        // Clear existing childNodes and insert a single TEXT_NODE
+        node.childNodes = [createVNode(TEXT_NODE, undefined, String(text))];
+        updateRelationships(node);
+      },
+      enumerable: true,
+      configurable: true
+    });
+
     // CRITICAL FIX: innerHTML must parse HTML content into childNodes
     // Previously only templates had this behavior, causing "ghost content" bug
     // where m-html would set innerHTML but childNodes remained empty
@@ -293,6 +319,13 @@ function createVNode(
       if (name === 'id') this.id = value;
       if (name === 'class') this.className = value;
       if (name === 'value') this.value = value;
+      // CRITICAL FIX: Sync boolean attributes to properties
+      // Previously only 'value' was synced, causing el.checked to remain undefined
+      // even after setAttribute('checked', 'true') was called
+      if (name === 'checked') this.checked = value !== null && value !== 'false';
+      if (name === 'disabled') this.disabled = value !== null && value !== 'false';
+      if (name === 'readonly') this.readOnly = value !== null && value !== 'false';
+      if (name === 'selected') this.selected = value !== null && value !== 'false';
     };
 
     (node as any).removeAttribute = function(name: string): void {
