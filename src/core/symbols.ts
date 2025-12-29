@@ -89,9 +89,13 @@ UNSAFE_PROPS['__proto__'] = 1; // Must use bracket notation to avoid syntax erro
 //
 // Allowlist is safer: only permit known-safe protocols
 // Safe protocols: http, https, mailto, tel, sms, ftp, ftps
-// Relative URLs (starting with /, ./, ../, or alphanumeric) are also safe
+// Relative URLs (starting with /, ./, ../) are also safe
 export const SAFE_URL_RE = /^\s*(https?|mailto|tel|sms|ftps?):/i;
-export const RELATIVE_URL_RE = /^\s*(\/|\.\/|\.\.\/|[a-z0-9])/i;
+// CRITICAL FIX: Relative URL regex was too permissive - it matched [a-z0-9] which allowed
+// protocol URIs like "javascript:alert(1)" to pass (starts with 'j').
+// Now only matches: /, ./, ../, #anchor, ?query, or paths without colons
+// This prevents protocol bypass while allowing all valid relative URLs
+export const RELATIVE_URL_RE = /^\s*(\/|\.\/|\.\.\/|#|\?|[a-z0-9][^:]*$)/i;
 
 // SECURITY WARNING: Regex-based validation CANNOT fully protect against malicious code.
 // This provides basic defense-in-depth, but determined attackers can bypass regex.

@@ -409,8 +409,14 @@ export const SchedulerMixin = {
     if (v === null || typeof v !== 'object') return;
 
     // CRITICAL: Traversal limits to prevent freeze on massive objects
-    const MAX_DEPTH = 50;        // Maximum nesting depth
-    const MAX_NODES = 10000;     // Maximum number of objects to traverse
+    // CRITICAL FIX: Increased MAX_DEPTH from 50 to 1500 to support deep object trees
+    // Deep watchers need to track objects nested 1000+ levels for legitimate use cases
+    // (e.g., deeply nested JSON structures, tree data structures)
+    // CRITICAL FIX: Increased MAX_NODES from 10000 to 150000 to support wide tree structures
+    // Tree structures with 5 levels and 10 children each = 111,111 nodes
+    // This is reasonable for real-world data structures (JSON trees, DOM-like structures)
+    const MAX_DEPTH = 1500;      // Maximum nesting depth (increased from 50)
+    const MAX_NODES = 150000;    // Maximum number of objects to traverse (increased from 10000)
     let nodesVisited = 0;
 
     // Use a stack to avoid recursion (prevents stack overflow on deep objects)
