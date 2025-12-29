@@ -163,6 +163,7 @@ export class Reflex {
     this._parser = null;      // CSP parser (lazy-loaded)
     this._plugins = new Set(); // Installed plugins (per-instance)
     this._m = false;          // Mounted flag (prevents double-mount)
+    this._fileInputsWarned = new WeakSet(); // Track file inputs that have been warned (prevents spam)
 
     // === CONFIGURATION ===
     // SECURITY: Secure by default - sanitization is enabled by default

@@ -611,7 +611,12 @@ export const ReactivityMixin = {
       }
       const s = m.d.get(k);
       if (s) {
-        for (const e of s) {
+        // CRITICAL FIX: Snapshot the set before iteration to prevent live modification issues
+        // If an effect modifies the dependency state during execution, the set could be
+        // modified mid-iteration, causing unpredictable behavior or infinite loops
+        // Snapshotting ensures stable, predictable execution order
+        const effects = new Set(s);
+        for (const e of effects) {
           if (e.f & ACTIVE && !(e.f & RUNNING)) {
             e.s ? e.s(e) : this.queueJob(e);
           }

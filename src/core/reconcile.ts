@@ -268,14 +268,18 @@ export function reconcileKeyedList({
  * Including the index causes keys to change when the list is reordered, which
  * defeats the purpose of keyed reconciliation and forces full DOM recreation.
  *
- * CRITICAL FIX: Use unique Symbol-based namespace to prevent user key collisions.
+ * CRITICAL FIX: Use unique Symbol-based keys to prevent collisions.
  * The previous format `__dup_${counter}_${key}` was predictable and could collide
  * with user keys. For example:
  * - Item A has key="foo" (duplicates to __dup_1_foo)
  * - Item B has key="foo" (duplicates to __dup_2_foo)
  * - User adds Item C with key="__dup_1_foo" → COLLISION! Item B disappears
  *
- * Solution: Use Symbol.for() with a reserved namespace that users can't create.
+ * CRITICAL FIX: Use Symbol() instead of Symbol.for() to prevent global collisions
+ * Symbol.for() creates global symbols that can collide across different Reflex instances
+ * When two Reflex apps run on the same page and both have duplicate key "id:1",
+ * they would generate the SAME Symbol.for('reflex.dup:1:id') causing reconciliation bugs
+ * Symbol() creates truly unique symbols that never collide
  *
  * @param {Map} seen - Set of already-seen keys with counter tracking
  * @param {*} key - Current key
@@ -300,10 +304,10 @@ export function resolveDuplicateKey(seen, key, _index) {
       );
     }
 
-    // CRITICAL: Use Symbol.for() with reserved namespace to prevent user collisions
-    // Symbols are guaranteed unique and can't be created by user code
-    // Format: Symbol.for('reflex.dup:counter:originalKey')
-    return Symbol.for(`reflex.dup:${counter}:${String(key)}`);
+    // CRITICAL FIX: Use Symbol() instead of Symbol.for() for true uniqueness
+    // Symbol() creates a unique symbol every time, preventing cross-instance collisions
+    // We use a description for debugging, but the symbol is still unique
+    return Symbol(`reflex.dup:${counter}:${String(key)}`);
   }
 
   // First occurrence of this key - track it with counter 1

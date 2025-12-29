@@ -380,8 +380,27 @@ export const DOMRenderer: IRendererAdapter = {
     // SOLUTION: Removed regex checks entirely. Sanitization must happen at higher level
     // using DOMPurify in the compiler's _html method before calling this.
     //
-    // WARNING: This method is UNSAFE and should only be called with pre-sanitized HTML
-    // The compiler enforces DOMPurify usage - see compiler.ts _html method
+    // CRITICAL FIX: Enforce safety checks to prevent direct misuse
+    // While the compiler enforces DOMPurify, the renderer is exposed on the Reflex instance
+    // Developers might call app._ren.setInnerHTML(el, payload) thinking it's safe
+    // We add basic checks to catch obviously dangerous content
+
+    // Basic danger detection (not exhaustive, but catches common XSS)
+    const lowerHTML = html.toLowerCase();
+    const hasDangerousContent =
+      lowerHTML.includes('<script') ||
+      lowerHTML.includes('javascript:') ||
+      lowerHTML.includes('on') && /on\w+\s*=/.test(lowerHTML); // Event handlers like onclick=
+
+    if (hasDangerousContent) {
+      throw new Error(
+        'Reflex SECURITY ERROR: setInnerHTML() detected dangerous content.\n' +
+        'Content contains <script>, javascript:, or event handlers (onclick, etc.).\n' +
+        'This method should only be called with DOMPurify-sanitized HTML.\n' +
+        'Use m-html directive with DOMPurify configured instead of calling setInnerHTML directly.\n' +
+        'Element: ' + node.tagName
+      );
+    }
 
     if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
       console.warn(
