@@ -375,22 +375,38 @@ export const DOMRenderer: IRendererAdapter = {
     // Previous regex only caught specific patterns like <script and javascript:
     // Attackers can bypass with: <svg onload=...>, <img onerror=...>, <body onload=...>
     // New patterns catch ALL event handlers on ANY element, plus common XSS vectors
+    //
+    // CRITICAL FIX #1: Tag Malformation - <script/src="...">
+    // HTML5 allows / as a separator, so <script/src="data:..."> bypasses /<script[\s>]/
+    // Updated regex to /<script[\s/>]/i to catch this pattern
+    //
+    // CRITICAL FIX #2: HTML Entity Decoding
+    // Decode HTML entities before checking to prevent &#106;avascript: bypass
+    const decodeEntities = (str: string): string => {
+      const textarea = document.createElement('textarea');
+      textarea.innerHTML = str;
+      return textarea.textContent || '';
+    };
+    const decodedHtml = decodeEntities(html);
+
     const dangerousPatterns = [
-      /<script[\s>]/i,              // Script tags
+      /<script[\s/>]/i,             // Script tags (FIXED: added / to catch <script/src=...>)
       /javascript:/i,               // javascript: protocol
       /data:text\/html/i,           // data: URLs with HTML
       /on\w+\s*=/i,                 // Event handlers: onclick=, onload=, onerror=, etc.
-      /<iframe[\s>]/i,              // iframe tags
-      /<object[\s>]/i,              // object tags
-      /<embed[\s>]/i,               // embed tags
-      /<meta[\s>]/i,                // meta tags (can redirect)
-      /<link[\s>]/i,                // link tags (can load external resources)
+      /<iframe[\s/>]/i,             // iframe tags
+      /<object[\s/>]/i,             // object tags
+      /<embed[\s/>]/i,              // embed tags
+      /<meta[\s/>]/i,               // meta tags (can redirect)
+      /<link[\s/>]/i,               // link tags (can load external resources)
       /<svg[^>]*on\w+/i,            // SVG with event handlers
       /<img[^>]*on\w+/i,            // img with event handlers
       /<img[^>]*src\s*=\s*["']?\s*x/i, // Common XSS test pattern: <img src=x onerror=...>
       /<body[^>]*on\w+/i,           // body with event handlers
       /<form[^>]*action\s*=\s*["']?javascript:/i,  // form with javascript: action
       /<input[^>]*on\w+/i,          // input with event handlers
+      /<button[^>]*formaction/i,    // CRITICAL FIX #3: button with formaction attribute
+      /<input[^>]*formaction/i,     // CRITICAL FIX #3: input with formaction attribute
       /<svg[^>]*href\s*=\s*["']?javascript:/i,     // SVG with javascript: in href
       /<use[^>]*href\s*=\s*["']?javascript:/i,     // SVG use with javascript: in href
       /<animate[^>]*on\w+/i,        // SVG animate with event handlers
@@ -401,8 +417,9 @@ export const DOMRenderer: IRendererAdapter = {
       /behavior\s*:/i               // IE behavior (legacy XSS)
     ];
 
+    // CRITICAL FIX: Test both original and decoded HTML to catch entity-encoded attacks
     for (const pattern of dangerousPatterns) {
-      if (pattern.test(html)) {
+      if (pattern.test(html) || pattern.test(decodedHtml)) {
         console.error(
           'Reflex Security: BLOCKED dangerous HTML content in setInnerHTML()\n' +
           `Pattern detected: ${pattern}\n` +

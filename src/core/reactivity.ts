@@ -254,6 +254,21 @@ export const ArrayHandler: ProxyHandler<any[]> = {
       return false;
     }
     return Reflect.has(o, k);
+  },
+
+  // CRITICAL FIX #5: Missing ownKeys Trap - Breaks Object.keys() Reactivity
+  // Without this trap, Object.keys(state.array), for...in loops, and
+  // Object.getOwnPropertyNames(state.array) don't track dependencies.
+  // This causes computed properties and effects that iterate over array keys
+  // to miss updates when items are added/removed.
+  ownKeys(o) {
+    const meta = (o as ReactiveTarget)[META] as ReactiveMeta;
+    const engine = meta.engine;
+    // Track ITERATE dependency so Object.keys(), for...in, etc. react to additions/deletions
+    engine.trackDependency(meta, ITERATE);
+    // Also track 'length' since Object.keys() result depends on array length
+    engine.trackDependency(meta, 'length');
+    return Reflect.ownKeys(o);
   }
 };
 
