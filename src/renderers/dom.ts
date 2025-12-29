@@ -88,9 +88,50 @@ export function runTransition(el: Element, name: string, type: 'enter' | 'leave'
   elAny._transCleanup = cleanup;
   elAny._transCb = transitionCallback;
 
-  // Register cleanup in element's lifecycle registry if Reflex instance provided
+  // CRITICAL SECURITY FIX: Memory Leak in Transition Cleanup
+  // If reflex is not provided (or _reg is missing), cleanup is never called when element is removed
+  // This leaves event listeners and closures in memory indefinitely
+  //
+  // SOLUTION: Always ensure cleanup happens either via:
+  // 1. Reflex lifecycle registry (if available) - preferred
+  // 2. MutationObserver fallback to detect element removal
   if (reflex && typeof reflex._reg === 'function') {
     reflex._reg(el, cleanup);
+  } else {
+    // Fallback: Use MutationObserver to detect when element is removed from DOM
+    // This ensures cleanup happens even without a Reflex instance
+    const observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        // Check if our element was removed
+        for (const node of mutation.removedNodes) {
+          if (node === el || (node as Element).contains?.(el)) {
+            cleanup();
+            observer.disconnect();
+            return;
+          }
+        }
+      }
+    });
+
+    // Observe the parent for child removals
+    if (el.parentNode) {
+      observer.observe(el.parentNode, { childList: true });
+    }
+
+    // Store observer reference for cleanup
+    elAny._transObserver = observer;
+
+    // Also clean up observer in the main cleanup function
+    const originalCleanup = cleanup;
+    const cleanupWithObserver = () => {
+      originalCleanup();
+      if (elAny._transObserver) {
+        elAny._transObserver.disconnect();
+        elAny._transObserver = null;
+      }
+    };
+    // Update the stored cleanup reference
+    elAny._transCleanup = cleanupWithObserver;
   }
 
   // End handler
@@ -155,11 +196,16 @@ export const DOMRenderer: IRendererAdapter = {
     return document.createComment(text);
   },
 
-  createElement(tagName: string, parent?: Element): Element {
+  createElement(tagName: string, parent?: Element, namespaceHint?: string): Element {
     // SVG elements require the SVG namespace
     // CRITICAL FIX: Context-aware element creation for ambiguous tags
     // Tags like 'a', 'script', and 'style' exist in both HTML and SVG namespaces
     // We must check the parent element's namespace to create the correct type
+    //
+    // CRITICAL SECURITY FIX: SVG Namespace Context Loss
+    // If createElement is called without a parent (e.g., creating a root SVG component),
+    // we must still create SVG elements correctly. Accept optional namespaceHint parameter
+    // to override namespace detection when parent is unavailable.
     const svgTags = new Set([
       // Core SVG
       'svg', 'g', 'defs', 'symbol', 'use', 'foreignObject',
@@ -208,9 +254,12 @@ export const DOMRenderer: IRendererAdapter = {
       // Parent is SVG namespace AND not foreignObject
       isParentSVG = parentNS === 'http://www.w3.org/2000/svg' &&
                     parent.tagName.toLowerCase() !== 'foreignobject';
+    } else if (namespaceHint === 'http://www.w3.org/2000/svg') {
+      // No parent but explicit SVG namespace hint provided
+      isParentSVG = true;
     }
 
-    // For ambiguous tags, use parent's namespace
+    // For ambiguous tags, use parent's namespace or hint
     if (ambiguousTags.has(tag)) {
       if (isParentSVG) {
         return document.createElementNS('http://www.w3.org/2000/svg', tagName);
@@ -298,6 +347,47 @@ export const DOMRenderer: IRendererAdapter = {
   },
 
   setInnerHTML(node: Element, html: string): void {
+    // CRITICAL SECURITY WARNING: Unsanitized HTML injection is a severe XSS vector
+    // This method should NEVER be used with user-provided content without sanitization
+    if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+      console.warn(
+        'Reflex Security Warning: setInnerHTML() is being used without sanitization.\n' +
+        'This is a critical XSS vulnerability if the HTML contains user-provided content.\n' +
+        'Consider using:\n' +
+        '  1. Text content instead (setTextContent)\n' +
+        '  2. A sanitizer like DOMPurify: DOMPurify.sanitize(html)\n' +
+        '  3. Trusted Types API for policy enforcement\n' +
+        'Element:', node.tagName
+      );
+    }
+
+    // SECURITY: Check for obviously dangerous patterns (defense-in-depth)
+    // This is NOT a complete solution - use a proper sanitizer for production
+    const dangerousPatterns = [
+      /<script[\s>]/i,
+      /javascript:/i,
+      /on\w+\s*=/i,  // Event handlers like onclick=
+      /<iframe[\s>]/i,
+      /<object[\s>]/i,
+      /<embed[\s>]/i,
+      /<meta[\s>]/i,
+      /<link[\s>]/i
+    ];
+
+    for (const pattern of dangerousPatterns) {
+      if (pattern.test(html)) {
+        console.error(
+          'Reflex Security: BLOCKED dangerous HTML content in setInnerHTML()\n' +
+          `Pattern detected: ${pattern}\n` +
+          'This content was blocked to prevent XSS attacks.\n' +
+          'If this is trusted content, use a sanitizer to mark it as safe.'
+        );
+        // Set safe error message instead
+        node.textContent = '[Content blocked for security reasons]';
+        return;
+      }
+    }
+
     node.innerHTML = html;
   },
 

@@ -16,7 +16,7 @@
  * });
  */
 
-import { META } from '../core/symbols.js';
+import { META, createElementMembrane } from '../core/symbols.js';
 
 // Safe globals accessible in expressions
 // Note: Object is wrapped via SAFE_OBJECT to restrict dangerous methods
@@ -108,7 +108,28 @@ const UNSAFE_METHODS = Object.assign(Object.create(null), {
   // getRootNode() provides access to the document root which can lead to window access
   // Example: $el.getRootNode() returns the document, which has defaultView (window)
   // This bypasses all sandbox restrictions and allows full DOM/window access
-  getRootNode: 1
+  getRootNode: 1,
+  // CRITICAL SECURITY FIX: Expand denylist to prevent additional attack vectors
+  // String.prototype methods that generate HTML (XSS vectors)
+  link: 1,          // String.prototype.link() - generates <a> tag
+  anchor: 1,        // String.prototype.anchor() - generates <a> with name attribute
+  big: 1,           // String.prototype.big() - generates <big> tag
+  blink: 1,         // String.prototype.blink() - generates <blink> tag
+  bold: 1,          // String.prototype.bold() - generates <b> tag
+  fixed: 1,         // String.prototype.fixed() - generates <tt> tag
+  fontcolor: 1,     // String.prototype.fontcolor() - generates <font> tag
+  fontsize: 1,      // String.prototype.fontsize() - generates <font> tag
+  italics: 1,       // String.prototype.italics() - generates <i> tag
+  small: 1,         // String.prototype.small() - generates <small> tag
+  strike: 1,        // String.prototype.strike() - generates <strike> tag
+  sub: 1,           // String.prototype.sub() - generates <sub> tag
+  sup: 1,           // String.prototype.sup() - generates <sup> tag
+  // Code execution methods
+  setTimeout: 1,
+  setInterval: 1,
+  setImmediate: 1
+  // NOTE: valueOf and toString are NOT blocked as they're needed for normal operations
+  // The membrane system provides the primary defense against malicious overrides
 });
 
 /**
@@ -126,13 +147,20 @@ const UNSAFE_METHODS = Object.assign(Object.create(null), {
  * - Object literals: { key: value }
  * - Magic properties: $event, $el, $refs, $dispatch, $nextTick
  */
+// CRITICAL SECURITY: Maximum recursion depth to prevent stack overflow DoS
+// A malicious expression like ((((...(((1)))...))) with 10k nested parens
+// will crash the parser without this limit
+const MAX_RECURSION_DEPTH = 50;
+
 export class SafeExprParser {
   declare pos: number;
   declare expr: string;
+  declare depth: number;
 
   constructor() {
     this.pos = 0;
     this.expr = '';
+    this.depth = 0;
   }
 
   /**
@@ -160,11 +188,24 @@ export class SafeExprParser {
   parse(expr) {
     this.expr = expr.trim();
     this.pos = 0;
+    this.depth = 0;
     return this.parseExpression();
   }
 
   parseExpression() {
-    return this.parseTernary();
+    // CRITICAL SECURITY FIX: Prevent stack overflow DoS via deeply nested expressions
+    // Without this check, {{ ((((...(((1)))...))) }} with 10k parens crashes the parser
+    if (++this.depth > MAX_RECURSION_DEPTH) {
+      throw new Error(
+        `Reflex Security: Expression exceeds maximum nesting depth (${MAX_RECURSION_DEPTH}). ` +
+        `This could be a denial-of-service attack. Simplify your expression.`
+      );
+    }
+    try {
+      return this.parseTernary();
+    } finally {
+      this.depth--;
+    }
   }
 
   parseTernary() {
@@ -533,7 +574,9 @@ export class SafeExprParser {
         }
         // Magic properties
         if (name === '$event') return $event;
-        if (name === '$el') return $el;
+        // CRITICAL SECURITY FIX: Wrap $el in element membrane to prevent sandbox escape
+        // Without this, {{ $el.ownerDocument.defaultView.fetch(...) }} enables data exfiltration
+        if (name === '$el') return createElementMembrane($el);
         if (name === '$refs') return reflex._refs;
         if (name === '$dispatch') return reflex._dispatch.bind(reflex);
         if (name === '$nextTick') return reflex.nextTick.bind(reflex);
@@ -617,6 +660,16 @@ export class SafeExprParser {
             const obj = right();
             // Security: Block 'in' operator on unsafe objects
             if (obj == null || typeof obj !== 'object') return false;
+            // CRITICAL SECURITY FIX: Prototype Leak via 'in' Operator
+            // Without this check, {{ "constructor" in obj }} returns true even though
+            // accessing obj.constructor is blocked. This leaks prototype information.
+            // Example exploit: {{ "constructor" in obj ? "has proto access" : "safe" }}
+            if (UNSAFE_PROPS[prop]) {
+              if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+                console.warn('Reflex Security: Blocked unsafe property check in "in" operator:', prop);
+              }
+              return false;
+            }
             // Use safe property check that works with reactive proxies
             return prop in obj;
           }

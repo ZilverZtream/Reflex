@@ -11,7 +11,7 @@
  * CSP mode requires an external parser (SafeExprParser).
  */
 
-import { META, RESERVED, UNSAFE_PROPS, UNSAFE_EXPR_RE, ID_RE, normalizeUnicodeEscapes, createMembrane } from './symbols.js';
+import { META, RESERVED, UNSAFE_PROPS, UNSAFE_EXPR_RE, ID_RE, normalizeUnicodeEscapes, createMembrane, createElementMembrane } from './symbols.js';
 
 /**
  * Expression cache with LRU (Least Recently Used) eviction strategy.
@@ -225,12 +225,14 @@ export const ExprMixin = {
         rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el', body);
         return this._ec.set(k, (s, c, e, el) => {
           try {
+            // CRITICAL SECURITY FIX: Wrap $el in element membrane to prevent sandbox escape
+            // Without this, {{ $el.ownerDocument.defaultView.alert('pwned') }} enables full RCE
             return rawFn(
               createMembrane(s), createMembrane(c || {}), e,
               self._refs,
               self._dispatch.bind(self),
               self.nextTick.bind(self),
-              el
+              createElementMembrane(el)
             );
           } catch (err) {
             // Membrane security errors - silently return undefined to prevent code execution
@@ -283,12 +285,14 @@ export const ExprMixin = {
       // Wrap to inject magic properties and apply security membrane
       return this._ec.set(k, (s, c, e, el) => {
         try {
+          // CRITICAL SECURITY FIX: Wrap $el in element membrane to prevent sandbox escape
+          // Without this, {{ $el.ownerDocument.defaultView.alert('pwned') }} enables full RCE
           return rawFn(
             createMembrane(s), createMembrane(c), e,
             self._refs,
             self._dispatch.bind(self),
             self.nextTick.bind(self),
-            el
+            createElementMembrane(el)
           );
         } catch (err) {
           // Membrane security errors - silently return undefined to prevent code execution
