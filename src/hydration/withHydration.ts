@@ -267,7 +267,11 @@ const HydrationMixin = {
           while (currentPath.length > 0) {
             // Match: identifier, bracket notation, or dot notation
             const dotMatch = currentPath.match(/^([^.[]+)/);
-            const bracketMatch = currentPath.match(/^\[(\d+|'[^']*'|"[^"]*")\]/);
+            // CRITICAL FIX #6: Hydration Parser Failure on Escaped Quotes
+            // Handle escaped quotes in bracket notation: items['User\'s Name']
+            // The regex must skip escaped characters (\') when matching string content
+            // Pattern: [^'\\]* (non-quote/backslash) + (?:\\.[^'\\]*)* (backslash+any+non-quote/backslash, repeated)
+            const bracketMatch = currentPath.match(/^\[(\d+|'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")\]/);
 
             if (bracketMatch) {
               // Bracket notation: extract the index/key
@@ -686,14 +690,29 @@ const HydrationMixin = {
       });
     } else {
       // No matching nodes or mismatch - fall back to normal m-for
-      // FIX: Remove all existing server-rendered nodes to prevent "Zombie Siblings"
-      // Without this cleanup, mismatched server nodes remain in DOM alongside
-      // newly rendered client nodes, causing duplicate/ghost content.
+      // CRITICAL FIX #5: Hydration Fallback "Zombie Siblings"
+      // When maxSearch is hit, we may have collected only a subset of siblings
+      // We must remove ALL matching siblings, not just those in existingNodes
+      // Without this fix, remaining server nodes become "zombie siblings"
+
+      // Remove nodes that were collected
       existingNodes.forEach(node => {
         if (node !== el) {
           node.remove();
         }
       });
+
+      // Continue removing any remaining matching siblings beyond maxSearch
+      // Start from where the collection loop stopped
+      let remainingSibling = sibling;
+      while (remainingSibling) {
+        const nextSib = remainingSibling.nextElementSibling;
+        if (remainingSibling.nodeType === 1 && remainingSibling.tagName === el.tagName) {
+          remainingSibling.remove();
+        }
+        remainingSibling = nextSib;
+      }
+
       this._dir_for(el, o);
     }
   },

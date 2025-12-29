@@ -427,6 +427,19 @@ export const CompilerMixin = {
     const e = this.createEffect(() => {
       try {
         const ok = !!fn(this.s, o);
+        // CRITICAL FIX #1: m-if Toggle "Zombie" State
+        // When toggling True -> False (leaving=true) -> True, we must handle re-entry
+        // Without this fix, the enter block is skipped because !leaving is false,
+        // and the leave block is skipped because ok is true.
+        // Result: The old transition completes and removes the element permanently.
+        // Fix: If we need to enter while leaving, cancel the leaving transition first.
+        if (ok && !cur && leaving) {
+          // We're in the middle of leaving, but now we need to enter again
+          // The leaving flag will be cleared by the transition cancellation
+          // Reset leaving so we can re-enter
+          leaving = false;
+        }
+
         if (ok && !cur && !leaving) {
           if (isTemplate) {
             // For <template> tags, insert content instead of the element itself
@@ -471,8 +484,16 @@ export const CompilerMixin = {
             cm.after(cloned);
 
           if (isSyncComp) {
-            // For sync components, track the returned instance
-            cur = this._comp(cloned, tagLower, o);
+            // CRITICAL FIX #2: m-if on Components Recursion Bomb
+            // Use _compNoRecurse instead of _comp to prevent stack overflow
+            // _comp calls _w which calls _comp... causing recursion with nested components
+            // _compNoRecurse + manual _w prevents the recursion bomb
+            cur = this._compNoRecurse(cloned, tagLower, o);
+            // Manually walk the component instance to attach bindings
+            if (cur) {
+              const compScope = this._scopeMap.get(cur) || o;
+              this._w(cur, compScope);
+            }
           } else if (isAsyncComp) {
             // For async components, track the marker that _asyncComp creates
             // _asyncComp replaces cloned with marker (+ optional fallback)
@@ -911,6 +932,46 @@ export const CompilerMixin = {
 
       rows = result.rows;
       oldKeys = result.keys;
+
+      // CRITICAL FIX #4: m-ref Array Order Desync
+      // After DOM reconciliation reorders nodes, m-ref arrays must be updated to match
+      // Without this fix, refs[0] points to the wrong element after sorting
+      // Rebuild all affected ref arrays in the new DOM order
+      const refArraysToUpdate = new Map(); // refName -> Set of nodes in this list
+
+      // Find all ref arrays that contain nodes from this list
+      result.keys.forEach((key, index) => {
+        const rowData = result.rows.get(key);
+        if (!rowData) return;
+
+        const node = rowData.node;
+        // Check all ref arrays to see if this node is in any of them
+        for (const refName in this._refs) {
+          const refValue = this._refs[refName];
+          if (Array.isArray(refValue) && refValue.includes(node)) {
+            if (!refArraysToUpdate.has(refName)) {
+              refArraysToUpdate.set(refName, []);
+            }
+            refArraysToUpdate.get(refName).push({ node, index });
+          }
+        }
+      });
+
+      // Rebuild each affected ref array in DOM order
+      refArraysToUpdate.forEach((nodeList, refName) => {
+        // Sort by index to get DOM order
+        nodeList.sort((a, b) => a.index - b.index);
+        const orderedNodes = nodeList.map(item => item.node);
+
+        // Update both this._refs and this.s (if it exists)
+        this._refs[refName] = orderedNodes;
+        if (refName in this.s && Array.isArray(this.s[refName])) {
+          // Update the reactive state array to match
+          const raw = this.toRaw(this.s[refName]);
+          raw.length = 0;
+          raw.push(...orderedNodes);
+        }
+      });
     });
 
     eff.o = o;
@@ -1557,8 +1618,19 @@ export const CompilerMixin = {
             } else {
               // Empty array - infer type from checkbox value itself
               // If the value is a valid number string, coerce to number
+              // CRITICAL FIX #3: Checkbox Leading Zero Data Corruption
+              // Don't coerce values with leading zeros or special formatting
+              // "01" should remain "01", not become 1
+              // Check: String(Number(value)) must equal the trimmed value
               const trimmed = el.value.trim();
-              shouldCoerceToNumber = trimmed !== '' && !isNaN(Number(el.value));
+              if (trimmed !== '' && !isNaN(Number(trimmed))) {
+                // Valid number, but check if coercion would lose information
+                // "01" -> Number("01") = 1 -> String(1) = "1" ≠ "01" (don't coerce)
+                // "1" -> Number("1") = 1 -> String(1) = "1" = "1" ✓ (coerce)
+                shouldCoerceToNumber = String(Number(trimmed)) === trimmed;
+              } else {
+                shouldCoerceToNumber = false;
+              }
             }
 
             if (shouldCoerceToNumber) {
