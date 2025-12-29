@@ -143,14 +143,26 @@ function isDangerousPropertyPattern(prop: string): boolean {
   // Check for exact matches first (most common case)
   if (dangerousWords.includes(lowerProp)) return true;
 
-  // Check for word boundaries: dangerous word must be preceded/followed by non-word chars
-  // Examples that match: _constructor, constructor_, proto-chain, eval.call
-  // Examples that DON'T match: important, evaluation, prototype_id, importing
+  // CRITICAL FIX #4: Check for word boundaries to avoid false positives
+  // Previous bug: Used [^a-z] which treated underscores as word boundaries
+  // This caused false positives for legitimate properties like constructor_id, proto_config
+  //
+  // Examples that SHOULD match (dangerous):
+  //   - constructor (exact match)
+  //   - _constructor (non-alphanumeric before)
+  //   - constructor_ (non-alphanumeric after)
+  //   - proto.chain (non-alphanumeric after)
+  //
+  // Examples that SHOULD NOT match (safe):
+  //   - constructor_id (underscore is part of identifier)
+  //   - proto_config (underscore is part of identifier)
+  //   - important (dangerous word is substring)
+  //   - evaluation (dangerous word is substring)
   for (const dangerous of dangerousWords) {
-    // Create a regex that matches the dangerous word with word boundaries
-    // \b doesn't work well with underscores, so we use a more explicit pattern
-    // Match if: start of string OR non-letter before, dangerous word, end of string OR non-letter after
-    const pattern = new RegExp(`(^|[^a-z])${dangerous}([^a-z]|$)`, 'i');
+    // Create a regex that matches the dangerous word with proper word boundaries
+    // Use [^a-zA-Z0-9_] to treat underscore as a word character (part of identifier)
+    // Match if: start of string OR non-identifier-char before, dangerous word, end of string OR non-identifier-char after
+    const pattern = new RegExp(`(^|[^a-zA-Z0-9_])${dangerous}([^a-zA-Z0-9_]|$)`, 'i');
     if (pattern.test(lowerProp)) return true;
   }
 

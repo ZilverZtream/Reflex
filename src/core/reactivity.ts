@@ -736,14 +736,15 @@ export const ReactivityMixin = {
         self.trackDependency(meta, ITERATE);
         const it = fn.call(t);
 
-        // CRITICAL PERFORMANCE FIX #7: Map/Set Iterator Allocation Storm
+        // CRITICAL FIX #1: Map/Set Iterator Data Corruption
         //
-        // VULNERABILITY: Creating new [k,v] array for every iteration on large Maps (100k+ items)
-        // causes massive GC pressure and can freeze UI with Major GC pause
+        // PREVIOUS BUG: Reused the same array instance for all iterations to reduce allocations
+        // This caused data corruption when using spread operator or Array.from() on reactive Maps
+        // All entries in the resulting array would point to the same reference, containing the last value
         //
-        // SOLUTION: Reuse the same array object for entries iteration
-        // This reduces allocations from O(N) to O(1)
-        let reusableArray = isMap && (m === 'entries' || m === Symbol.iterator) ? [null, null] : null;
+        // SOLUTION: Create a new array for each iteration to ensure distinct references
+        // While this has a performance cost for very large Maps (100k+ items), correctness is critical
+        // Users can use Map.get() in a loop for performance-critical large Map iterations
 
         return {
           [Symbol.iterator]() { return this; },
@@ -758,14 +759,13 @@ export const ReactivityMixin = {
                 const val = n.value;
                 return { done: false, value: (val !== null && typeof val === 'object') ? self._wrap(val) : val };
               }
-              // For entries/default iteration, reuse the array
+              // For entries/default iteration, create a NEW array for each iteration
+              // This is critical for correctness with spread operator and Array.from()
               const [k, v] = n.value;
               const wrappedK = (k !== null && typeof k === 'object') ? self._wrap(k) : k;
               const wrappedV = (v !== null && typeof v === 'object') ? self._wrap(v) : v;
-              // Reuse the same array instance, just update the values
-              reusableArray[0] = wrappedK;
-              reusableArray[1] = wrappedV;
-              return { done: false, value: reusableArray };
+              // Create a new array instance for each iteration (fixes data corruption)
+              return { done: false, value: [wrappedK, wrappedV] };
             }
             const val = n.value;
             return { done: false, value: (val !== null && typeof val === 'object') ? self._wrap(val) : val };

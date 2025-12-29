@@ -385,17 +385,28 @@ export const DOMRenderer: IRendererAdapter = {
     // Developers might call app._ren.setInnerHTML(el, payload) thinking it's safe
     // We add basic checks to catch obviously dangerous content
 
-    // Basic danger detection (not exhaustive, but catches common XSS)
+    // Enhanced danger detection to catch common XSS vectors
     const lowerHTML = html.toLowerCase();
     const hasDangerousContent =
       lowerHTML.includes('<script') ||
       lowerHTML.includes('javascript:') ||
-      lowerHTML.includes('on') && /on\w+\s*=/.test(lowerHTML); // Event handlers like onclick=
+      lowerHTML.includes('data:text/html') ||  // Data URIs with HTML
+      lowerHTML.includes('data:application/') || // Data URIs with active content
+      lowerHTML.includes('<object') ||  // Object embeds can execute code
+      lowerHTML.includes('<embed') ||   // Embed tags can execute code
+      lowerHTML.includes('<iframe') ||  // Iframes can execute code
+      lowerHTML.includes('<svg') && /on\w+\s*=/.test(lowerHTML) || // SVG with event handlers
+      lowerHTML.includes('<animate') ||  // SVG animate can have event handlers
+      lowerHTML.includes('<set') && lowerHTML.includes('attributename') || // SVG set attacks
+      lowerHTML.includes('on') && /on\w+\s*=/.test(lowerHTML) || // Event handlers like onclick=
+      lowerHTML.includes('formaction') || // Form action hijacking
+      /data\s*:/.test(lowerHTML) && /base64/i.test(lowerHTML); // Base64 encoded data URIs
 
     if (hasDangerousContent) {
       throw new Error(
         'Reflex SECURITY ERROR: setInnerHTML() detected dangerous content.\n' +
-        'Content contains <script>, javascript:, or event handlers (onclick, etc.).\n' +
+        'Content contains potentially malicious patterns: <script>, javascript:, data URIs, \n' +
+        '<object>, <embed>, <iframe>, event handlers, or SVG attack vectors.\n' +
         'This method should only be called with DOMPurify-sanitized HTML.\n' +
         'Use m-html directive with DOMPurify configured instead of calling setInnerHTML directly.\n' +
         'Element: ' + node.tagName

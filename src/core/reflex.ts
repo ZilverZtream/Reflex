@@ -489,8 +489,31 @@ export class Reflex {
       });
     } else {
       t.innerHTML = template;
+
+      // CRITICAL FIX #7: Component Fragment Support (Multi-root components)
+      // Previous bug: Only stored firstElementChild, losing all siblings
+      // This silently broke multi-root components (fragments)
+      //
+      // Fix: Check if template has multiple root elements
+      // If yes, store a DocumentFragment containing all children
+      // If no, store the single element as before (for performance/compatibility)
+      const children = Array.from(t.content.children);
+
+      let templateNode;
+      if (children.length === 0) {
+        // Empty template - store null or empty fragment
+        templateNode = null;
+      } else if (children.length === 1) {
+        // Single root - store the element directly (existing behavior)
+        templateNode = t.content.firstElementChild;
+      } else {
+        // Multiple roots (fragment) - store a cloneable fragment
+        // We'll clone the entire template content which preserves all children
+        templateNode = t.content.cloneNode(true);
+      }
+
       this._cp.set(name, {
-        _t: t.content.firstElementChild,
+        _t: templateNode,
         p: def.props || [],
         s: def.setup
       });
@@ -586,7 +609,29 @@ export class Reflex {
    */
   _compNoRecurse(el: Element, tag: string, o: any): Element {
     const def = this._cp.get(tag);
-    const inst = def._t.cloneNode(true) as Element;
+
+    // CRITICAL FIX #7: Handle fragment components (multi-root templates)
+    // If _t is a DocumentFragment, we need to clone all children
+    // For single-element templates, clone works as before
+    let inst: Element;
+    let isFragment = false;
+    const fragmentNodes: Element[] = [];
+
+    if (def._t instanceof DocumentFragment) {
+      // Fragment component - clone and collect all children
+      isFragment = true;
+      const cloned = def._t.cloneNode(true) as DocumentFragment;
+      // Collect all element children (ignore text nodes for now)
+      Array.from(cloned.children).forEach(child => {
+        fragmentNodes.push(child as Element);
+      });
+      // Use the first element as the primary instance
+      inst = fragmentNodes[0];
+    } else {
+      // Single element component (existing behavior)
+      inst = def._t.cloneNode(true) as Element;
+    }
+
     const props = this._r({});
     const propDefs = [];
     const hostHandlers = Object.create(null);
@@ -644,7 +689,28 @@ export class Reflex {
     }
 
     const scope = this._r(scopeRaw);
-    el.replaceWith(inst);
+
+    // CRITICAL FIX #7: Handle fragment components when replacing
+    if (isFragment && fragmentNodes.length > 1) {
+      // For fragments, replace el with all fragment nodes
+      const parent = el.parentNode;
+      const nextSibling = el.nextSibling;
+
+      // Insert all fragment nodes
+      for (const node of fragmentNodes) {
+        if (nextSibling) {
+          parent.insertBefore(node, nextSibling);
+        } else {
+          parent.appendChild(node);
+        }
+      }
+
+      // Remove the original element
+      el.remove();
+    } else {
+      // Single element replacement (existing behavior)
+      el.replaceWith(inst);
+    }
 
     // Store scope for later use by _w
     this._scopeMap.set(inst, scope);
