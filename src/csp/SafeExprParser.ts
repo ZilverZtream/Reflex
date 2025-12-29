@@ -17,6 +17,11 @@
  */
 
 import { META, createElementMembrane } from '../core/symbols.js';
+import {
+  isFlatScope,
+  getFlatScopeValue,
+  type FlatScope
+} from '../core/scope-registry.js';
 
 // Symbol for identifying ScopeContainer instances
 const SCOPE_CONTAINER_MARKER = Symbol.for('reflex.ScopeContainer');
@@ -958,26 +963,43 @@ export class SafeExprParser {
         if (name === '$dispatch') return reflex._dispatch.bind(reflex);
         if (name === '$nextTick') return reflex.nextTick.bind(reflex);
 
-        // MANDATORY: Context MUST be ScopeContainer (when provided)
-        // BREAKING CHANGE: Regular objects are no longer allowed as scopes
+        // BREAKING CHANGE: Context must be FlatScope or ScopeContainer
+        // FlatScope is the new preferred format (uses flat Map storage)
+        // ScopeContainer is supported for backward compatibility
         if (context) {
-          if (!ScopeContainer.isScopeContainer(context)) {
+          // Check for FlatScope first (new flat lookup)
+          if (isFlatScope(context)) {
+            const result = getFlatScopeValue(context, name);
+            if (result.found) {
+              const value = result.value;
+              // Track dependency if reactive
+              if (value !== null && typeof value === 'object') {
+                const meta = value[META] || reflex._mf.get(value);
+                if (meta) reflex.trackDependency(meta, name);
+              }
+              return value;
+            }
+            // Not found in flat scope - continue to state/global lookup
+            // This is INTENTIONAL - no parent chain traversal
+          } else if (ScopeContainer.isScopeContainer(context)) {
+            // ScopeContainer path (backward compatibility)
+            if (context.has(name)) {
+              const value = context.get(name);
+              // Track dependency if reactive
+              if (value !== null && typeof value === 'object') {
+                const meta = value[META] || reflex._mf.get(value);
+                if (meta) reflex.trackDependency(meta, name);
+              }
+              return value;
+            }
+          } else {
+            // Neither FlatScope nor ScopeContainer - reject
             throw new TypeError(
-              `Reflex Security: Context must be a ScopeContainer instance.\n` +
+              `Reflex Security: Context must be a FlatScope or ScopeContainer instance.\n` +
               `Received: ${typeof context} ${context?.constructor?.name || 'unknown'}\n\n` +
               `BREAKING CHANGE: Regular objects are no longer allowed as scopes.\n` +
-              `Migration: Use new ScopeContainer() instead of Object.create()`
+              `Migration: Scopes are now created automatically by m-for.`
             );
-          }
-
-          if (context.has(name)) {
-            const value = context.get(name);
-            // Track dependency if reactive
-            if (value !== null && typeof value === 'object') {
-              const meta = value[META] || reflex._mf.get(value);
-              if (meta) reflex.trackDependency(meta, name);
-            }
-            return value;
           }
         }
 

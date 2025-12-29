@@ -44,6 +44,7 @@ import { SchedulerMixin } from './scheduler.js';
 import { ExprMixin, ExprCache } from './expr.js';
 import { CompilerMixin, cloneNodeWithProps } from './compiler.js';
 import { DOMRenderer } from '../renderers/dom.js';
+import { ScopeRegistry } from './scope-registry.js';
 import type { IRendererAdapter, RendererOptions } from '../renderers/types.js';
 
 type ReactivityMixinType = typeof ReactivityMixin;
@@ -94,6 +95,7 @@ export class Reflex {
   declare _plugins: Set<any>;
   declare _m: boolean;
   declare _ren: IRendererAdapter;  // Pluggable renderer adapter
+  declare _scopeRegistry: ScopeRegistry;  // Flat scope storage (replaces prototype chains)
   declare _hydrateMode?: boolean;
   declare hydrate?: (el?: Element | null) => this;
   declare _hydrateWalk?: (node: Node, scope: any) => void;
@@ -168,6 +170,12 @@ export class Reflex {
     this._plugins = new Set(); // Installed plugins (per-instance)
     this._m = false;          // Mounted flag (prevents double-mount)
     this._fileInputsWarned = new WeakSet(); // Track file inputs that have been warned (prevents spam)
+
+    // === FLAT SCOPE REGISTRY ===
+    // BREAKING CHANGE: Replaces prototype-based scope chains
+    // All scope variables are stored in a flat Map with unique IDs
+    // This prevents prototype pollution attacks and scope shadowing exploits
+    this._scopeRegistry = new ScopeRegistry();
 
     // === CONFIGURATION ===
     // SECURITY: Secure by default - sanitization is enabled by default
@@ -390,6 +398,9 @@ export class Reflex {
     this._qb.length = 0;
     this._p = false;
     if (this._flushIterations) this._flushIterations = 0;
+
+    // Clear the scope registry to free memory and reset IDs
+    this._scopeRegistry.clear();
 
     // Reset mounted flag
     this._m = false;
