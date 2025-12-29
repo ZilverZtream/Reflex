@@ -107,8 +107,11 @@ describe('Flat Scope Resolution', () => {
 
       expect(scope._type).toBe('FlatScope');
       expect(scope[FLAT_SCOPE_MARKER]).toBe(true);
-      expect(Object.isFrozen(scope)).toBe(true);
+      // Proxies can't be frozen, but the internal _ids object should be frozen for immutability
       expect(Object.isFrozen(scope._ids)).toBe(true);
+      // Verify the Proxy blocks modifications via the set trap
+      const result = Reflect.set(scope, 'newProp', 'value');
+      expect(result).toBe(false);
     });
 
     it('isFlatScope correctly identifies FlatScope objects', () => {

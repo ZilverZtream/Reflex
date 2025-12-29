@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { Reflex } from '../src/index.ts';
+import { Reflex, SafeHTML } from '../src/index.ts';
 import { SafeExprParser } from '../src/csp/SafeExprParser.ts';
 
 describe('Critical Bugs', () => {
@@ -68,13 +68,14 @@ describe('Critical Bugs', () => {
       const renderer = new Reflex()._ren;
       const div = document.createElement('div');
 
-      // Base64 encoded <script>alert(1)</script>
+      // BREAKING CHANGE: setInnerHTML now requires SafeHTML instances
+      // This prevents XSS at the type level - raw strings are rejected entirely
       const payload = '<object data="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg=="></object>';
 
-      // Should throw or sanitize
+      // Should reject raw string
       expect(() => {
         renderer.setInnerHTML(div, payload);
-      }).toThrow(/dangerous content/i);
+      }).toThrow(/SafeHTML/i);
     });
 
     it('CRITICAL: should block iframe with javascript: protocol', () => {
@@ -83,9 +84,10 @@ describe('Critical Bugs', () => {
 
       const payload = '<iframe src="javascript:alert(1)"></iframe>';
 
+      // Should reject raw string (new security architecture)
       expect(() => {
         renderer.setInnerHTML(div, payload);
-      }).toThrow(/dangerous content/i);
+      }).toThrow(/SafeHTML/i);
     });
 
     it('CRITICAL: should block SVG with onload handler', () => {
@@ -94,9 +96,10 @@ describe('Critical Bugs', () => {
 
       const payload = '<svg/onload=alert(1)>';
 
+      // Should reject raw string (new security architecture)
       expect(() => {
         renderer.setInnerHTML(div, payload);
-      }).toThrow(/dangerous content/i);
+      }).toThrow(/SafeHTML/i);
     });
   });
 

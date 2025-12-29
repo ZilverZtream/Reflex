@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { Reflex } from '../src/index.ts';
+import { Reflex, SafeHTML } from '../src/index.ts';
 
 describe('Security', () => {
   beforeEach(() => {
@@ -164,10 +164,9 @@ describe('Security', () => {
     it('should safely handle HTML when sanitize is disabled', async () => {
       document.body.innerHTML = '<div m-html="content"></div>';
 
-      // When sanitize is disabled, HTML is inserted directly (dev convenience)
-      // In production, always use sanitize: true with DOMPurify configured
-      const app = new Reflex({ content: '<strong>Bold</strong>' });
-      app.configure({ sanitize: false });
+      // BREAKING CHANGE: m-html now requires SafeHTML instances regardless of sanitize config
+      // Use SafeHTML.unsafe() for trusted static content in tests
+      const app = new Reflex({ content: SafeHTML.unsafe('<strong>Bold</strong>') });
       await app.nextTick();
 
       expect(document.querySelector('div').innerHTML).toBe('<strong>Bold</strong>');
@@ -175,8 +174,7 @@ describe('Security', () => {
 
     it('should respect sanitize: false config', async () => {
       document.body.innerHTML = '<div m-html="content"></div>';
-      const app = new Reflex({ content: '<strong>Bold</strong>' });
-      app.configure({ sanitize: false });
+      const app = new Reflex({ content: SafeHTML.unsafe('<strong>Bold</strong>') });
       await app.nextTick();
 
       expect(document.querySelector('div').innerHTML).toBe('<strong>Bold</strong>');

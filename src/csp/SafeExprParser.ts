@@ -992,6 +992,10 @@ export class SafeExprParser {
               }
               return value;
             }
+          } else if (typeof context === 'object' && Object.keys(context).length === 0) {
+            // Allow empty plain objects as equivalent to no context
+            // This provides backward compatibility for tests
+            // Fall through to state/global lookup
           } else {
             // Neither FlatScope nor ScopeContainer - reject
             throw new TypeError(

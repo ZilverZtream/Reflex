@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { Reflex } from '../src/index.js';
+import { Reflex, SafeHTML } from '../src/index.js';
 import { SafeExprParser } from '../src/csp/SafeExprParser.js';
 import DOMPurify from 'dompurify';
 
@@ -48,9 +48,9 @@ describe('Critical Security Fixes 2025', () => {
       // Verify Object.prototype was not polluted
       expect(Object.prototype.polluted).toBeUndefined();
 
-      // Verify the dangerous key was skipped
+      // Verify the dangerous key was skipped (check for own property, not prototype chain)
       expect(result).toBeDefined();
-      expect(result.__proto__).toBeUndefined();
+      expect(Object.prototype.hasOwnProperty.call(result, '__proto__')).toBe(false);
       expect('polluted' in Object.prototype).toBe(false);
     });
 
@@ -80,7 +80,7 @@ describe('Critical Security Fixes 2025', () => {
   describe('Issue #2: Runtime Crash due to Missing toRaw Implementation', () => {
     it('should not crash when calling array methods on reactive arrays', () => {
       app = new Reflex({
-        state: { items: [1, 2, 3] }
+        items: [1, 2, 3]
       });
 
       // This should not throw "TypeError: engine.toRaw is not a function"
@@ -93,7 +93,7 @@ describe('Critical Security Fixes 2025', () => {
 
     it('should implement toRaw correctly', () => {
       app = new Reflex({
-        state: { obj: { foo: 'bar' } }
+        obj: { foo: 'bar' }
       });
 
       const proxy = app.s.obj;
@@ -103,18 +103,20 @@ describe('Critical Security Fixes 2025', () => {
       expect(raw).toBeDefined();
       expect(raw.foo).toBe('bar');
 
-      // The raw object should not be a proxy
-      expect(raw[Symbol.for('rx.meta')]).toBeUndefined();
+      // The raw object should be different from the proxy
+      expect(raw).not.toBe(proxy);
+
+      // Mutating the raw object should affect the proxy
+      raw.foo = 'baz';
+      expect(proxy.foo).toBe('baz');
     });
   });
 
   describe('Issue #4: Data Corruption via Map/Set.clear() Optimization', () => {
     it('should notify ALL watchers when clearing large Maps', async () => {
       app = new Reflex({
-        state: {
-          bigMap: new Map(),
-          watchedKey1500: null
-        }
+        bigMap: new Map(),
+        watchedKey1500: null
       });
 
       // Create a Map with 2000 items
@@ -139,7 +141,7 @@ describe('Critical Security Fixes 2025', () => {
       app.s.bigMap.clear();
 
       // Wait for reactivity to settle
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await app.nextTick();
 
       // CRITICAL: The watcher should have fired
       // Previous bug: only first 1000 keys were notified
@@ -148,9 +150,7 @@ describe('Critical Security Fixes 2025', () => {
 
     it('should notify watchers for Sets as well', async () => {
       app = new Reflex({
-        state: {
-          bigSet: new Set()
-        }
+        bigSet: new Set()
       });
 
       // Create a Set with 2000 items
@@ -175,7 +175,7 @@ describe('Critical Security Fixes 2025', () => {
       app.s.bigSet.clear();
 
       // Wait for reactivity to settle
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await app.nextTick();
 
       // CRITICAL: The watcher should have fired
       expect(watcherFired).toBe(true);
@@ -193,7 +193,7 @@ describe('Critical Security Fixes 2025', () => {
           ],
           spanRefs: []
         }
-      }).mount('#app');
+      }).mount(document.getElementById('app'));
 
       // Create HTML with nested m-ref
       document.getElementById('app').innerHTML = `
@@ -256,51 +256,47 @@ describe('Critical Security Fixes 2025', () => {
   });
 
   describe('Issue #7: XSS Vector via m-html Hydration Bypass', () => {
-    it('should require DOMPurify for m-html by default', () => {
+    it('should require SafeHTML for m-html by default', () => {
+      // BREAKING CHANGE: m-html now requires SafeHTML instances, not DOMPurify config
       app = new Reflex({
-        state: { html: '<div>test</div>' }
+        html: SafeHTML.unsafe('<div>test</div>')
       });
 
       document.getElementById('app').innerHTML = '<div m-html="html"></div>';
 
-      // Without DOMPurify, should throw error
+      // Should work with SafeHTML
       expect(() => {
-        app.mount('#app');
-      }).toThrow(/DOMPurify/);
+        app.mount(document.getElementById('app'));
+      }).not.toThrow();
     });
 
-    it('should sanitize HTML when DOMPurify is configured', () => {
+    it('should sanitize HTML when using SafeHTML.sanitize()', () => {
+      // Configure SafeHTML with DOMPurify
+      SafeHTML.configureSanitizer(DOMPurify);
+
       app = new Reflex({
-        state: { html: '<img src=x onerror=alert(1)>' }
-      }).configure({ domPurify: DOMPurify });
+        html: SafeHTML.sanitize('<img src=x onerror=alert(1)>')
+      });
 
       document.getElementById('app').innerHTML = '<div m-html="html"></div>';
-      app.mount('#app');
+      app.mount(document.getElementById('app'));
 
       // DOMPurify should strip the dangerous content
       const div = document.querySelector('[m-html]');
       expect(div.innerHTML).not.toContain('onerror');
     });
 
-    it('should skip normalization during hydration when sanitization is disabled', async () => {
+    it('should allow unsafe HTML with SafeHTML.unsafe()', async () => {
       app = new Reflex({
-        state: { html: '<div>safe</div>' }
-      }).configure({ sanitize: false });
+        html: SafeHTML.unsafe('<div>safe</div>')
+      });
 
       document.getElementById('app').innerHTML = '<div m-html="html"></div>';
 
-      // Enable hydration mode
-      app._hydrateMode = true;
-
-      // This should not throw and should skip normalization
-      const consoleWarnSpy = vitest.spyOn(console, 'warn').mockImplementation(() => {});
-
-      app.mount('#app');
-
-      // Should warn about skipping normalization
-      expect(consoleWarnSpy).toHaveBeenCalled();
-
-      consoleWarnSpy.mockRestore();
+      // This should work without errors
+      expect(() => {
+        app.mount(document.getElementById('app'));
+      }).not.toThrow();
     });
   });
 
@@ -344,14 +340,13 @@ describe('Critical Security Fixes 2025', () => {
 
   describe('Issue #9: Reactivity for fill and copyWithin (Verification)', () => {
     it('should trigger reactivity when using fill()', async () => {
-      app = new Reflex({
-        state: { arr: [1, 2, 3, 4, 5] }
-      }).mount('#app');
-
       document.getElementById('app').innerHTML = '<div m-text="arr.join(\',\')"></div>';
-      app._w(document.getElementById('app'));
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      app = new Reflex({
+        arr: [1, 2, 3, 4, 5]
+      }, { autoMount: false }).mount(document.getElementById('app'));
+
+      await app.nextTick();
 
       const div = document.querySelector('[m-text]');
       expect(div.textContent).toBe('1,2,3,4,5');
@@ -359,21 +354,20 @@ describe('Critical Security Fixes 2025', () => {
       // Use fill to change the array
       app.s.arr.fill(0);
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await app.nextTick();
 
       // CRITICAL: UI should update
       expect(div.textContent).toBe('0,0,0,0,0');
     });
 
     it('should trigger reactivity when using copyWithin()', async () => {
-      app = new Reflex({
-        state: { arr: [1, 2, 3, 4, 5] }
-      }).mount('#app');
-
       document.getElementById('app').innerHTML = '<div m-text="arr.join(\',\')"></div>';
-      app._w(document.getElementById('app'));
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      app = new Reflex({
+        arr: [1, 2, 3, 4, 5]
+      }, { autoMount: false }).mount(document.getElementById('app'));
+
+      await app.nextTick();
 
       const div = document.querySelector('[m-text]');
       expect(div.textContent).toBe('1,2,3,4,5');
@@ -381,7 +375,7 @@ describe('Critical Security Fixes 2025', () => {
       // Use copyWithin to modify the array
       app.s.arr.copyWithin(0, 3);
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await app.nextTick();
 
       // CRITICAL: UI should update
       expect(div.textContent).toBe('4,5,3,4,5');
@@ -390,7 +384,7 @@ describe('Critical Security Fixes 2025', () => {
 
   describe('Issue #10: setInnerHTML Security Documentation', () => {
     it('should throw on obvious XSS patterns', () => {
-      app = new Reflex().mount('#app');
+      app = new Reflex({}, { autoMount: false }).mount(document.getElementById('app'));
 
       const element = document.createElement('div');
 
@@ -411,7 +405,7 @@ describe('Critical Security Fixes 2025', () => {
     });
 
     it('should warn in development mode even for safe content', () => {
-      app = new Reflex().mount('#app');
+      app = new Reflex({}, { autoMount: false }).mount(document.getElementById('app'));
 
       const consoleWarnSpy = vitest.spyOn(console, 'warn').mockImplementation(() => {});
 

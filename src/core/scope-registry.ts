@@ -146,8 +146,12 @@ export interface FlatScope {
 /**
  * Create a FlatScope object.
  *
- * FlatScope is a frozen object that cannot be modified after creation,
- * which prevents any attempt to manipulate scope data directly.
+ * FlatScope is wrapped in a Proxy that intercepts property access,
+ * allowing it to work with JavaScript's `with` statement (used in
+ * standard expression compilation mode).
+ *
+ * The Proxy exposes scope variables as properties by looking them up
+ * in the flat registry using their unique IDs.
  *
  * @param registry - The ScopeRegistry instance
  * @param ids - Map of variable names to registry IDs for this scope
@@ -158,16 +162,114 @@ export function createFlatScope(
   ids: FlatScopeIds,
   parentIds: FlatScopeIds | null = null
 ): FlatScope {
-  const scope: FlatScope = {
-    _type: 'FlatScope',
-    [FLAT_SCOPE_MARKER]: true,
+  const scopeData = {
+    _type: 'FlatScope' as const,
+    [FLAT_SCOPE_MARKER]: true as const,
     _ids: Object.freeze({ ...ids }),
     _parentIds: parentIds ? Object.freeze({ ...parentIds }) : null,
     _registry: registry
   };
 
-  // Freeze the scope to prevent any modifications
-  return Object.freeze(scope);
+  // Freeze the scope data to prevent modifications
+  Object.freeze(scopeData);
+
+  // Wrap in a Proxy to make scope variables accessible as properties
+  // This allows the scope to work with JavaScript's `with` statement
+  const proxy = new Proxy(scopeData, {
+    get(target, prop, receiver) {
+      // Symbol access
+      if (typeof prop === 'symbol') {
+        if (prop === FLAT_SCOPE_MARKER) return true;
+        return Reflect.get(target, prop, receiver);
+      }
+
+      // Internal properties (_type, _ids, _parentIds, _registry)
+      if (prop.startsWith('_')) {
+        return Reflect.get(target, prop, receiver);
+      }
+
+      // Scope variable lookup - check current scope IDs first
+      const id = target._ids[prop];
+      if (id !== undefined && target._registry.has(id)) {
+        return target._registry.get(id);
+      }
+
+      // Check parent scope IDs
+      if (target._parentIds) {
+        const parentId = target._parentIds[prop];
+        if (parentId !== undefined && target._registry.has(parentId)) {
+          return target._registry.get(parentId);
+        }
+      }
+
+      return undefined;
+    },
+
+    has(target, prop) {
+      // Symbol access
+      if (typeof prop === 'symbol') {
+        return prop === FLAT_SCOPE_MARKER;
+      }
+
+      // Internal properties
+      if (prop.startsWith('_')) {
+        return Reflect.has(target, prop);
+      }
+
+      // Check if variable exists in current scope
+      if (target._ids[prop] !== undefined && target._registry.has(target._ids[prop])) {
+        return true;
+      }
+
+      // Check parent scope
+      if (target._parentIds && target._parentIds[prop] !== undefined) {
+        return target._registry.has(target._parentIds[prop]);
+      }
+
+      return false;
+    },
+
+    set(target, prop, value, receiver) {
+      // Block all sets to enforce immutability
+      // Scope values should only be updated via setFlatScopeValue()
+      return false;
+    },
+
+    ownKeys(target) {
+      // Return only keys that actually exist on the target object
+      // Virtual scope variables from _ids are not included to allow freezing
+      return Reflect.ownKeys(target);
+    },
+
+    getOwnPropertyDescriptor(target, prop) {
+      // For symbols, return the descriptor from the target
+      // This is required to satisfy Proxy invariants when target is non-extensible
+      if (typeof prop === 'symbol') {
+        return Reflect.getOwnPropertyDescriptor(target, prop);
+      }
+
+      // Internal properties
+      if (prop.startsWith('_')) {
+        return Reflect.getOwnPropertyDescriptor(target, prop);
+      }
+
+      // CRITICAL FIX: Scope variables are virtual (stored in registry, not on target)
+      // When target is frozen/non-extensible, we cannot claim properties exist on it
+      // Return undefined to indicate they're not own properties
+      // The `has` and `get` traps will still make them accessible via prototype chain lookup
+      return undefined;
+    },
+
+    setPrototypeOf(target, proto) {
+      // SECURITY: Block prototype modification to prevent prototype pollution attacks
+      throw new TypeError(
+        'Reflex Security: Cannot set prototype of FlatScope.\n' +
+        'FlatScope is immutable and protected against prototype pollution.'
+      );
+    }
+  });
+
+  return proxy as FlatScope;
 }
 
 /**

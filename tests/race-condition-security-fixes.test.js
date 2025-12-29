@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { Reflex } from '../src/index.ts';
+import { Reflex, SafeHTML } from '../src/index.ts';
 
 describe('Critical Security & Race Condition Fixes', () => {
   beforeEach(() => {
@@ -85,57 +85,42 @@ describe('Critical Security & Race Condition Fixes', () => {
 
   describe('2. Critical: XSS in setInnerHTML', () => {
     it('blocks SVG with onload event handler', async () => {
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
       const container = document.createElement('div');
       const { DOMRenderer } = await import('../src/renderers/dom.ts');
 
-      // Try to inject SVG XSS
-      DOMRenderer.setInnerHTML(container, '<svg onload=alert(1)></svg>');
-
-      // Should be blocked
-      expect(container.textContent).toBe('[Content blocked for security reasons]');
-      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('BLOCKED dangerous HTML'));
-
-      errorSpy.mockRestore();
+      // BREAKING CHANGE: setInnerHTML now requires SafeHTML instances
+      // Raw strings are rejected at the type level (stronger security)
+      expect(() => {
+        DOMRenderer.setInnerHTML(container, '<svg onload=alert(1)></svg>');
+      }).toThrow(/SafeHTML/i);
     });
 
     it('blocks img with onerror event handler', async () => {
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
       const container = document.createElement('div');
       const { DOMRenderer } = await import('../src/renderers/dom.ts');
 
-      // Try to inject img XSS
-      DOMRenderer.setInnerHTML(container, '<img src=x onerror=alert(1)>');
-
-      // Should be blocked
-      expect(container.textContent).toBe('[Content blocked for security reasons]');
-      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('BLOCKED dangerous HTML'));
-
-      errorSpy.mockRestore();
+      // BREAKING CHANGE: Raw strings rejected
+      expect(() => {
+        DOMRenderer.setInnerHTML(container, '<img src=x onerror=alert(1)>');
+      }).toThrow(/SafeHTML/i);
     });
 
     it('blocks body with onload event handler', async () => {
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
       const container = document.createElement('div');
       const { DOMRenderer } = await import('../src/renderers/dom.ts');
 
-      // Try to inject body XSS
-      DOMRenderer.setInnerHTML(container, '<body onload=alert(1)>test</body>');
-
-      // Should be blocked
-      expect(container.textContent).toBe('[Content blocked for security reasons]');
-
-      errorSpy.mockRestore();
+      // BREAKING CHANGE: Raw strings rejected
+      expect(() => {
+        DOMRenderer.setInnerHTML(container, '<body onload=alert(1)>test</body>');
+      }).toThrow(/SafeHTML/i);
     });
 
     it('allows safe HTML', async () => {
       const container = document.createElement('div');
       const { DOMRenderer } = await import('../src/renderers/dom.ts');
 
-      DOMRenderer.setInnerHTML(container, '<p>Hello <strong>World</strong></p>');
+      // Use SafeHTML.unsafe() for trusted content
+      DOMRenderer.setInnerHTML(container, SafeHTML.unsafe('<p>Hello <strong>World</strong></p>'));
 
       expect(container.innerHTML).toBe('<p>Hello <strong>World</strong></p>');
     });

@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { Reflex } from '../src/index.ts';
+import { Reflex, SafeHTML } from '../src/index.ts';
 
 describe('Directive Composition', () => {
   beforeEach(() => {
@@ -199,8 +199,7 @@ describe('Directive Composition', () => {
 
     it('should handle m-html with m-if', async () => {
       document.body.innerHTML = '<div m-if="show" m-html="content"></div>';
-      const app = new Reflex({ show: false, content: '<strong>Bold</strong>' });
-      app.configure({ sanitize: false });
+      const app = new Reflex({ show: false, content: SafeHTML.unsafe('<strong>Bold</strong>') });
       await app.nextTick();
 
       expect(document.querySelector('div')).toBeNull();
