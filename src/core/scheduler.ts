@@ -19,9 +19,18 @@ import { ACTIVE, RUNNING, QUEUED, META } from './symbols.js';
 // This can break libraries that expect native behavior or have custom polyfills
 if (typeof globalThis !== 'undefined' && typeof globalThis.queueMicrotask === 'undefined') {
   (globalThis as any).queueMicrotask = (callback: () => void) => {
-    Promise.resolve().then(callback).catch(err =>
-      setTimeout(() => { throw err; }, 0)
-    );
+    Promise.resolve().then(callback).catch(err => {
+      // CRITICAL FIX: Better error reporting for polyfill
+      // Use reportError if available (modern browsers), fallback to console.error
+      // This preserves the error context better than setTimeout(() => throw)
+      if (typeof globalThis.reportError === 'function') {
+        globalThis.reportError(err);
+      } else {
+        // Fallback for older browsers: log and rethrow async
+        console.error('Uncaught error in queueMicrotask:', err);
+        setTimeout(() => { throw err; }, 0);
+      }
+    });
   };
 }
 
