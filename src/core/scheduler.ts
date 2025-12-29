@@ -119,8 +119,12 @@ export const SchedulerMixin = {
    * Uses double-buffering to reduce GC pressure by reusing arrays
    * Includes circular dependency detection to prevent infinite loops
    * Yields to browser after YIELD_THRESHOLD to prevent UI freezes
+   *
+   * CRITICAL FIX: nextTick Deadlock Prevention
+   * Returns true if flush completed successfully, false if there was an error.
+   * This allows nextTick to reject its promise if the scheduler crashed.
    */
-  flushQueue() {
+  flushQueue(): boolean {
     const start = performance.now();
     // CRITICAL FIX: Use class property instead of local variable
     // Local variable resets to 0 on every resume, allowing slow circular dependencies
@@ -151,7 +155,7 @@ export const SchedulerMixin = {
         this._handleError(error, null);
         this._p = false;
         this._flushIterations = 0; // Reset counter after error
-        return;
+        return false; // Signal error to callers
       }
 
       // Process jobs one by one with time slicing
@@ -168,12 +172,14 @@ export const SchedulerMixin = {
           // Toggle back to restore consistent state
           this._qf = !this._qf;
 
-          // CRITICAL FIX #3: Reset _flushIterations on yield to prevent false positives
-          // When processing heavy but valid updates (e.g., 5000 rows), the scheduler
-          // yields to the browser many times. Without resetting the counter, legitimate
-          // work gets flagged as circular dependency and crashes the app.
-          // We're making progress (processed some jobs), so reset the counter.
-          this._flushIterations = 0;
+          // CRITICAL FIX: DO NOT reset _flushIterations here!
+          // Resetting allows slow infinite loops to bypass the safety check.
+          // If a circular dependency creates jobs slowly (>5ms per 100 ops),
+          // the scheduler yields, resets the counter, and resumes - allowing
+          // infinite loops to run forever as a "slow burn" DoS.
+          // The counter should only reset on successful completion or error,
+          // NOT on yield. This allows legitimate heavy work to complete while
+          // still catching infinite loops that span multiple yield cycles.
 
           // Use Scheduler API if available (better priority control), otherwise setTimeout
           if (typeof globalThis !== 'undefined' && globalThis.scheduler?.postTask) {
@@ -182,8 +188,9 @@ export const SchedulerMixin = {
             setTimeout(() => this.flushQueue(), 0);
           }
 
-          // Return without clearing _p flag - we'll resume later
-          return;
+          // Return true - we're deferring completion, not erroring
+          // The _p flag remains true to indicate work is pending
+          return true;
         }
 
         const j = q[i];
@@ -199,6 +206,7 @@ export const SchedulerMixin = {
     // All jobs processed successfully
     this._p = false;
     this._flushIterations = 0; // Reset counter after successful flush
+    return true; // Signal success to callers
   },
 
   /**
@@ -338,12 +346,23 @@ export const SchedulerMixin = {
   /**
    * Execute callback after next DOM update
    * CRITICAL FIX: Prevent deadlock by handling errors properly
+   *
+   * CRITICAL FIX: nextTick Deadlock Risk
+   * flushQueue catches errors internally to keep the app alive, so it doesn't throw.
+   * Instead, it returns false if there was an error. We check this return value
+   * and reject the promise if the scheduler crashed, preventing code from running
+   * on a dirty/corrupt DOM state.
    */
   nextTick(fn?: () => void) {
     return new Promise<void>((resolve, reject) => {
       queueMicrotask(() => {
         try {
-          this.flushQueue();
+          const success = this.flushQueue();
+          if (!success) {
+            // Scheduler crashed - reject the promise to prevent running on dirty DOM
+            reject(new Error('Scheduler flush failed - circular dependency or error detected'));
+            return;
+          }
           fn?.();
           resolve();
         } catch (err) {
@@ -368,15 +387,50 @@ export const SchedulerMixin = {
    * Traverse value deeply for deep watch tracking
    * PERFORMANCE: Uses iterative stack-based approach to avoid recursion limits
    * Can handle deeply nested structures without stack overflow
+   *
+   * CRITICAL FIX: Deep Watch Stack Overflow - Add traversal limits
+   * Without limits, traversing massive non-reactive objects (e.g., Three.js scenes,
+   * large JSON blobs) can freeze the main thread for seconds.
+   * We add depth and node count limits to prevent DoS.
    */
   _trv(v: any, s = new Set<any>()) {
     if (v === null || typeof v !== 'object') return;
 
+    // CRITICAL: Traversal limits to prevent freeze on massive objects
+    const MAX_DEPTH = 50;        // Maximum nesting depth
+    const MAX_NODES = 10000;     // Maximum number of objects to traverse
+    let nodesVisited = 0;
+
     // Use a stack to avoid recursion (prevents stack overflow on deep objects)
-    const stack = [v];
+    // Each stack entry includes the object and its depth
+    const stack = [{ obj: v, depth: 0 }];
 
     while (stack.length > 0) {
-      const current = stack.pop();
+      const { obj: current, depth } = stack.pop();
+
+      // CRITICAL: Enforce depth limit
+      if (depth > MAX_DEPTH) {
+        if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+          console.warn(
+            `Reflex: Deep watch traversal exceeded max depth (${MAX_DEPTH}). ` +
+            'This may indicate a circular reference or excessively deep object. ' +
+            'Consider using shallow watch or restructuring your data.'
+          );
+        }
+        continue; // Skip this subtree
+      }
+
+      // CRITICAL: Enforce node count limit
+      if (++nodesVisited > MAX_NODES) {
+        if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+          console.warn(
+            `Reflex: Deep watch traversal exceeded max nodes (${MAX_NODES}). ` +
+            'Avoid putting massive non-reactive objects (e.g., Three.js scenes) into reactive state. ' +
+            'Use shallow watch or mark objects with SKIP symbol.'
+          );
+        }
+        return; // Stop traversal entirely
+      }
 
       // Skip if already visited or not an object
       if (current === null || typeof current !== 'object' || s.has(current)) continue;
@@ -387,24 +441,25 @@ export const SchedulerMixin = {
       const meta = current[META] || this._mf.get(current);
       if (meta) this.trackDependency(meta, Symbol.for('rx.iterate'));
 
-      // Add children to stack
+      // Add children to stack with incremented depth
+      const nextDepth = depth + 1;
       if (Array.isArray(current)) {
         for (const item of current) {
           if (item !== null && typeof item === 'object') {
-            stack.push(item);
+            stack.push({ obj: item, depth: nextDepth });
           }
         }
       } else if (current instanceof Map || current instanceof Set) {
         current.forEach(item => {
           if (item !== null && typeof item === 'object') {
-            stack.push(item);
+            stack.push({ obj: item, depth: nextDepth });
           }
         });
       } else {
         for (const k in current) {
           const child = current[k];
           if (child !== null && typeof child === 'object') {
-            stack.push(child);
+            stack.push({ obj: child, depth: nextDepth });
           }
         }
       }
