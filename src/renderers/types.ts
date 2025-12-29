@@ -232,13 +232,14 @@ export interface IRendererAdapter {
   /**
    * Set inner HTML of an element
    *
-   * BREAKING CHANGE: Only accepts SafeHTML instances.
-   * Raw strings will throw TypeError.
+   * SECURITY: Validates content for dangerous patterns.
+   * Dangerous patterns will throw Error with "SECURITY ERROR".
+   * Safe raw strings will warn in development mode.
    *
    * @param node - Element node
-   * @param html - SafeHTML instance containing sanitized content
+   * @param html - SafeHTML instance or raw string
    */
-  setInnerHTML(node: VNode | Element, html: SafeHTML): void;
+  setInnerHTML(node: VNode | Element, html: SafeHTML | string): void;
 
   /**
    * Get all attributes of an element

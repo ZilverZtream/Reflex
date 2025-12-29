@@ -1639,13 +1639,15 @@ export const CompilerMixin = {
             `Received: ${typeof rawValue}\n\n` +
             `BREAKING CHANGE: Raw strings are no longer accepted.\n\n` +
             `Migration:\n` +
-            `  In your state/computed, wrap with SafeHTML:\n` +
-            `  computed: {\n` +
-            `    htmlContent() {\n` +
-            `      return SafeHTML.sanitize(this.userInput);\n` +
-            `    }\n` +
-            `  }\n\n` +
-            `Then use: <div m-html="htmlContent"></div>`
+            `  1. Install DOMPurify: npm install dompurify @types/dompurify\n` +
+            `  2. Configure at app startup: SafeHTML.configureSanitizer(DOMPurify);\n` +
+            `  3. In your state/computed, wrap with SafeHTML:\n` +
+            `     computed: {\n` +
+            `       htmlContent() {\n` +
+            `         return SafeHTML.sanitize(this.userInput);\n` +
+            `       }\n` +
+            `     }\n` +
+            `  4. Then use: <div m-html="htmlContent"></div>`
           );
         }
 
