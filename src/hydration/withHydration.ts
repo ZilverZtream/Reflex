@@ -25,8 +25,9 @@
  * app.hydrate(document.getElementById('app'));
  */
 
-import { META, ITERATE, SKIP } from '../core/symbols.js';
+import { META, ITERATE, SKIP, UNSAFE_PROPS } from '../core/symbols.js';
 import { runTransition } from '../core/compiler.js';
+import { resolveDuplicateKey } from '../core/reconcile.js';
 
 /**
  * Hydration mixin methods.
@@ -184,20 +185,51 @@ const HydrationMixin = {
       try {
         const fn = this._fn(valueExpression);
         const stateValue = fn(this.s, o);
-        const domValue = n.value;
 
-        // If DOM value differs from state, user has modified it - preserve DOM value
-        if (domValue !== '' && String(stateValue) !== domValue) {
+        // CRITICAL FIX: Checkbox/Radio State Corruption
+        // For checkboxes and radios, we need to compare checked state, not value
+        // Checkboxes have domValue="on" (string) but stateValue=true (boolean)
+        // Comparing String(true) !== "on" incorrectly overwrites state with "on"
+        const type = (n.type || '').toLowerCase();
+        const isCheckbox = type === 'checkbox';
+        const isRadio = type === 'radio';
+
+        let shouldPreserve = false;
+        let finalValue;
+
+        if (isCheckbox || isRadio) {
+          // For boolean inputs, compare checked state instead of value
+          const domChecked = n.checked;
+          const stateChecked = isCheckbox ? !!stateValue : (String(stateValue) === String(n.value));
+
+          if (domChecked !== stateChecked) {
+            shouldPreserve = true;
+            // Preserve the checked state
+            if (isCheckbox) {
+              finalValue = domChecked;
+            } else {
+              // Radio: preserve the value if checked
+              finalValue = domChecked ? n.value : stateValue;
+            }
+          }
+        } else {
+          // For text/number inputs, compare values
+          const domValue = n.value;
+          if (domValue !== '' && String(stateValue) !== domValue) {
+            shouldPreserve = true;
+            // Preserve type: convert to number for number inputs
+            if (type === 'number' || type === 'range') {
+              finalValue = domValue === '' ? null : parseFloat(domValue);
+            } else {
+              finalValue = domValue;
+            }
+          }
+        }
+
+        if (shouldPreserve) {
           // CRITICAL FIX: Properly handle bracket notation in expressions
           // Expression: items[0].value should set state.items[0].value, NOT state['items[0]']['value']
           // We need to manually traverse the path, correctly parsing brackets
-
-          // Preserve type: convert to number for number inputs
-          const type = (n.type || '').toLowerCase();
-          let finalValue = domValue;
-          if (type === 'number' || type === 'range') {
-            finalValue = domValue === '' ? null : parseFloat(domValue);
-          }
 
           // Parse path segments correctly, handling both dots and brackets
           // Examples: "items[0].name" -> ["items", 0, "name"]
@@ -241,9 +273,23 @@ const HydrationMixin = {
           // Navigate to the parent object and set the final property
           if (pathSegments.length > 0) {
             const finalKey = pathSegments.pop();
+
+            // CRITICAL SECURITY FIX: Prototype Pollution Prevention
+            // Block unsafe properties to prevent attacks like m-model="constructor.prototype.isAdmin"
+            if (UNSAFE_PROPS[finalKey]) {
+              console.warn('Reflex Hydration: Blocked attempt to set unsafe property:', finalKey);
+              return;
+            }
+
             let target = o && pathSegments[0] in o ? o : this.s;
 
             for (const segment of pathSegments) {
+              // CRITICAL SECURITY FIX: Check each segment for prototype pollution
+              if (UNSAFE_PROPS[segment]) {
+                console.warn('Reflex Hydration: Blocked attempt to traverse unsafe property:', segment);
+                return;
+              }
+
               if (target[segment] == null) {
                 // Create intermediate objects/arrays as needed
                 const nextSegment = pathSegments[pathSegments.indexOf(segment) + 1];
@@ -297,19 +343,27 @@ const HydrationMixin = {
             this.s[v].push(n);
 
             this._reg(n, () => {
-              // Remove from array (find by reference)
+              // CRITICAL FIX: O(N²) Performance DoS - Use swap-and-pop instead of splice
               const refsArray = this._refs[v];
               if (Array.isArray(refsArray)) {
                 const idx = refsArray.indexOf(n);
                 if (idx !== -1) {
-                  refsArray.splice(idx, 1);
+                  const lastIdx = refsArray.length - 1;
+                  if (idx !== lastIdx) {
+                    refsArray[idx] = refsArray[lastIdx];
+                  }
+                  refsArray.pop();
                 }
               }
               const stateArray = this.s[v];
               if (Array.isArray(stateArray)) {
                 const idx = stateArray.indexOf(n);
                 if (idx !== -1) {
-                  stateArray.splice(idx, 1);
+                  const lastIdx = stateArray.length - 1;
+                  if (idx !== lastIdx) {
+                    stateArray[idx] = stateArray[lastIdx];
+                  }
+                  stateArray.pop();
                 }
               }
             });
@@ -446,6 +500,12 @@ const HydrationMixin = {
       let rows = new Map();
       let oldKeys = [];
 
+      // CRITICAL FIX: Hydration Ghost Nodes - Use duplicate key resolution
+      // The compiler uses resolveDuplicateKey to handle duplicate keys, but
+      // hydration was missing this logic, causing ghost nodes when duplicate
+      // keys are encountered during hydration.
+      const seenKeys = new Map();
+
       // Hydrate existing nodes
       for (let i = 0; i < existingNodes.length; i++) {
         const node = existingNodes[i];
@@ -458,7 +518,10 @@ const HydrationMixin = {
         sc[alias] = item;
         if (idxAlias) sc[idxAlias] = i;
 
-        const key = kAttr ? (keyIsProp ? (item && item[kAttr]) : keyFn(this.s, sc)) : i;
+        let key = kAttr ? (keyIsProp ? (item && item[kAttr]) : keyFn(this.s, sc)) : i;
+        // CRITICAL: Resolve duplicate keys to prevent ghost nodes
+        key = resolveDuplicateKey(seenKeys, key, i);
+
         const scope = this._r(sc);
 
         // Remove m-for and m-key attributes from hydrated nodes

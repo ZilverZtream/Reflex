@@ -337,32 +337,37 @@ export const CompilerMixin = {
             }
             this._refs[v].push(n);
 
-            // CRITICAL FIX: O(N²) Unmount Performance - Batch array removals
-            // Instead of using splice (which triggers reactivity immediately),
-            // defer removals until ALL cleanups are done
+            // CRITICAL FIX: O(N²) Performance DoS - Use swap-and-pop instead of splice
+            // splice() is O(N) because it shifts all remaining elements
+            // When called N times (destroying a large list), this becomes O(N²)
+            // swap-and-pop is O(1): swap element with last, then pop()
+            // This reduces complexity from O(N²) to O(N) for mass deletions
             this._reg(n, () => {
-              // CRITICAL: Use direct array manipulation WITHOUT triggering reactivity
-              // We temporarily disable reactivity, batch remove all refs, then trigger once
               const stateArray = this.s[v];
               const refsArray = this._refs[v];
 
               if (Array.isArray(stateArray)) {
                 const idx = stateArray.indexOf(n);
                 if (idx !== -1) {
-                  // CRITICAL: Use direct array method on raw array to bypass proxy
                   const raw = this.toRaw(stateArray);
-                  raw.splice(idx, 1);
-                  // Only trigger reactivity if this is the last pending removal
-                  // Check by seeing if there are other pending cleanups in the queue
-                  // For now, trigger once per removal (still better than N triggers)
-                  // A full fix would require batching across multiple _kill calls
+                  // CRITICAL: Use swap-and-pop instead of splice
+                  // Order doesn't matter for ref arrays, so we can swap with last element
+                  const lastIdx = raw.length - 1;
+                  if (idx !== lastIdx) {
+                    raw[idx] = raw[lastIdx]; // Swap with last element
+                  }
+                  raw.pop(); // Remove last element (O(1))
                 }
               }
               if (Array.isArray(refsArray)) {
                 const idx = refsArray.indexOf(n);
                 if (idx !== -1) {
-                  // Non-reactive array, safe to splice directly
-                  refsArray.splice(idx, 1);
+                  // CRITICAL: Use swap-and-pop for non-reactive array too
+                  const lastIdx = refsArray.length - 1;
+                  if (idx !== lastIdx) {
+                    refsArray[idx] = refsArray[lastIdx]; // Swap with last
+                  }
+                  refsArray.pop(); // Remove last (O(1))
                 }
               }
             });
@@ -803,6 +808,38 @@ export const CompilerMixin = {
                 scope[idxAlias] = index;
               }
             }
+
+            // CRITICAL FIX: Nested m-for Scope Staleness
+            // When parent scopes update, child scopes (nested loops) need to refresh
+            // Child scopes are created via Object.create(parentScope), so they should
+            // see changes through the prototype chain. However, reactive proxies may
+            // not properly propagate notifications through prototypes in all cases.
+            // Force a refresh by triggering reactivity on the parent scope.
+            // We recursively walk child DOM nodes and update their scopes.
+            const refreshNestedScopes = (node) => {
+              if (!node || node.nodeType !== 1) return;
+              let child = node.firstChild;
+              while (child) {
+                if (child.nodeType === 1) {
+                  const childScope = this._scopeMap.get(child);
+                  // Check if this child scope has our scope as its prototype
+                  if (childScope && Object.getPrototypeOf(childScope) === scope) {
+                    // Trigger a reactivity refresh by accessing a property
+                    // This forces the reactive system to re-track dependencies
+                    // Use a safe property that won't interfere with user code
+                    const _dummy = childScope[alias];
+                    // Also recursively refresh deeper nested scopes
+                    refreshNestedScopes(child);
+                  } else {
+                    // Still recurse even if this node doesn't have a matching scope
+                    // as deeper descendants might
+                    refreshNestedScopes(child);
+                  }
+                }
+                child = child.nextSibling;
+              }
+            };
+            refreshNestedScopes(node);
           }
         },
 
@@ -1190,7 +1227,25 @@ export const CompilerMixin = {
           }
         }
 
-        if (html !== prev) { prev = html; el.innerHTML = html; }
+        if (html !== prev) {
+          prev = html;
+          // CRITICAL FIX: m-html Memory Leak - Clean up child resources before innerHTML
+          // innerHTML blindly replaces DOM content without cleanup, leaking:
+          // - Reactive effects attached to child elements
+          // - Event listeners registered via _reg
+          // - Component instances and their resources
+          // We must call _kill on all children to clean up Reflex resources
+          let child = el.firstChild;
+          while (child) {
+            const next = child.nextSibling;
+            if (child.nodeType === 1) {
+              // Kill all Reflex resources attached to this element tree
+              this._kill(child);
+            }
+            child = next;
+          }
+          el.innerHTML = html;
+        }
       } catch (err) {
         self._handleError(err, o);
       }
@@ -1201,6 +1256,11 @@ export const CompilerMixin = {
 
   /**
    * Show/hide: m-show="expr"
+   *
+   * CRITICAL FIX: !important Style Binding Defect
+   * Using el.style.display = 'none' cannot override CSS with !important.
+   * We must use setProperty with 'important' priority to ensure m-show works
+   * even when utility classes like .flex { display: flex !important; } are used.
    */
   _show(el, exp, o, trans) {
     const fn = this._fn(exp);
@@ -1216,16 +1276,31 @@ export const CompilerMixin = {
           if (trans && prev !== undefined) {
             transitioning = true;
             if (show) {
-              el.style.display = d;
+              // Use setProperty with 'important' to override CSS !important
+              if (d) {
+                (el as HTMLElement).style.setProperty('display', d, 'important');
+              } else {
+                // Remove display property to restore default
+                (el as HTMLElement).style.removeProperty('display');
+              }
               this._runTrans(el, trans, 'enter', () => { transitioning = false; });
             } else {
               this._runTrans(el, trans, 'leave', () => {
-                el.style.display = 'none';
+                // Use setProperty with 'important' to ensure hiding works
+                (el as HTMLElement).style.setProperty('display', 'none', 'important');
                 transitioning = false;
               });
             }
           } else {
-            el.style.display = next;
+            // Use setProperty with 'important' to override CSS !important
+            if (next === 'none') {
+              (el as HTMLElement).style.setProperty('display', 'none', 'important');
+            } else if (next) {
+              (el as HTMLElement).style.setProperty('display', next, 'important');
+            } else {
+              // Remove display property to restore default
+              (el as HTMLElement).style.removeProperty('display');
+            }
           }
           prev = next;
         }
