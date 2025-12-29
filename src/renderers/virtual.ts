@@ -15,6 +15,7 @@
  */
 
 import type { IRendererAdapter, TransitionConfig, VNode } from './types.js';
+import { SafeHTML } from './dom.js';
 
 /** Node type constants (matching DOM) */
 const ELEMENT_NODE = 1;
@@ -1609,13 +1610,27 @@ export class VirtualRenderer implements IRendererAdapter {
     }
   }
 
-  setInnerHTML(node: VNode, html: string): void {
-    node.innerHTML = html;
-    // In a real implementation, you'd parse the HTML into child nodes
-    // For now, store as raw string
+  setInnerHTML(node: VNode, html: SafeHTML): void {
+    // BREAKING CHANGE: Only SafeHTML accepted
+    if (!SafeHTML.isSafeHTML(html)) {
+      throw new TypeError(
+        `Reflex Security: setInnerHTML() requires SafeHTML instance.\n` +
+        `Received: ${typeof html}\n\n` +
+        `BREAKING CHANGE: Raw strings are no longer accepted.\n\n` +
+        `Migration:\n` +
+        `  1. Install: npm install dompurify @types/dompurify\n` +
+        `  2. Configure: SafeHTML.configureSanitizer(DOMPurify);\n` +
+        `  3. Use: renderer.setInnerHTML(el, SafeHTML.sanitize(html));\n\n` +
+        `For static trusted strings: SafeHTML.unsafe(staticString)`
+      );
+    }
+
+    // Convert SafeHTML to string and set innerHTML (which parses into child nodes)
+    node.innerHTML = html.toString();
 
     if (this.debug) {
-      console.log('[VirtualRenderer] setInnerHTML:', node.tagName, html.slice(0, 50) + '...');
+      const htmlStr = html.toString();
+      console.log('[VirtualRenderer] setInnerHTML:', node.tagName, htmlStr.slice(0, 50) + '...');
     }
   }
 

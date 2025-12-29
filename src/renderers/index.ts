@@ -29,7 +29,7 @@ export type {
 } from './types.js';
 
 // DOM Renderer (web target)
-export { DOMRenderer, runTransition } from './dom.js';
+export { DOMRenderer, runTransition, SafeHTML } from './dom.js';
 
 // Virtual Renderer (non-web targets)
 export { VirtualRenderer, createVirtualRenderer } from './virtual.js';
