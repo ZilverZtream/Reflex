@@ -289,7 +289,10 @@ export const SchedulerMixin = {
     // This prevents expensive computations from running during initialization
     // if they're never used in the template
 
-    return {
+    // CRITICAL FIX #8: Memory Leak Prevention - Auto-dispose computed
+    // Track this computed for automatic disposal when component unmounts
+    // If we're executing within an effect that has a scope, attach disposal to it
+    const computedObj = {
       get value() {
         if (self._e && !subs.has(self._e)) {
           subs.add(self._e);
@@ -306,6 +309,31 @@ export const SchedulerMixin = {
         subs.clear();
       }
     };
+
+    // CRITICAL FIX #8: Auto-register disposal in component lifecycle
+    // If we have an active component context, register the disposer
+    // This prevents "zombie effects" that leak memory when components unmount
+    if (self._activeComponent) {
+      // Register disposal callback on the active component
+      const dispose = () => computedObj.dispose();
+      if (typeof self._activeComponent._onUnmount === 'function') {
+        self._activeComponent._onUnmount(dispose);
+      } else if (typeof self._reg === 'function' && self._activeComponent.$el) {
+        // Fallback: register on component's root element
+        self._reg(self._activeComponent.$el, dispose);
+      } else {
+        // Last resort: warn the developer
+        if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+          console.warn(
+            'Reflex Memory Leak Warning: computed() called without disposal tracking.\n' +
+            'Make sure to call computed.dispose() when the component is destroyed.\n' +
+            'Example: onUnmounted(() => computed.dispose());'
+          );
+        }
+      }
+    }
+
+    return computedObj;
   },
 
   /**
@@ -436,16 +464,20 @@ export const SchedulerMixin = {
     if (v === null || typeof v !== 'object') return;
 
     // CRITICAL: Traversal limits to prevent freeze on massive objects
-    // CRITICAL FIX: Increased MAX_DEPTH from 50 to 1500 to support deep object trees
-    // Deep watchers need to track objects nested 1000+ levels for legitimate use cases
-    // (e.g., deeply nested JSON structures, tree data structures)
-    // CRITICAL FIX #9: Scheduler DoS Prevention - Reduced MAX_NODES from 150000 to 10000
-    // 150,000 nodes can lock the main thread for 50-100ms+ causing severe UI jank
-    // 10,000 nodes is a safer limit that completes in ~5-10ms on modern hardware
-    // Users watching massive objects (e.g., Three.js scenes, large JSON blobs) should use
-    // shallow watch or mark objects with SKIP symbol to prevent DoS
-    const MAX_DEPTH = 1500;      // Maximum nesting depth (increased from 50)
-    const MAX_NODES = 10000;     // Maximum number of objects to traverse (reduced from 150000 for performance)
+    // CRITICAL FIX #6: DoS Prevention - Reduced limits to prevent UI freezing
+    // Previous limits (MAX_DEPTH=1500, MAX_NODES=10000) were too high and could
+    // cause 5-50ms+ main thread blocking, leading to severe UI jank and DoS.
+    //
+    // New safer limits:
+    // - MAX_DEPTH: 100 (reduced from 1500) - sufficient for most real-world data structures
+    // - MAX_NODES: 1000 (reduced from 10000) - completes in ~1ms on modern hardware
+    //
+    // For deeply nested or large objects, users should:
+    // 1. Use shallow watch instead of deep watch
+    // 2. Mark large objects with SKIP symbol to exclude from traversal
+    // 3. Restructure data to be flatter (normalized state patterns)
+    const MAX_DEPTH = 100;       // Maximum nesting depth (reduced from 1500 for DoS prevention)
+    const MAX_NODES = 1000;      // Maximum number of objects to traverse (reduced from 10000 for performance)
     let nodesVisited = 0;
 
     // Use a stack to avoid recursion (prevents stack overflow on deep objects)

@@ -60,6 +60,18 @@ const SAFE_OBJECT = {
 // Add safe Object to SAFE_GLOBALS
 SAFE_GLOBALS['Object'] = SAFE_OBJECT;
 
+// CRITICAL SECURITY WARNING: Blacklist Approach Fragility
+// This blacklist-based approach has inherent weaknesses:
+// 1. New dangerous properties added to JavaScript (e.g., future TC39 proposals) won't be blocked
+// 2. Browser extensions and polyfills can add non-standard dangerous accessors
+// 3. Legacy browsers may have additional dangerous properties not listed here
+//
+// RECOMMENDATION: For maximum security, consider:
+// - Implementing a whitelist of known-safe properties
+// - Using a more restrictive CSP that blocks all dynamic code execution
+// - Regularly auditing and updating this blacklist
+// - Running templates in isolated contexts (Workers, sandboxed iframes)
+//
 // Dangerous property names that could lead to prototype pollution or app state leaks
 const UNSAFE_PROPS = Object.assign(Object.create(null), {
   constructor: 1, prototype: 1, __defineGetter__: 1, __defineSetter__: 1,
@@ -87,9 +99,45 @@ const UNSAFE_PROPS = Object.assign(Object.create(null), {
   self: 1,
   top: 1,
   parent: 1,
-  frames: 1
+  frames: 1,
+  // CRITICAL FIX #9: Expanded blacklist for additional attack vectors
+  // Add properties that might be added by polyfills or browser extensions
+  eval: 1,
+  Function: 1,
+  Worker: 1,
+  SharedWorker: 1,
+  ServiceWorker: 1,
+  importScripts: 1,
+  postMessage: 1,
+  // Reflect and Proxy can be used to bypass protections
+  Reflect: 1,
+  Proxy: 1
 });
 UNSAFE_PROPS['__proto__'] = 1;
+
+/**
+ * CRITICAL FIX #9: Runtime property safety validation
+ * Check if a property name matches patterns known to be dangerous
+ * This provides defense-in-depth against properties not in the blacklist
+ */
+function isDangerousPropertyPattern(prop: string): boolean {
+  if (typeof prop !== 'string') return false;
+
+  // Properties starting with __ are often internal/dangerous
+  if (prop.startsWith('__')) return true;
+
+  // Properties containing 'constructor', 'proto', 'eval', etc.
+  const dangerousSubstrings = [
+    'constructor', 'proto', 'eval', 'function',
+    'import', 'require', 'process', 'global'
+  ];
+  const lowerProp = prop.toLowerCase();
+  for (const dangerous of dangerousSubstrings) {
+    if (lowerProp.includes(dangerous)) return true;
+  }
+
+  return false;
+}
 
 // Dangerous method names that should be blocked on any object
 const UNSAFE_METHODS = Object.assign(Object.create(null), {
@@ -568,7 +616,8 @@ export class SafeExprParser {
 
       case 'identifier': {
         const name = node.name;
-        if (UNSAFE_PROPS[name]) {
+        // CRITICAL FIX #9: Enhanced property validation with pattern matching
+        if (UNSAFE_PROPS[name] || isDangerousPropertyPattern(name)) {
           console.warn('Reflex: Blocked access to unsafe property:', name);
           return undefined;
         }
@@ -601,7 +650,8 @@ export class SafeExprParser {
         const prop = node.computed
           ? this._evaluate(node.property, state, context, $event, $el, reflex)
           : node.property;
-        if (UNSAFE_PROPS[prop]) {
+        // CRITICAL FIX #9: Enhanced property validation with pattern matching
+        if (UNSAFE_PROPS[prop] || isDangerousPropertyPattern(prop)) {
           console.warn('Reflex: Blocked access to unsafe property:', prop);
           return undefined;
         }
