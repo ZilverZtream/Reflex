@@ -213,10 +213,14 @@ export const ArrayHandler: ProxyHandler<any[]> = {
       throw new Error(`Reflex: Cannot define unsafe property '${k}'`);
     }
     const meta = (o as ReactiveTarget)[META] as ReactiveMeta;
+    const engine = meta.engine;
     const res = Reflect.defineProperty(o, k, desc);
     if (res) {
-      meta.v++; // Increment version on mutation
-      const engine = meta.engine;
+      // CRITICAL FIX: Version Counter - Only increment if not in a batch
+      // Same logic as set handler: avoid double increment when in batched operations
+      if (engine._b === 0) {
+        meta.v++; // Increment version on mutation
+      }
       engine.triggerEffects(meta, k);
       engine.triggerEffects(meta, ITERATE);
     }
@@ -300,10 +304,14 @@ export const ObjectHandler: ProxyHandler<ReactiveTarget> = {
   deleteProperty(o, k) {
     const meta = o[META] as ReactiveMeta;
     if (!(k in o)) return true;
+    const engine = meta.engine;
     const res = Reflect.deleteProperty(o, k);
     if (res) {
-      meta.v++; // Increment version on mutation
-      const engine = meta.engine;
+      // CRITICAL FIX: Version Counter - Only increment if not in a batch
+      // Same logic as set handler: avoid double increment when in batched operations
+      if (engine._b === 0) {
+        meta.v++; // Increment version on mutation
+      }
       engine.triggerEffects(meta, k);
       engine.triggerEffects(meta, ITERATE);
     }

@@ -189,7 +189,7 @@ export function reconcileKeyedList({
     const isVirtual = node._isVirtualContainer;
     const actualNodes = isVirtual ? node._nodes : [node];
     const firstNode = actualNodes[0];
-    const lastNode = actualNodes[actualNodes.length - 1];
+    const _lastNode = actualNodes[actualNodes.length - 1];
 
     if (!lisSet.has(i)) {
       // Node needs to be moved/inserted
@@ -266,7 +266,7 @@ export function reconcileKeyedList({
  * @param {number} index - Current index (NOT used in key generation)
  * @returns {*} Unique key (original or fallback)
  */
-export function resolveDuplicateKey(seen, key, index) {
+export function resolveDuplicateKey(seen, key, _index) {
   // Check if we've seen this key before
   const seenEntry = seen.get(key);
 

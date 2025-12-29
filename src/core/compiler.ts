@@ -1087,8 +1087,10 @@ export const CompilerMixin = {
 
     // Cache initial static class/style to preserve when binding dynamic values
     // This prevents the "class wipeout" bug where :class overwrites static classes
-    const initialClass = att === 'class' ? el.className : null;
-    const initialStyle = att === 'style' ? el.getAttribute('style') || '' : null;
+    // CRITICAL FIX: During hydration, skip initial class/style capture since those values
+    // come from server-side rendering, not static markup. Capturing them causes duplication.
+    const initialClass = (att === 'class' && !this._hydrateMode) ? el.className : null;
+    const initialStyle = (att === 'style' && !this._hydrateMode) ? el.getAttribute('style') || '' : null;
 
     // Track previous style keys for cleanup (fixes "stale style" bug)
     // When style object changes, we need to explicitly remove old properties

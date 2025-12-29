@@ -63,6 +63,10 @@ const HydrationMixin = {
     this._dr = el;
     this._hydrateMode = true;
 
+    // CRITICAL FIX: Mark as mounted to prevent auto-mount from re-processing
+    // Without this, autoMount's queued mount() call will duplicate bindings
+    this._m = true;
+
     // Process bindings on root element
     this._hydrateNode(el, null);
 
@@ -131,9 +135,8 @@ const HydrationMixin = {
               c.remove();
             }
           }
-        }
-        // Element node (1)
-        else if (nt === 1) {
+        } else if (nt === 1) {
+          // Element node (1)
           const mIgnore = c.getAttribute('m-ignore');
           if (mIgnore === null) {
             const tag = c.tagName;
