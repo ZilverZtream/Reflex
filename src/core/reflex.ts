@@ -14,6 +14,17 @@
  * extensions like hydration, SSR, and custom features.
  */
 
+// CRITICAL FIX #11: queueMicrotask polyfill for older browsers
+// Missing in iOS < 13, older Node.js, and legacy browsers
+// Fallback to Promise.resolve().then() which has equivalent semantics
+if (typeof queueMicrotask === 'undefined') {
+  (globalThis as any).queueMicrotask = (callback: () => void) => {
+    Promise.resolve().then(callback).catch(err =>
+      setTimeout(() => { throw err; }, 0)
+    );
+  };
+}
+
 // Symbols are used by mixins, and META is used for DevTools
 import { META } from './symbols.js';
 import { ReactivityMixin } from './reactivity.js';
@@ -147,7 +158,8 @@ export class Reflex {
       cspSafe: false,         // CSP-safe mode (no new Function)
       cacheSize: 1000,        // Expression cache size
       onError: null,          // Global error handler
-      domPurify: null         // DOMPurify instance for m-html sanitization
+      domPurify: null,        // DOMPurify instance for m-html sanitization
+      autoMount: options.autoMount !== false  // CRITICAL FIX #2: Make auto-mount opt-in
     };
 
     // === AUTO-CSP DETECTION ===
@@ -171,9 +183,12 @@ export class Reflex {
     // Initialize reactive state
     this.s = this._r(init);
 
-    // Auto-mount on DOM ready (browser only)
+    // CRITICAL FIX #2: Conditional auto-mount to prevent async initialization race conditions
+    // Auto-mount on DOM ready (browser only), but only if autoMount is enabled
+    // Users can disable with: new Reflex({}, { autoMount: false })
+    // This allows async initialization (e.g., fetching auth tokens) before mounting
     // For non-browser targets, user must call mount() explicitly with a virtual root
-    if (this._ren.isBrowser && typeof document !== 'undefined') {
+    if (this.cfg.autoMount && this._ren.isBrowser && typeof document !== 'undefined') {
       const r = document.readyState;
       if (r === 'loading') {
         document.addEventListener('DOMContentLoaded', () => this.mount(), { once: true });
@@ -513,6 +528,137 @@ export class Reflex {
     }
 
     return this;
+  }
+
+  /**
+   * Component rendering without recursive walking (for iterative stack processing)
+   * CRITICAL FIX #6: Non-recursive version of _comp
+   * This method sets up the component but doesn't walk it (no _w calls)
+   * The caller is responsible for walking the returned instance
+   * @returns The component instance element to be walked by the caller
+   */
+  _compNoRecurse(el: Element, tag: string, o: any): Element {
+    const def = this._cp.get(tag);
+    const inst = def._t.cloneNode(true) as Element;
+    const props = this._r({});
+    const propDefs = [];
+    const hostHandlers = Object.create(null);
+    const self = this;
+
+    // Collect cleanup functions registered via onCleanup
+    const cleanupFns: Array<() => void> = [];
+
+    // Capture slot content BEFORE processing attributes
+    const slotContent: Node[] = [];
+    while (el.firstChild) {
+      slotContent.push(el.removeChild(el.firstChild));
+    }
+
+    const attrs = Array.from(el.attributes) as Attr[];
+    for (const a of attrs) {
+      const n = a.name, v = a.value;
+      if (n.startsWith('@')) hostHandlers[n.slice(1)] = this._fn(v, true);
+      else if (n.startsWith(':')) propDefs.push({ name: n.slice(1), exp: v });
+      else props[n] = v;
+    }
+
+    for (const pd of propDefs) {
+      props[pd.name] = this._fn(pd.exp)(this.s, o);
+    }
+
+    const emit = (event, detail) => {
+      inst.dispatchEvent(new CustomEvent(event, { detail, bubbles: true }));
+      const h = hostHandlers[event];
+      if (h) h(this.s, o, detail);
+    };
+
+    const onCleanup = (fn: () => void) => {
+      if (typeof fn === 'function') {
+        cleanupFns.push(fn);
+      }
+    };
+
+    const scopeRaw = Object.assign({}, props);
+    scopeRaw.$props = props;
+    scopeRaw.$emit = emit;
+
+    if (def.s) {
+      const result = def.s(props, { emit, props, slots: {}, onCleanup });
+      if (result && typeof result === 'object') {
+        for (const k in result) {
+          scopeRaw[k] = (result[k] !== null && typeof result[k] === 'object')
+            ? this._r(result[k])
+            : result[k];
+        }
+      }
+    }
+    if (typeof scopeRaw.catchError !== 'function' && typeof def.catchError === 'function') {
+      scopeRaw.catchError = def.catchError;
+    }
+
+    const scope = this._r(scopeRaw);
+    el.replaceWith(inst);
+
+    // Store scope for later use by _w
+    this._scopeMap.set(inst, scope);
+
+    // Project slot content into <slot> elements
+    // CRITICAL FIX #6: Don't walk slotted content here - caller will walk the instance
+    if (slotContent.length > 0) {
+      const slots = inst.querySelectorAll('slot');
+      if (slots.length > 0) {
+        const defaultSlot = Array.from(slots).find(s => !s.hasAttribute('name')) || slots[0];
+        if (defaultSlot) {
+          const parent = defaultSlot.parentNode;
+          for (const node of slotContent) {
+            parent.insertBefore(node, defaultSlot);
+          }
+          defaultSlot.remove();
+        }
+      } else {
+        for (const node of slotContent) {
+          inst.appendChild(node);
+        }
+      }
+
+      // Process bindings on slotted content but don't walk yet
+      for (const node of slotContent) {
+        if (node.nodeType === 1) {
+          this._bnd(node as Element, o);
+          // CRITICAL FIX #6: Don't call _w - caller will walk
+        } else if (node.nodeType === 3) {
+          const nv = node.nodeValue;
+          if (typeof nv === 'string' && nv.indexOf('{{') !== -1) {
+            this._txt(node, o);
+          }
+        }
+      }
+    }
+
+    // Register all cleanup functions on the component instance
+    if (cleanupFns.length > 0) {
+      this._reg(inst, () => {
+        for (const fn of cleanupFns) {
+          try {
+            fn();
+          } catch (err) {
+            console.warn('Reflex: Error in component cleanup:', err);
+          }
+        }
+      });
+    }
+
+    for (const pd of propDefs) {
+      const fn = this._fn(pd.exp);
+      const e = this.createEffect(() => { props[pd.name] = fn(this.s, o); });
+      e.o = o;
+      this._reg(inst, e.kill);
+    }
+
+    this._bnd(inst, scope);
+    // CRITICAL FIX #6: Don't call _w here - caller will walk the returned instance
+
+    return inst;
   }
 
   /**

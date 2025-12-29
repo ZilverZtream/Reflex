@@ -70,34 +70,42 @@ export function runTransition(el: Element, name: string, type: 'enter' | 'leave'
     if (done) done();
   };
 
-  // Next frame: start transition
+  // CRITICAL FIX #8: Flaky Transitions - Use Double RAF
+  // A single requestAnimationFrame is often insufficient for the browser to apply the initial styles
+  // Browsers batch style updates, and a single frame may not guarantee the '-from' class has rendered
+  // Using two frames ensures the initial state is fully applied before transitioning
   requestAnimationFrame(() => {
     if (cleaned) return; // Transition was cancelled before it started
 
-    el.classList.remove(from);
-    el.classList.add(to);
+    // Second frame: Now swap classes to trigger the transition
+    requestAnimationFrame(() => {
+      if (cleaned) return; // Transition was cancelled during first frame
 
-    // Listen for transition end
-    el.addEventListener('transitionend', onEnd);
-    el.addEventListener('animationend', onEnd);
+      el.classList.remove(from);
+      el.classList.add(to);
 
-    // Fallback timeout (in case transitionend doesn't fire)
-    const style = getComputedStyle(el);
-    const duration = parseFloat(style.transitionDuration) || parseFloat(style.animationDuration) || 0;
-    const delay = parseFloat(style.transitionDelay) || parseFloat(style.animationDelay) || 0;
-    const timeout = (duration + delay) * 1000 + 50; // Add 50ms buffer
+      // Listen for transition end
+      el.addEventListener('transitionend', onEnd);
+      el.addEventListener('animationend', onEnd);
 
-    if (timeout > 50) {
-      timeoutId = setTimeout(() => {
-        if (cleaned) return;
+      // Fallback timeout (in case transitionend doesn't fire)
+      const style = getComputedStyle(el);
+      const duration = parseFloat(style.transitionDuration) || parseFloat(style.animationDuration) || 0;
+      const delay = parseFloat(style.transitionDelay) || parseFloat(style.animationDelay) || 0;
+      const timeout = (duration + delay) * 1000 + 50; // Add 50ms buffer
+
+      if (timeout > 50) {
+        timeoutId = setTimeout(() => {
+          if (cleaned) return;
+          cleanup();
+          if (done) done();
+        }, timeout);
+      } else {
+        // No transition defined, complete immediately
         cleanup();
         if (done) done();
-      }, timeout);
-    } else {
-      // No transition defined, complete immediately
-      cleanup();
-      if (done) done();
-    }
+      }
+    });
   });
 }
 
@@ -156,10 +164,13 @@ export const DOMRenderer: IRendererAdapter = {
     const tag = tagName.toLowerCase();
 
     // Check if parent is an SVG element
+    // CRITICAL FIX #7: foreignObject Exception
+    // <foreignObject> is an SVG element, but its children are HTML elements
+    // Without this check, <a> tags inside foreignObject become SVG anchors (broken links)
     const isParentSVG = parent && (
       parent.namespaceURI === 'http://www.w3.org/2000/svg' ||
       parent.tagName === 'svg' || parent.tagName === 'SVG'
-    );
+    ) && parent.tagName.toLowerCase() !== 'foreignobject';
 
     // For ambiguous tags, use parent's namespace
     if (ambiguousTags.has(tag)) {

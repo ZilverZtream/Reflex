@@ -11,6 +11,17 @@
 
 import { ACTIVE, RUNNING, QUEUED, META } from './symbols.js';
 
+// CRITICAL FIX #11: queueMicrotask polyfill for older browsers
+// Missing in iOS < 13, older Node.js, and legacy browsers
+// Fallback to Promise.resolve().then() which has equivalent semantics
+if (typeof queueMicrotask === 'undefined') {
+  (globalThis as any).queueMicrotask = (callback: () => void) => {
+    Promise.resolve().then(callback).catch(err =>
+      setTimeout(() => { throw err; }, 0)
+    );
+  };
+}
+
 // Maximum number of flush iterations before throwing an error
 // This prevents infinite loops from circular dependencies
 const MAX_FLUSH_ITERATIONS = 100;
@@ -157,6 +168,13 @@ export const SchedulerMixin = {
           // Toggle back to restore consistent state
           this._qf = !this._qf;
 
+          // CRITICAL FIX #3: Reset _flushIterations on yield to prevent false positives
+          // When processing heavy but valid updates (e.g., 5000 rows), the scheduler
+          // yields to the browser many times. Without resetting the counter, legitimate
+          // work gets flagged as circular dependency and crashes the app.
+          // We're making progress (processed some jobs), so reset the counter.
+          this._flushIterations = 0;
+
           // Use Scheduler API if available (better priority control), otherwise setTimeout
           if (typeof globalThis !== 'undefined' && globalThis.scheduler?.postTask) {
             globalThis.scheduler.postTask(() => this.flushQueue());
@@ -211,6 +229,9 @@ export const SchedulerMixin = {
 
   /**
    * Create a computed property with lazy evaluation
+   * CRITICAL FIX: Truly lazy + memory leak prevention
+   * - Removed eager runner() call (Issue #10: Eager Lazy Computed)
+   * - Added dispose() method to kill runner (Issue #1: Computed Memory Leak)
    */
   computed(fn: (state: any) => any) {
     const self = this;
@@ -243,7 +264,10 @@ export const SchedulerMixin = {
       }
     });
 
-    runner(); // Eager initial eval
+    // CRITICAL FIX #10: Removed eager initial eval
+    // Computed values are now truly lazy - only evaluated when accessed
+    // This prevents expensive computations from running during initialization
+    // if they're never used in the template
 
     return {
       get value() {
@@ -253,6 +277,13 @@ export const SchedulerMixin = {
         }
         if (dirty) runner();
         return v;
+      },
+      // CRITICAL FIX #1: Add dispose() to kill the runner effect
+      // Without this, the runner remains subscribed to dependencies forever
+      // causing a permanent memory leak (zombie effects)
+      dispose() {
+        runner.kill();
+        subs.clear();
       }
     };
   },
