@@ -542,4 +542,117 @@ describe('New Critical Fixes - Regression Tests', () => {
       expect(snapshot.size).toBe(3); // Snapshot unchanged
     });
   });
+
+  // CRITICAL FIX: Object Identity for Checkbox Values
+  describe('Checkbox object binding identity fix', () => {
+    it('CRITICAL: should support object identity in checkbox values', async () => {
+      const { Reflex } = await import('../src/index.js');
+
+      const objA = { id: 1 };
+      const objB = { id: 2 };
+      document.body.innerHTML = `
+        <input type="checkbox" :value="optA" m-model="selected">
+        <input type="checkbox" :value="optB" m-model="selected">
+      `;
+      const app = new Reflex({ optA: objA, optB: objB, selected: [] });
+      await app.nextTick();
+
+      const inputs = document.querySelectorAll('input') as NodeListOf<HTMLInputElement>;
+      const inputA = inputs[0];
+      const inputB = inputs[1];
+
+      // Check the first checkbox
+      inputA.checked = true;
+      inputA.dispatchEvent(new Event('change'));
+      await app.nextTick();
+
+      // Should contain the actual object with id: 1, not "[object Object]"
+      expect(app.s.selected.length).toBe(1);
+      expect(app.s.selected[0].id).toBe(1);
+      // Verify it's NOT the string "[object Object]"
+      expect(typeof app.s.selected[0]).toBe('object');
+      expect(app.s.selected[0]).not.toBe('[object Object]');
+
+      // Check the second checkbox
+      inputB.checked = true;
+      inputB.dispatchEvent(new Event('change'));
+      await app.nextTick();
+
+      // Should contain both objects
+      expect(app.s.selected.length).toBe(2);
+      const ids = app.s.selected.map((item: any) => item.id);
+      expect(ids).toContain(1);
+      expect(ids).toContain(2);
+
+      // Uncheck the first checkbox
+      inputA.checked = false;
+      inputA.dispatchEvent(new Event('change'));
+      await app.nextTick();
+
+      // Should only contain objB now
+      expect(app.s.selected.length).toBe(1);
+      expect(app.s.selected[0].id).toBe(2);
+
+      // Clean up
+      app.unmount();
+    });
+
+    it('should correctly reflect checked state for object values', async () => {
+      const { Reflex } = await import('../src/index.js');
+
+      const objA = { id: 1 };
+      const objB = { id: 2 };
+      document.body.innerHTML = `
+        <input type="checkbox" :value="optA" m-model="selected">
+        <input type="checkbox" :value="optB" m-model="selected">
+      `;
+      // Pre-populate with objA selected (use the same reference)
+      const app = new Reflex({ optA: objA, optB: objB, selected: [objA] });
+      await app.nextTick();
+      // Wait an extra tick for bindings to settle
+      await app.nextTick();
+
+      const inputs = document.querySelectorAll('input') as NodeListOf<HTMLInputElement>;
+      const inputA = inputs[0];
+      const inputB = inputs[1];
+
+      // inputA should be checked, inputB should not
+      expect(inputA.checked).toBe(true);
+      expect(inputB.checked).toBe(false);
+
+      // Clean up
+      app.unmount();
+    });
+
+    it('should not confuse different objects with same string representation', async () => {
+      const { Reflex } = await import('../src/index.js');
+
+      // Both objects stringify to "[object Object]" but they are different objects
+      const objA = { name: 'Alice' };
+      const objB = { name: 'Bob' };
+      document.body.innerHTML = `
+        <input type="checkbox" :value="optA" m-model="selected">
+        <input type="checkbox" :value="optB" m-model="selected">
+      `;
+      const app = new Reflex({ optA: objA, optB: objB, selected: [] });
+      await app.nextTick();
+
+      const inputs = document.querySelectorAll('input') as NodeListOf<HTMLInputElement>;
+
+      // Check only the first checkbox
+      inputs[0].checked = true;
+      inputs[0].dispatchEvent(new Event('change'));
+      await app.nextTick();
+
+      // Only objA should be selected (verify by name property)
+      expect(app.s.selected.length).toBe(1);
+      expect(app.s.selected[0].name).toBe('Alice');
+
+      // The second checkbox should NOT be checked (they have different identity)
+      expect(inputs[1].checked).toBe(false);
+
+      // Clean up
+      app.unmount();
+    });
+  });
 });
