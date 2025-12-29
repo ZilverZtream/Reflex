@@ -28,6 +28,72 @@ const escapeHTML = s => s.replace(/[&<>"']/g, c => ({
 }[c]));
 
 /**
+ * Parse a property path that may contain both dot notation and bracket notation.
+ * Examples:
+ *   'foo.bar' -> ['foo', 'bar']
+ *   'foo[0]' -> ['foo', '0']
+ *   'list[0].name' -> ['list', '0', 'name']
+ *   'grid[1][2]' -> ['grid', '1', '2']
+ *   'data[0].items[5]' -> ['data', '0', 'items', '5']
+ *
+ * CRITICAL FIX #3: m-model Bracket Notation Support
+ * Previous implementation used simple exp.split('.') which failed on array indices
+ * This parser handles both dot notation and bracket notation correctly
+ */
+function parsePath(exp: string): string[] {
+  const paths: string[] = [];
+  let current = '';
+  let i = 0;
+
+  while (i < exp.length) {
+    const char = exp[i];
+
+    if (char === '.') {
+      // Dot notation - push current segment and reset
+      if (current) {
+        paths.push(current);
+        current = '';
+      }
+      i++;
+    } else if (char === '[') {
+      // Bracket notation - push current segment if any
+      if (current) {
+        paths.push(current);
+        current = '';
+      }
+
+      // Find the closing bracket
+      i++; // Skip opening bracket
+      let bracketContent = '';
+      while (i < exp.length && exp[i] !== ']') {
+        bracketContent += exp[i];
+        i++;
+      }
+
+      // Remove quotes if present (for string indices like ["key"])
+      if ((bracketContent.startsWith('"') && bracketContent.endsWith('"')) ||
+          (bracketContent.startsWith("'") && bracketContent.endsWith("'"))) {
+        bracketContent = bracketContent.slice(1, -1);
+      }
+
+      paths.push(bracketContent);
+      i++; // Skip closing bracket
+    } else {
+      // Regular character - add to current segment
+      current += char;
+      i++;
+    }
+  }
+
+  // Push final segment if any
+  if (current) {
+    paths.push(current);
+  }
+
+  return paths;
+}
+
+/**
  * CSS Transition helper for enter/leave animations.
  * Follows Vue/Alpine naming convention:
  * - {name}-enter-from, {name}-enter-active, {name}-enter-to
@@ -1518,24 +1584,21 @@ export const CompilerMixin = {
   /**
    * Show/hide: m-show="expr"
    *
-   * CRITICAL FIX: !important Style Binding Defect + CSS Specificity Failure
-   * Using el.style.display = 'none' cannot override CSS with !important.
-   * We must use setProperty with 'important' priority to ensure m-show works
-   * even when utility classes like .flex { display: flex !important; } are used.
+   * CRITICAL FIX #9: m-show should respect CSS classes and media queries
    *
-   * CRITICAL FIX #6: CSS Class with !important Override
-   * When showing an element that has a CSS class with display: none !important,
-   * simply removing the inline style allows the class to win.
-   * Solution: Compute the natural display value and set it with !important.
+   * Previous implementation used setProperty('display', value, 'important') which
+   * permanently overrode CSS classes and media queries, breaking responsive layouts.
+   *
+   * New approach:
+   * - When hiding: Set display: none without !important (sufficient for most cases)
+   * - When showing: Remove the inline display style entirely, letting CSS take over
+   * - This allows CSS classes and media queries to work correctly
+   * - If CSS already has display: none, that will be respected
    */
   _show(el, exp, o, trans) {
     const fn = this._fn(exp);
     const d = el.style.display === 'none' ? '' : el.style.display;
     let prev, transitioning = false;
-
-    // CRITICAL FIX: Cache the computed "natural" display value for this element
-    // This is needed to override class-based !important rules when showing
-    let naturalDisplay = null;
 
     const e = this.createEffect(() => {
       try {
@@ -1546,46 +1609,32 @@ export const CompilerMixin = {
           if (trans && prev !== undefined) {
             transitioning = true;
             if (show) {
-              // CRITICAL FIX: Compute natural display to override class-based !important
-              if (!naturalDisplay) {
-                // Temporarily show element to compute its natural display value
-                const originalDisplay = el.style.display;
+              // CRITICAL FIX #9: Remove inline display to let CSS take over
+              // This allows CSS classes and media queries to control the display type
+              if (d) {
+                el.style.display = d;
+              } else {
                 el.style.display = '';
-                const computed = getComputedStyle(el).display;
-                // If computed is 'none', element is hidden by CSS rules - use 'block' as fallback
-                naturalDisplay = (computed === 'none') ? 'block' : computed;
-                el.style.display = originalDisplay;
               }
-              // Use computed natural display with !important to override class rules
-              const displayValue = d || naturalDisplay;
-              (el as HTMLElement).style.setProperty('display', displayValue, 'important');
               this._runTrans(el, trans, 'enter', () => { transitioning = false; });
             } else {
               this._runTrans(el, trans, 'leave', () => {
-                // Use setProperty with 'important' to ensure hiding works
-                (el as HTMLElement).style.setProperty('display', 'none', 'important');
+                // Hide element - use regular style property (no !important)
+                el.style.display = 'none';
                 transitioning = false;
               });
             }
           } else {
-            // Use setProperty with 'important' to override CSS !important
+            // CRITICAL FIX #9: Don't use !important to allow CSS to work
             if (next === 'none') {
-              (el as HTMLElement).style.setProperty('display', 'none', 'important');
+              // Hide element
+              el.style.display = 'none';
             } else if (next) {
-              (el as HTMLElement).style.setProperty('display', next, 'important');
+              // Show with specific display type
+              el.style.display = next;
             } else {
-              // CRITICAL FIX: Compute natural display to override class-based !important
-              if (!naturalDisplay) {
-                // Temporarily show element to compute its natural display value
-                const originalDisplay = el.style.display;
-                el.style.display = '';
-                const computed = getComputedStyle(el).display;
-                // If computed is 'none', element is hidden by CSS rules - use 'block' as fallback
-                naturalDisplay = (computed === 'none') ? 'block' : computed;
-                el.style.display = originalDisplay;
-              }
-              // Use computed natural display with !important to override class rules
-              (el as HTMLElement).style.setProperty('display', naturalDisplay, 'important');
+              // Show and let CSS control display type
+              el.style.display = '';
             }
           }
           prev = next;
@@ -1606,7 +1655,11 @@ export const CompilerMixin = {
     const type = (el.type || '').toLowerCase();
     const isChk = type === 'checkbox';
     const isRadio = type === 'radio';
-    const isNum = type === 'number' || type === 'range';
+    // CRITICAL FIX #8: Support .number modifier on text inputs
+    // Previous bug: Only checked type === 'number' || type === 'range'
+    // This ignored the .number modifier on text inputs (m-model.number on type="text")
+    // Fix: Also check if 'number' modifier is present
+    const isNum = type === 'number' || type === 'range' || modifiers.includes('number');
     const isMultiSelect = type === 'select-multiple';
     const isLazy = modifiers.includes('lazy');
     // CRITICAL FIX #5: m-model File Input Crash
@@ -1879,7 +1932,11 @@ export const CompilerMixin = {
         }
       } else v = el.value;
 
-      const paths = exp.split('.'), end = paths.pop();
+      // CRITICAL FIX #3: Parse path with bracket notation support
+      // Previous: exp.split('.') failed on paths like "list[0]" or "grid[1][2]"
+      // Now: parsePath() handles both dot notation and bracket notation correctly
+      const paths = parsePath(exp);
+      const end = paths.pop();
 
       // Security: prevent prototype pollution
       if (UNSAFE_PROPS[end]) {
