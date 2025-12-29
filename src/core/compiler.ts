@@ -28,6 +28,22 @@ const escapeHTML = s => s.replace(/[&<>"']/g, c => ({
 }[c]));
 
 /**
+ * Get the raw (unwrapped) value from a reactive proxy.
+ * If the value is not a proxy, returns the value as-is.
+ * This is needed for object identity comparison since the same object
+ * might be accessed via different proxy wrappers.
+ */
+const getRawValue = (v: any): any => {
+  if (v !== null && typeof v === 'object') {
+    const meta = v[META];
+    if (meta && meta.r) {
+      return meta.r; // Return the raw target
+    }
+  }
+  return v;
+};
+
+/**
  * Parse a property path that may contain both dot notation and bracket notation.
  * Examples:
  *   'foo.bar' -> ['foo', 'bar']
@@ -410,6 +426,25 @@ export const CompilerMixin = {
     const atts = n.attributes;
     if (!atts) return;
     const trans = n.getAttribute('m-trans'); // For m-show transitions
+
+    // CRITICAL FIX: Pre-set object value reference for checkboxes/radios
+    // Attributes are processed in reverse order, so m-model runs before :value.
+    // We need to eagerly evaluate and store the object reference BEFORE any effects run.
+    // This ensures m-model can find _rx_value_ref when setting initial checked state.
+    if ((n.type === 'checkbox' || n.type === 'radio') && n.hasAttribute(':value')) {
+      const valueExp = n.getAttribute(':value');
+      if (valueExp) {
+        try {
+          const fn = this._fn(valueExp);
+          const initialValue = fn(this.s, o);
+          if (initialValue !== null && typeof initialValue === 'object') {
+            (n as any)._rx_value_ref = initialValue;
+          }
+        } catch (e) {
+          // Ignore errors - effect will handle it
+        }
+      }
+    }
 
     for (let i = atts.length - 1; i >= 0; i--) {
       const a = atts[i], nm = a.name, v = a.value;
@@ -1422,6 +1457,14 @@ export const CompilerMixin = {
           // In strict mode (ES modules), assigning to read-only properties throws TypeError
           // Use try-catch to gracefully fall back to setAttribute for read-only properties
           try {
+            // CRITICAL FIX: Object Identity for Checkbox/Radio Values
+            // When binding :value="obj" to a checkbox or radio, the DOM stringifies objects to "[object Object]"
+            // This makes it impossible to match objects in m-model array binding since all objects become identical strings
+            // Solution: Store the original object reference as _rx_value_ref for later retrieval by m-model
+            if (att === 'value' && v !== null && typeof v === 'object' &&
+                (el.type === 'checkbox' || el.type === 'radio')) {
+              (el as any)._rx_value_ref = v;
+            }
             el[att] = v ?? '';
           } catch (err) {
             // Property is read-only, fall back to setAttribute
@@ -1722,10 +1765,23 @@ export const CompilerMixin = {
         } else if (isChk) {
           // Handle checkbox array binding
           if (Array.isArray(v)) {
-            // CRITICAL FIX: Checkbox values are always strings, but array might contain
-            // numbers or other types. Use type coercion to match values correctly.
-            // Example: array [1, 2] should match <input value="1">
-            el.checked = v.some(item => String(item) === el.value);
+            // CRITICAL FIX: Object Identity for Checkbox Values
+            // When binding :value="obj" to a checkbox, el.value becomes "[object Object]"
+            // which makes all objects appear identical. Use _rx_value_ref to get the original object.
+            const elValue = (el as any)._rx_value_ref !== undefined ? (el as any)._rx_value_ref : el.value;
+            // Unwrap reactive proxy to get the raw object for identity comparison
+            const rawElValue = getRawValue(elValue);
+            el.checked = v.some(item => {
+              // For objects, use identity comparison on raw (unwrapped) values
+              // This handles cases where both are reactive proxies of the same object
+              if (item !== null && typeof item === 'object') {
+                const rawItem = getRawValue(item);
+                return rawItem === rawElValue;
+              }
+              // For primitives, use type coercion to match DOM string values
+              // Example: array [1, 2] should match <input value="1">
+              return String(item) === String(elValue);
+            });
           } else {
             el.checked = !!v;
           }
@@ -1781,74 +1837,89 @@ export const CompilerMixin = {
         if (Array.isArray(currentValue)) {
           // Toggle value in array with proper type coercion
           const arr = [...currentValue];
+          // CRITICAL FIX: Object Identity for Checkbox Values
+          // When binding :value="obj" to a checkbox, el.value becomes "[object Object]"
+          // Use _rx_value_ref to get the original object reference
+          const elValue = (el as any)._rx_value_ref !== undefined ? (el as any)._rx_value_ref : el.value;
+          const isObjectValue = elValue !== null && typeof elValue === 'object';
+          // Unwrap reactive proxy for identity comparison
+          const rawElValue = getRawValue(elValue);
+
           // CRITICAL FIX #7: Object Identity Failure - Don't use String() for object comparison
           // String([{id:1}]) returns "[object Object]" for all objects, making them all match
           // Use strict equality for objects, type coercion only for primitives
           const idx = arr.findIndex(item => {
-            // If both are objects, use identity comparison (===)
+            // If both are objects, use identity comparison on raw (unwrapped) values
             if (item !== null && typeof item === 'object') {
-              return item === el.value || JSON.stringify(item) === el.value;
+              const rawItem = getRawValue(item);
+              return rawItem === rawElValue;
             }
             // For primitives, use type coercion to match DOM string values
-            return String(item) === el.value;
+            return String(item) === String(elValue);
           });
           if (el.checked && idx === -1) {
-            // Try to preserve the original type if the array has a consistent type
-            // If array contains numbers and value is numeric, push as number
-            let valueToAdd = el.value;
-
-            // CRITICAL FIX: Type inference for empty arrays
-            // If array is empty, we can't infer from arr[0], so check if value is numeric
-            let shouldCoerceToNumber = false;
-            if (arr.length > 0) {
-              // Array has values - use first element's type
-              shouldCoerceToNumber = typeof arr[0] === 'number';
+            // CRITICAL FIX: For object values, use the original object reference
+            // This ensures the model array contains the actual object, not "[object Object]"
+            if (isObjectValue) {
+              arr.push(elValue);
             } else {
-              // Empty array - infer type from checkbox value itself
-              // If the value is a valid number string, coerce to number
-              // CRITICAL FIX #3: Checkbox Leading Zero Data Corruption
-              // Don't coerce values with leading zeros or special formatting
-              // "01" should remain "01", not become 1
-              // Check: String(Number(value)) must equal the trimmed value
-              const trimmed = el.value.trim();
-              if (trimmed !== '' && !isNaN(Number(trimmed))) {
-                // Valid number, but check if coercion would lose information
-                // "01" -> Number("01") = 1 -> String(1) = "1" ≠ "01" (don't coerce)
-                // "1" -> Number("1") = 1 -> String(1) = "1" = "1" ✓ (coerce)
-                shouldCoerceToNumber = String(Number(trimmed)) === trimmed;
-              } else {
-                shouldCoerceToNumber = false;
-              }
-            }
+              // Try to preserve the original type if the array has a consistent type
+              // If array contains numbers and value is numeric, push as number
+              let valueToAdd: any = elValue;
 
-            if (shouldCoerceToNumber) {
-              // CRITICAL FIX #9: Loose Number Conversion - Empty string becomes 0
-              // Number("") and Number(" ") return 0, which is valid (not NaN)
-              // But empty/whitespace checkbox values should be ignored, not converted to 0
-              // Check for empty/whitespace strings BEFORE numeric conversion
-              const trimmed = el.value.trim();
-              if (trimmed === '') {
-                // Empty or whitespace value - skip adding to numeric array
-                console.warn(
-                  `Reflex: Skipping empty checkbox value for numeric array binding.`
-                );
-                return;
-              }
-              // Now check for valid numeric conversion
-              const numValue = Number(el.value);
-              if (!isNaN(numValue)) {
-                valueToAdd = numValue;
+              // CRITICAL FIX: Type inference for empty arrays
+              // If array is empty, we can't infer from arr[0], so check if value is numeric
+              let shouldCoerceToNumber = false;
+              if (arr.length > 0) {
+                // Array has values - use first element's type
+                shouldCoerceToNumber = typeof arr[0] === 'number';
               } else {
-                // Value is not numeric - warn and skip adding it to numeric array
-                console.warn(
-                  `Reflex: Cannot add non-numeric value "${el.value}" to numeric array. ` +
-                  'Skipping to prevent NaN pollution.'
-                );
-                // Don't add the value - keep the array unchanged
-                return;
+                // Empty array - infer type from checkbox value itself
+                // If the value is a valid number string, coerce to number
+                // CRITICAL FIX #3: Checkbox Leading Zero Data Corruption
+                // Don't coerce values with leading zeros or special formatting
+                // "01" should remain "01", not become 1
+                // Check: String(Number(value)) must equal the trimmed value
+                const trimmed = String(elValue).trim();
+                if (trimmed !== '' && !isNaN(Number(trimmed))) {
+                  // Valid number, but check if coercion would lose information
+                  // "01" -> Number("01") = 1 -> String(1) = "1" ≠ "01" (don't coerce)
+                  // "1" -> Number("1") = 1 -> String(1) = "1" = "1" ✓ (coerce)
+                  shouldCoerceToNumber = String(Number(trimmed)) === trimmed;
+                } else {
+                  shouldCoerceToNumber = false;
+                }
               }
+
+              if (shouldCoerceToNumber) {
+                // CRITICAL FIX #9: Loose Number Conversion - Empty string becomes 0
+                // Number("") and Number(" ") return 0, which is valid (not NaN)
+                // But empty/whitespace checkbox values should be ignored, not converted to 0
+                // Check for empty/whitespace strings BEFORE numeric conversion
+                const trimmed = String(elValue).trim();
+                if (trimmed === '') {
+                  // Empty or whitespace value - skip adding to numeric array
+                  console.warn(
+                    `Reflex: Skipping empty checkbox value for numeric array binding.`
+                  );
+                  return;
+                }
+                // Now check for valid numeric conversion
+                const numValue = Number(elValue);
+                if (!isNaN(numValue)) {
+                  valueToAdd = numValue;
+                } else {
+                  // Value is not numeric - warn and skip adding it to numeric array
+                  console.warn(
+                    `Reflex: Cannot add non-numeric value "${elValue}" to numeric array. ` +
+                    'Skipping to prevent NaN pollution.'
+                  );
+                  // Don't add the value - keep the array unchanged
+                  return;
+                }
+              }
+              arr.push(valueToAdd);
             }
-            arr.push(valueToAdd);
           } else if (!el.checked && idx !== -1) {
             arr.splice(idx, 1);
           }
