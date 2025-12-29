@@ -5,6 +5,14 @@
  */
 
 import { beforeEach, afterEach } from 'vitest';
+import DOMPurify from 'dompurify';
+import { SafeHTML } from '../src/renderers/dom.js';
+
+// Configure SafeHTML with DOMPurify for all tests
+SafeHTML.configureSanitizer(DOMPurify);
+
+// Make DOMPurify globally available for tests
+globalThis.DOMPurify = DOMPurify;
 
 // Reset DOM between tests
 beforeEach(() => {

@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import Reflex from '../src/index.js';
+import { Reflex } from '../src/index.js';
 import { runTransition } from '../src/renderers/dom.js';
 
 describe('Security & Performance Fixes - Regression Tests', () => {

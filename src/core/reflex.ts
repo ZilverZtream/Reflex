@@ -188,7 +188,8 @@ export class Reflex {
       cspSafe: false,         // CSP-safe mode (no new Function)
       cacheSize: 1000,        // Expression cache size
       onError: null,          // Global error handler
-      domPurify: null,        // DOMPurify instance for m-html sanitization
+      // Try to use globalThis.DOMPurify if available (for test environments)
+      domPurify: (typeof globalThis !== 'undefined' && (globalThis as any).DOMPurify) || null,
       autoMount: options.autoMount !== false  // CRITICAL FIX #2: Make auto-mount opt-in
     };
 
