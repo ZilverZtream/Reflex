@@ -7,6 +7,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SafeExprParser, ScopeContainer } from '../../src/csp/SafeExprParser';
+import { createFlatScope, isFlatScope, ScopeRegistry } from '../../src/core/scope-registry';
 
 describe('ScopeContainer Enforcement', () => {
   let parser: SafeExprParser;
@@ -51,7 +52,7 @@ describe('ScopeContainer Enforcement', () => {
           null,
           mockReflex
         );
-      }).toThrow(/must be a ScopeContainer/);
+      }).toThrow(/must be a FlatScope or ScopeContainer/);
     });
 
     it('throws error mentioning breaking change', () => {

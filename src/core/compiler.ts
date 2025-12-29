@@ -22,6 +22,15 @@ import { META, ITERATE, SKIP, UNSAFE_PROPS, SAFE_URL_RE, RELATIVE_URL_RE } from 
 import { computeLIS, resolveDuplicateKey, reconcileKeyedList } from './reconcile.js';
 import { ScopeContainer } from '../csp/SafeExprParser.js';
 import { SafeHTML } from '../renderers/dom.js';
+import {
+  ScopeRegistry,
+  createFlatScope,
+  isFlatScope,
+  getFlatScopeValue,
+  setFlatScopeValue,
+  type FlatScope,
+  type FlatScopeIds
+} from './scope-registry.js';
 import type { IRendererAdapter } from '../renderers/types.js';
 
 /**
@@ -901,19 +910,36 @@ export const CompilerMixin = {
             processedItem = this._r(processedItem);
           }
 
-          // BREAKING CHANGE: MUST use ScopeContainer, no Object.create()
-          // ScopeContainer prevents prototype pollution attacks by isolating scope data
-          // in a Map instead of using prototype chain inheritance
-          const scope = new ScopeContainer(
-            o && ScopeContainer.isScopeContainer(o)
-              ? o
-              : o ? ScopeContainer.fromObject(o, null) : null
-          );
+          // BREAKING CHANGE: Use FlatScope with unique IDs instead of ScopeContainer parent chains
+          // This eliminates prototype chain traversal and prevents prototype pollution attacks
 
-          scope.set(alias, processedItem);
-          if (idxAlias) scope.set(idxAlias, index);
+          // Allocate unique IDs for this loop's variables
+          const aliasId = this._scopeRegistry.allocate(alias);
+          const indexId = idxAlias ? this._scopeRegistry.allocate(idxAlias) : null;
 
-          // Return the ScopeContainer directly (it's already sealed)
+          // Store values in flat registry
+          this._scopeRegistry.set(aliasId, processedItem);
+          if (indexId) {
+            this._scopeRegistry.set(indexId, index);
+          }
+
+          // Build the IDs map for this scope
+          const ids: FlatScopeIds = { [alias]: aliasId };
+          if (idxAlias && indexId) {
+            ids[idxAlias] = indexId;
+          }
+
+          // Get parent scope's IDs if parent is a FlatScope
+          let parentIds: FlatScopeIds | null = null;
+          if (o && isFlatScope(o)) {
+            // Merge parent's IDs with parent's parentIds for full chain access
+            parentIds = { ...o._parentIds, ...o._ids };
+          }
+
+          // Create the FlatScope object
+          const scope = createFlatScope(this._scopeRegistry, ids, parentIds);
+
+          // Return the FlatScope (it's frozen and immutable)
           return scope;
         },
 
@@ -1061,62 +1087,45 @@ export const CompilerMixin = {
 
         updateNode: (node, item, index) => {
           const scope = this._scopeMap.get(node);
-          if (scope && ScopeContainer.isScopeContainer(scope)) {
+          if (scope && isFlatScope(scope)) {
             let processedItem = item;
             if (processedItem !== null && typeof processedItem === 'object' && !processedItem[SKIP]) {
               processedItem = this._r(processedItem);
             }
-            // BREAKING CHANGE: Use ScopeContainer.set() instead of bracket notation
-            scope.set(alias, processedItem);
+
+            // BREAKING CHANGE: Use flat scope registry for updates
+            // Update values directly in the registry using the pre-allocated IDs
+            setFlatScopeValue(scope, alias, processedItem);
+
             // CRITICAL FIX: Ensure index updates trigger reactivity
             // When list order changes, child text nodes using {{ index }} must update
             if (idxAlias) {
-              if (scope.get(idxAlias) !== index) {
-                // Use delete + set pattern to ensure notification
-                scope.delete(idxAlias);
-                scope.set(idxAlias, index);
+              const currentIndex = getFlatScopeValue(scope, idxAlias);
+              if (!currentIndex.found || currentIndex.value !== index) {
+                setFlatScopeValue(scope, idxAlias, index);
               }
             }
 
-            // CRITICAL FIX #8: Nested m-for Scope Staleness (Iterative Version)
-            // When parent scopes update, child scopes (nested loops) need to refresh
-            // ScopeContainer uses parent references, not prototype chains
-            // Force a refresh by triggering reactivity on the parent scope.
-            //
-            // PERFORMANCE FIX: Use iterative traversal instead of recursion
-            // to prevent stack overflow on deeply nested structures (1000+ levels)
-            const refreshNestedScopes = (startNode) => {
-              if (!startNode || startNode.nodeType !== 1) return;
-
-              // Use stack-based iteration to avoid call stack overflow
-              const stack = [startNode];
-
-              while (stack.length > 0) {
-                const node = stack.pop();
-                if (!node || node.nodeType !== 1) continue;
-
-                let child = node.firstChild;
-                while (child) {
-                  if (child.nodeType === 1) {
-                    const childScope = this._scopeMap.get(child);
-                    // Check if this child scope has our scope as its parent
-                    if (childScope && ScopeContainer.isScopeContainer(childScope) && childScope.getParent() === scope) {
-                      // Trigger a reactivity refresh by accessing a property
-                      // This forces the reactive system to re-track dependencies
-                      const _dummy = childScope.get(alias);
-                    }
-                    // Push child onto stack for iterative processing
-                    stack.push(child);
-                  }
-                  child = child.nextSibling;
-                }
-              }
-            };
-            refreshNestedScopes(node);
+            // NOTE: With flat scope resolution, nested scopes don't need explicit refresh
+            // because they share the same registry and access parent values via parentIds.
+            // The registry update above is immediately visible to all scopes that reference
+            // these IDs, eliminating the need for parent chain traversal.
           }
         },
 
         removeNode: (node) => {
+          // Clean up flat scope registry entries
+          const scope = this._scopeMap.get(node);
+          if (scope && isFlatScope(scope)) {
+            // Delete all IDs registered in this scope from the registry
+            for (const varName in scope._ids) {
+              const id = scope._ids[varName];
+              if (id) {
+                this._scopeRegistry.delete(id);
+              }
+            }
+          }
+
           // CRITICAL FIX: Handle virtual containers (for strict parents like <table>)
           if (node._isVirtualContainer) {
             // Kill and remove all nodes in the virtual container
@@ -2100,14 +2109,36 @@ export const CompilerMixin = {
         return;
       }
 
-      // BREAKING CHANGE: Handle ScopeContainer for first path lookup
-      const isScopeContainer = o && ScopeContainer.isScopeContainer(o);
-      let t = o && (isScopeContainer ? o.has(paths[0]) : paths[0] in o) ? o : this.s;
+      // BREAKING CHANGE: Handle FlatScope and ScopeContainer for first path lookup
+      // FlatScope uses flat registry lookup, ScopeContainer uses Map-based storage
+      const scopeIsFlatScope = o && isFlatScope(o);
+      const scopeIsScopeContainer = o && ScopeContainer.isScopeContainer(o);
+
+      // Check if first path segment exists in scope
+      let hasInScope = false;
+      if (scopeIsFlatScope) {
+        hasInScope = getFlatScopeValue(o, paths[0]).found;
+      } else if (scopeIsScopeContainer) {
+        hasInScope = o.has(paths[0]);
+      }
+
+      let t = hasInScope ? o : this.s;
       let isFirstPath = true;
       for (const p of paths) {
         if (UNSAFE_PROPS[p]) {
           console.warn('Reflex: Blocked attempt to traverse unsafe property:', p);
           return;
+        }
+        // Handle FlatScope lookup for first path segment
+        if (isFirstPath && isFlatScope(t)) {
+          const result = getFlatScopeValue(t, p);
+          t = result.value;
+          isFirstPath = false;
+          if (t == null) {
+            console.warn('Reflex: Cannot traverse null/undefined in path:', p);
+            return;
+          }
+          continue;
         }
         // Handle ScopeContainer lookup for first path segment
         if (isFirstPath && ScopeContainer.isScopeContainer(t)) {
