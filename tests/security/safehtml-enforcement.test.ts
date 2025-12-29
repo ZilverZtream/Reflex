@@ -120,49 +120,62 @@ describe('SafeHTML Enforcement', () => {
   });
 
   describe('DOMRenderer setInnerHTML Enforcement', () => {
-    it('throws TypeError when setInnerHTML receives string', () => {
+    it('warns when setInnerHTML receives safe string', () => {
       // Create a mock element
       const mockElement = {
         tagName: 'DIV',
         innerHTML: ''
       } as unknown as Element;
 
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
       expect(() => {
         DOMRenderer.setInnerHTML(mockElement, '<div>test</div>' as any);
-      }).toThrow(TypeError);
+      }).not.toThrow();
+
+      expect(warnSpy).toHaveBeenCalled();
+      warnSpy.mockRestore();
     });
 
-    it('throws error with helpful message mentioning SafeHTML', () => {
+    it('throws error for dangerous content with scripts', () => {
       const mockElement = {
         tagName: 'DIV',
         innerHTML: ''
       } as unknown as Element;
 
       expect(() => {
-        DOMRenderer.setInnerHTML(mockElement, '<div>test</div>' as any);
-      }).toThrow(/requires SafeHTML instance/);
+        DOMRenderer.setInnerHTML(mockElement, '<script>alert(1)</script>' as any);
+      }).toThrow(/SECURITY ERROR/);
     });
 
-    it('throws error mentioning BREAKING CHANGE', () => {
+    it('throws error for dangerous content with event handlers', () => {
       const mockElement = {
         tagName: 'DIV',
         innerHTML: ''
       } as unknown as Element;
 
       expect(() => {
-        DOMRenderer.setInnerHTML(mockElement, '<div>test</div>' as any);
-      }).toThrow(/BREAKING CHANGE/);
+        DOMRenderer.setInnerHTML(mockElement, '<img onerror=alert(1)>' as any);
+      }).toThrow(/SECURITY ERROR/);
     });
 
-    it('throws error with migration instructions', () => {
+    it('warns for safe content but allows it', () => {
       const mockElement = {
         tagName: 'DIV',
         innerHTML: ''
       } as unknown as Element;
 
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      // Safe content should warn but not throw
       expect(() => {
         DOMRenderer.setInnerHTML(mockElement, '<div>test</div>' as any);
-      }).toThrow(/SafeHTML\.sanitize/);
+      }).not.toThrow();
+
+      expect(warnSpy).toHaveBeenCalled();
+      expect(mockElement.innerHTML).toBe('<div>test</div>');
+
+      warnSpy.mockRestore();
     });
 
     it('accepts SafeHTML instance', () => {

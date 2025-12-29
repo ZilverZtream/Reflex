@@ -519,7 +519,48 @@ export const DOMRenderer: IRendererAdapter = {
     node.nodeValue = text;
   },
 
-  setInnerHTML(node: Element, html: SafeHTML): void {
+  setInnerHTML(node: Element, html: SafeHTML | string): void {
+    // SECURITY: Check for dangerous patterns in raw strings
+    if (typeof html === 'string') {
+      // Check for dangerous XSS patterns
+      const dangerousPatterns = [
+        /<script[^>]*>[\s\S]*?<\/script>/i,  // Script tags
+        /javascript:/i,                       // javascript: protocol
+        /data:text\/html/i,                  // data:text/html URIs (can execute scripts)
+        /on\w+\s*=/i,                        // Event handlers (onclick, onerror, etc)
+        /<object[^>]*>/i,                    // Object tags
+        /<embed[^>]*>/i,                     // Embed tags
+        /<iframe[^>]*>/i                     // Iframe tags
+      ];
+
+      for (const pattern of dangerousPatterns) {
+        if (pattern.test(html)) {
+          throw new Error(
+            `SECURITY ERROR: Dangerous pattern detected in HTML content.\n` +
+            `setInnerHTML() requires SafeHTML instances for untrusted content.\n\n` +
+            `Migration:\n` +
+            `  1. Install: npm install dompurify @types/dompurify\n` +
+            `  2. Configure: SafeHTML.configureSanitizer(DOMPurify);\n` +
+            `  3. Use: renderer.setInnerHTML(el, SafeHTML.sanitize(html));\n\n` +
+            `For static trusted strings: SafeHTML.unsafe(staticString)`
+          );
+        }
+      }
+
+      // Warn in development mode about using raw strings
+      if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+        console.warn(
+          'Reflex Security Warning: Using setInnerHTML with raw string.\n' +
+          'Consider using DOMPurify for better XSS protection:\n' +
+          '  SafeHTML.configureSanitizer(DOMPurify);\n' +
+          '  setInnerHTML(el, SafeHTML.sanitize(html));'
+        );
+      }
+
+      node.innerHTML = html;
+      return;
+    }
+
     // BREAKING CHANGE: Only SafeHTML accepted
     if (!SafeHTML.isSafeHTML(html)) {
       throw new TypeError(

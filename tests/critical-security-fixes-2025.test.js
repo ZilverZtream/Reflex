@@ -185,14 +185,12 @@ describe('Critical Security Fixes 2025', () => {
   describe('Issue #5: m-ref Array Desync in Nested Structures', () => {
     it('should maintain correct order for nested m-ref elements after reordering', async () => {
       app = new Reflex({
-        state: {
-          items: [
-            { id: 1, name: 'A' },
-            { id: 2, name: 'B' },
-            { id: 3, name: 'C' }
-          ],
-          spanRefs: []
-        }
+        items: [
+          { id: 1, name: 'A' },
+          { id: 2, name: 'B' },
+          { id: 3, name: 'C' }
+        ],
+        spanRefs: []
       }).mount(document.getElementById('app'));
 
       // Create HTML with nested m-ref
