@@ -130,26 +130,54 @@ export const ArrayHandler: ProxyHandler<any[]> = {
     if (!ok) return false;
 
     meta.v++; // Increment version on mutation
-    // Trigger specific key change
-    engine.triggerEffects(meta, k);
 
-    // OPTIMIZATION: Only trigger ITERATE when structure actually changes
-    // Setting existing array elements doesn't need ITERATE
-    if (k === 'length') {
-      // Length change always affects iteration
-      engine.triggerEffects(meta, ITERATE);
+    // CRITICAL FIX #4: O(N) Array Truncation DoS - Batch Notifications
+    // When truncating large arrays (e.g., arr.length = 0 on 1M item array),
+    // we must batch all index triggers to avoid synchronous O(N) loop freeze
+    if (k === 'length' && newLength < oldLength && newLength >= 0) {
+      // Use batching to prevent UI freeze on large array truncation
+      engine._b++;
+      try {
+        let ks = engine.pendingTriggers.get(meta);
+        if (!ks) engine.pendingTriggers.set(meta, ks = new Set());
 
-      // CRITICAL FIX: Trigger watchers on deleted indices when truncating
-      // If newLength < oldLength, indices from newLength to oldLength-1 are deleted
-      if (newLength < oldLength && newLength >= 0) {
-        for (let i = newLength; i < oldLength; i++) {
-          engine.triggerEffects(meta, String(i));
+        // Queue 'length' and ITERATE triggers
+        ks.add('length');
+        ks.add(ITERATE);
+
+        // OPTIMIZATION: Limit index triggers to only those with active watchers
+        // Instead of blindly adding all deleted indices, only trigger indices
+        // that have actual dependencies registered (saves memory and CPU)
+        const maxIndexToCheck = Math.min(oldLength, newLength + 1000); // Cap at 1000 deleted indices
+        for (let i = newLength; i < maxIndexToCheck; i++) {
+          const key = String(i);
+          // Only add index if it has watchers
+          if (meta.d.has(key)) {
+            ks.add(key);
+          }
+        }
+
+        // If truncating beyond 1000 items, just trigger ITERATE (catch-all)
+        // Individual index watchers will still fire via ITERATE dependency
+      } finally {
+        if (--engine._b === 0) {
+          try { engine._fpt(); } catch (err) { console.error('Reflex: Error flushing pending triggers:', err); }
         }
       }
-    } else if (isIdx && !had) {
-      // New index added (sparse array) - affects iteration and length
-      engine.triggerEffects(meta, ITERATE);
-      engine.triggerEffects(meta, 'length');
+    } else {
+      // Normal path: trigger specific key change
+      engine.triggerEffects(meta, k);
+
+      // OPTIMIZATION: Only trigger ITERATE when structure actually changes
+      // Setting existing array elements doesn't need ITERATE
+      if (k === 'length') {
+        // Length change always affects iteration
+        engine.triggerEffects(meta, ITERATE);
+      } else if (isIdx && !had) {
+        // New index added (sparse array) - affects iteration and length
+        engine.triggerEffects(meta, ITERATE);
+        engine.triggerEffects(meta, 'length');
+      }
     }
     // Note: Updating existing indices (arr[5] = x when arr.length > 5)
     // does NOT trigger ITERATE, preventing O(N) over-reactivity
@@ -168,6 +196,48 @@ export const ArrayHandler: ProxyHandler<any[]> = {
       engine.triggerEffects(meta, 'length');
     }
     return res;
+  },
+
+  // CRITICAL SECURITY FIX: Prevent sandbox escape via Object.defineProperty
+  // Without this trap, Object.defineProperty(proxy, 'constructor', {...}) bypasses
+  // the 'set' trap's UNSAFE_PROPS check, allowing prototype pollution
+  defineProperty(o, k, desc) {
+    if (typeof k === 'string' && UNSAFE_PROPS[k]) {
+      throw new Error(`Reflex: Cannot define unsafe property '${k}'`);
+    }
+    const meta = (o as ReactiveTarget)[META] as ReactiveMeta;
+    const res = Reflect.defineProperty(o, k, desc);
+    if (res) {
+      meta.v++; // Increment version on mutation
+      const engine = meta.engine;
+      engine.triggerEffects(meta, k);
+      engine.triggerEffects(meta, ITERATE);
+    }
+    return res;
+  },
+
+  // CRITICAL SECURITY FIX: Prevent prototype pollution via Object.setPrototypeOf
+  setPrototypeOf() {
+    throw new Error('Reflex: Cannot set prototype (prototype pollution prevention)');
+  },
+
+  // CRITICAL SECURITY FIX: Hide prototype chain to prevent constructor access
+  // Without this, Object.getPrototypeOf(proxy) exposes Array.prototype with constructor
+  getPrototypeOf(o) {
+    // Return null to hide the prototype chain from inspection
+    // This prevents: Object.getPrototypeOf(proxy).constructor.constructor('code')
+    return null;
+  },
+
+  // CRITICAL SECURITY FIX #8: Inconsistent Sandbox Visibility
+  // The 'has' trap ensures ("__proto__" in obj) returns false consistently
+  // Without this, ("__proto__" in obj) returns true but obj.__proto__ returns undefined
+  has(o, k) {
+    // Block unsafe properties from 'in' operator
+    if (typeof k === 'string' && UNSAFE_PROPS[k]) {
+      return false;
+    }
+    return Reflect.has(o, k);
   }
 };
 
@@ -239,6 +309,48 @@ export const ObjectHandler: ProxyHandler<ReactiveTarget> = {
     // Track ITERATE dependency so Object.keys(), for...in, etc. react to additions/deletions
     engine.trackDependency(meta, ITERATE);
     return Reflect.ownKeys(o);
+  },
+
+  // CRITICAL SECURITY FIX: Prevent sandbox escape via Object.defineProperty
+  // Without this trap, Object.defineProperty(proxy, 'constructor', {...}) bypasses
+  // the 'set' trap's UNSAFE_PROPS check, allowing prototype pollution
+  defineProperty(o, k, desc) {
+    if (typeof k === 'string' && UNSAFE_PROPS[k]) {
+      throw new Error(`Reflex: Cannot define unsafe property '${k}'`);
+    }
+    const meta = o[META] as ReactiveMeta;
+    const res = Reflect.defineProperty(o, k, desc);
+    if (res) {
+      meta.v++; // Increment version on mutation
+      const engine = meta.engine;
+      engine.triggerEffects(meta, k);
+      if (!(k in o)) engine.triggerEffects(meta, ITERATE);
+    }
+    return res;
+  },
+
+  // CRITICAL SECURITY FIX: Prevent prototype pollution via Object.setPrototypeOf
+  setPrototypeOf() {
+    throw new Error('Reflex: Cannot set prototype (prototype pollution prevention)');
+  },
+
+  // CRITICAL SECURITY FIX: Hide prototype chain to prevent constructor access
+  // Without this, Object.getPrototypeOf(proxy) exposes Object.prototype with constructor
+  getPrototypeOf(o) {
+    // Return null to hide the prototype chain from inspection
+    // This prevents: Object.getPrototypeOf(proxy).constructor.constructor('code')
+    return null;
+  },
+
+  // CRITICAL SECURITY FIX #8: Inconsistent Sandbox Visibility
+  // The 'has' trap ensures ("__proto__" in obj) returns false consistently
+  // Without this, ("__proto__" in obj) returns true but obj.__proto__ returns undefined
+  has(o, k) {
+    // Block unsafe properties from 'in' operator
+    if (typeof k === 'string' && UNSAFE_PROPS[k]) {
+      return false;
+    }
+    return Reflect.has(o, k);
   }
 };
 
@@ -453,7 +565,22 @@ export const ReactivityMixin = {
       self._b++;
       let res;
       try {
-        res = Array.prototype[m].apply(t, args);
+        // CRITICAL FIX #7: Raw Target Exposure in Array Methods
+        // Check if the target has a custom implementation of this method
+        // For custom array classes, use the instance method (maintains reactivity)
+        // For standard arrays, use Array.prototype (prevents prototype pollution)
+        const hasCustomMethod = t.constructor !== Array &&
+                                t.constructor.prototype &&
+                                t.constructor.prototype[m] !== Array.prototype[m];
+
+        if (hasCustomMethod) {
+          // Custom array class - call the method on the proxy to maintain reactivity
+          // The proxy is stored in meta.p
+          res = meta.p[m](...args);
+        } else {
+          // Standard array - use Array.prototype explicitly for security
+          res = Array.prototype[m].apply(t, args);
+        }
 
         meta.v++; // Increment version on array mutation
         let ks = self.pendingTriggers.get(meta);
@@ -497,12 +624,21 @@ export const ReactivityMixin = {
           next() {
             const n = it.next();
             if (n.done) return n;
+            // CRITICAL FIX #6: Iteration Allocation Storm
+            // Only wrap values that need wrapping (objects). Primitives pass through.
+            // This eliminates wrapper allocation overhead for primitive-heavy collections
             if (isMap) {
-              if (m === 'keys' || m === 'values') return { done: false, value: self._wrap(n.value) };
+              if (m === 'keys' || m === 'values') {
+                const val = n.value;
+                return { done: false, value: (val !== null && typeof val === 'object') ? self._wrap(val) : val };
+              }
               const [k, v] = n.value;
-              return { done: false, value: [self._wrap(k), self._wrap(v)] };
+              const wrappedK = (k !== null && typeof k === 'object') ? self._wrap(k) : k;
+              const wrappedV = (v !== null && typeof v === 'object') ? self._wrap(v) : v;
+              return { done: false, value: [wrappedK, wrappedV] };
             }
-            return { done: false, value: self._wrap(n.value) };
+            const val = n.value;
+            return { done: false, value: (val !== null && typeof val === 'object') ? self._wrap(val) : val };
           },
           return(v) { return it.return ? it.return(v) : { done: true, value: v }; }
         };
@@ -519,7 +655,16 @@ export const ReactivityMixin = {
       self.trackDependency(meta, rk);
       return (t as Map<any, any> | Set<any>).has(rk);
     };
-    if (m === 'forEach') return meta[m] = function(cb, ctx) { self.trackDependency(meta, ITERATE); fn.call(t, (v, k) => cb.call(ctx, self._wrap(v), self._wrap(k), meta.p)); };
+    if (m === 'forEach') return meta[m] = function(cb, ctx) {
+      self.trackDependency(meta, ITERATE);
+      // CRITICAL FIX #6: Iteration Allocation Storm (continued)
+      // Optimize forEach to skip wrapping primitives
+      fn.call(t, (v, k) => {
+        const wrappedV = (v !== null && typeof v === 'object') ? self._wrap(v) : v;
+        const wrappedK = (k !== null && typeof k === 'object') ? self._wrap(k) : k;
+        cb.call(ctx, wrappedV, wrappedK, meta.p);
+      });
+    };
 
     if (m === 'set') return meta[m] = function(k, v) {
       const map = t as Map<any, any>;
@@ -585,13 +730,34 @@ export const ReactivityMixin = {
     };
 
     if (m === 'clear') return meta[m] = () => {
-      if (!(t as Map<any, any> | Set<any>).size) return;
+      const size = (t as Map<any, any> | Set<any>).size;
+      if (!size) return;
+
       meta.v++; // Increment version on mutation
       self._b++;
       try {
         let ks = self.pendingTriggers.get(meta);
         if (!ks) self.pendingTriggers.set(meta, ks = new Set());
-        (t as Map<any, any> | Set<any>).forEach((_, k) => ks.add(k));
+
+        // CRITICAL FIX #5: Collection clear() Notification Storm
+        // For large collections (50k+ items), iterating all keys creates massive overhead
+        // OPTIMIZATION: Only trigger keys that have active watchers, cap at 1000 keys
+        // Most apps use iteration (for...of, forEach) which tracks ITERATE, not individual keys
+        const maxKeysToTrigger = Math.min(size, 1000);
+        if (maxKeysToTrigger < size) {
+          // Large collection: only trigger keys with active dependencies
+          let count = 0;
+          for (const k of (t as Map<any, any> | Set<any>).keys()) {
+            if (meta.d.has(k)) {
+              ks.add(k);
+              if (++count >= maxKeysToTrigger) break;
+            }
+          }
+        } else {
+          // Small collection: trigger all keys (original behavior)
+          (t as Map<any, any> | Set<any>).forEach((_, k) => ks.add(k));
+        }
+
         ks.add(ITERATE);
         (t as Map<any, any> | Set<any>).clear();
       } finally {

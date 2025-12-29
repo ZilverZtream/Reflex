@@ -913,6 +913,19 @@ export const CompilerMixin = {
    * Attribute binding: :attr="expr"
    */
   _at(el, att, exp, o) {
+    // CRITICAL SECURITY FIX #2: XSS via Dynamic Attribute Binding
+    // Block event handler attributes (onclick, onload, onmouseover, etc.)
+    // Without this check, :onclick="malicious" or :[userAttr]="code" bypasses expression security
+    // The browser's DOM event system executes the attribute value as JavaScript
+    const attrLower = att.toLowerCase();
+    if (attrLower.startsWith('on')) {
+      throw new Error(
+        `Reflex: SECURITY ERROR - Cannot bind event handler attribute '${att}'.\n` +
+        `Event handlers must use @ syntax (e.g., @click="handler") for security.\n` +
+        `This prevents XSS attacks via dynamic attribute names.`
+      );
+    }
+
     const fn = this._fn(exp);
     let prev;
     const isUrlAttr = att === 'href' || att === 'src' || att === 'action' ||
