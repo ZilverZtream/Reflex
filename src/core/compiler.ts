@@ -1161,26 +1161,48 @@ export const CompilerMixin = {
         this._w(node, scope);
       }
 
-      // CRITICAL FIX #4: m-ref Array Order Desync
+      // CRITICAL FIX #5: m-ref Array Order Desync in Nested Structures
       // After DOM reconciliation reorders nodes, m-ref arrays must be updated to match
       // Without this fix, refs[0] points to the wrong element after sorting
-      // Rebuild all affected ref arrays in the new DOM order
-      const refArraysToUpdate = new Map(); // refName -> Set of nodes in this list
+      //
+      // PREVIOUS BUG: Only checked root node of each row for m-ref
+      // This failed when m-ref is on a child element:
+      // <div m-for="item in items"><span m-ref="spans"></span></div>
+      // The span refs would not be reordered because we only checked the div
+      //
+      // NEW FIX: Check root node AND all descendants for m-ref elements
+      // Build a map of {refElement -> {rowNode, index}} to track which row each ref belongs to
+      const refArraysToUpdate = new Map(); // refName -> array of {node, index}
+      const refToRowIndex = new Map(); // refElement -> index (for descendants)
 
-      // Find all ref arrays that contain nodes from this list
+      // First pass: Map each ref element to its parent row index
       result.keys.forEach((key, index) => {
         const rowData = result.rows.get(key);
         if (!rowData) return;
 
-        const node = rowData.node;
-        // Check all ref arrays to see if this node is in any of them
+        const rowNode = rowData.node;
+
+        // Check all ref arrays to see if they contain this row's node or descendants
         for (const refName in this._refs) {
           const refValue = this._refs[refName];
-          if (Array.isArray(refValue) && refValue.includes(node)) {
-            if (!refArraysToUpdate.has(refName)) {
-              refArraysToUpdate.set(refName, []);
+          if (!Array.isArray(refValue)) continue;
+
+          // Check each element in the ref array
+          for (const refElement of refValue) {
+            // Check if this ref element is the row node itself
+            if (refElement === rowNode) {
+              if (!refArraysToUpdate.has(refName)) {
+                refArraysToUpdate.set(refName, []);
+              }
+              refArraysToUpdate.get(refName).push({ node: refElement, index });
             }
-            refArraysToUpdate.get(refName).push({ node, index });
+            // CRITICAL FIX #5: Also check if ref element is a descendant of this row
+            else if (rowNode.contains && rowNode.contains(refElement)) {
+              if (!refArraysToUpdate.has(refName)) {
+                refArraysToUpdate.set(refName, []);
+              }
+              refArraysToUpdate.get(refName).push({ node: refElement, index });
+            }
           }
         }
       });
@@ -1644,25 +1666,52 @@ export const CompilerMixin = {
         // Example: <div class='foo'> becomes <div class="foo">
         // Without normalization, we'd destroy and re-parse identical HTML
         if (self._hydrateMode) {
-          // Normalize both HTMLs by parsing them through the browser
-          // This ensures we compare apples to apples
-          const currentHTML = el.innerHTML;
+          // CRITICAL SECURITY FIX #7: XSS via Hydration Bypass
+          //
+          // VULNERABILITY: If sanitize: false is set, the hydration normalization step
+          // (tempDiv.innerHTML = html) could execute malicious code in some contexts
+          // Even though tempDiv is detached, certain payloads can still execute
+          //
+          // SOLUTION: Enforce sanitization during hydration for security
+          // If sanitize: false is explicitly set, skip normalization and force update
+          // This prevents the innerHTML assignment on tempDiv entirely
+          const isSanitizationDisabled = Object.prototype.hasOwnProperty.call(self.cfg, 'sanitize') && self.cfg.sanitize === false;
 
-          // Fast path: if strings match exactly, skip normalization
-          if (currentHTML === html) {
-            prev = html;
-            return;
-          }
+          if (isSanitizationDisabled) {
+            // SECURITY: Skip normalization when sanitization is disabled
+            // Force innerHTML update (developer has accepted the risk)
+            if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+              console.warn(
+                'Reflex Security Warning: m-html hydration without sanitization.\n' +
+                'Skipping HTML normalization during hydration to prevent XSS.\n' +
+                'This may cause unnecessary re-renders if HTML differs only in formatting.'
+              );
+            }
+            // Skip normalization, fall through to innerHTML update
+          } else {
+            // Sanitization is enabled - safe to normalize
+            // Normalize both HTMLs by parsing them through the browser
+            // This ensures we compare apples to apples
+            const currentHTML = el.innerHTML;
 
-          // Normalize new HTML by creating a temporary element
-          const tempDiv = document.createElement('div');
-          tempDiv.innerHTML = html;
-          const normalizedNew = tempDiv.innerHTML;
+            // Fast path: if strings match exactly, skip normalization
+            if (currentHTML === html) {
+              prev = html;
+              return;
+            }
 
-          if (currentHTML === normalizedNew) {
-            // Content matches after normalization - skip the destructive innerHTML write
-            prev = html;
-            return;
+            // SECURITY: Only normalize if sanitization is enabled
+            // The html variable is already sanitized by DOMPurify above (line 1604)
+            // So it's safe to assign to tempDiv.innerHTML
+            const tempDiv = document.createElement('div');
+            tempDiv.innerHTML = html; // Safe because html is sanitized
+            const normalizedNew = tempDiv.innerHTML;
+
+            if (currentHTML === normalizedNew) {
+              // Content matches after normalization - skip the destructive innerHTML write
+              prev = html;
+              return;
+            }
           }
         }
 

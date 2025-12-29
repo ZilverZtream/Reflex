@@ -368,24 +368,51 @@ export const DOMRenderer: IRendererAdapter = {
   },
 
   setInnerHTML(node: Element, html: string): void {
-    // CRITICAL SECURITY FIX #1: Regex-based HTML Sanitization Bypass
+    // ========================================================================
+    // CRITICAL SECURITY WARNING: This method does NOT sanitize HTML
+    // ========================================================================
     //
-    // VULNERABILITY: Regex cannot reliably parse HTML's context-free grammar
-    // Previous implementation used regex deny-lists which are fundamentally insecure:
-    // - Obfuscation bypass: <svg/onload=alert(1)> (using slash instead of space)
+    // IMPORTANT: The danger detection below is NOT a security feature!
+    // It is a basic sanity check to catch obvious mistakes, but can be bypassed.
+    //
+    // DO NOT RELY ON THIS METHOD FOR SECURITY. You MUST sanitize HTML before calling this.
+    //
+    // SECURITY ARCHITECTURE:
+    // 1. The compiler's _html method enforces DOMPurify sanitization (REQUIRED)
+    // 2. This method is a low-level DOM operation with basic validation only
+    // 3. Developers calling app._ren.setInnerHTML() directly bypass all security
+    //
+    // VULNERABILITY HISTORY:
+    // - Previous regex deny-lists were fundamentally insecure (see below)
+    // - Current checks are DEFENSE-IN-DEPTH only, not a security boundary
+    //
+    // REGEX BYPASS EXAMPLES (why regex doesn't work):
+    // - Obfuscation: <svg/onload=alert(1)> (slash instead of space)
     // - Mutation XSS: <math><mtext><table><mglyph><style>...</style>
     // - SVG animation: <animate onbegin=alert(1) attributeName=x dur=1s>
     // - Form actions: <button form="t" formaction="javascript:alert(1)">
+    // - Case variations: <ScRiPt>alert(1)</sCrIpT>
+    // - Unicode escapes: <img src=x onerror=\u0061lert(1)>
+    // - HTML entity encoding: <img src=x onerror=&#97;lert(1)>
     //
-    // SOLUTION: Removed regex checks entirely. Sanitization must happen at higher level
-    // using DOMPurify in the compiler's _html method before calling this.
+    // CRITICAL FIX #10: Document Security Limitations
     //
-    // CRITICAL FIX: Enforce safety checks to prevent direct misuse
-    // While the compiler enforces DOMPurify, the renderer is exposed on the Reflex instance
-    // Developers might call app._ren.setInnerHTML(el, payload) thinking it's safe
-    // We add basic checks to catch obviously dangerous content
+    // This method performs basic pattern matching to catch OBVIOUS mistakes.
+    // These checks will NOT stop a determined attacker.
+    //
+    // CORRECT USAGE:
+    //   const sanitized = DOMPurify.sanitize(userInput);
+    //   app._ren.setInnerHTML(element, sanitized);
+    //
+    // INCORRECT USAGE:
+    //   app._ren.setInnerHTML(element, userInput); // VULNERABLE!
+    //
+    // RECOMMENDATION:
+    // - Use m-html directive (enforces DOMPurify)
+    // - Never call setInnerHTML directly with user input
+    // - If you must use this API, sanitize with DOMPurify first
 
-    // Enhanced danger detection to catch common XSS vectors
+    // Basic danger detection (DEFENSE-IN-DEPTH ONLY, NOT A SECURITY BOUNDARY)
     const lowerHTML = html.toLowerCase();
     const hasDangerousContent =
       lowerHTML.includes('<script') ||
@@ -404,19 +431,30 @@ export const DOMRenderer: IRendererAdapter = {
 
     if (hasDangerousContent) {
       throw new Error(
-        'Reflex SECURITY ERROR: setInnerHTML() detected dangerous content.\n' +
-        'Content contains potentially malicious patterns: <script>, javascript:, data URIs, \n' +
-        '<object>, <embed>, <iframe>, event handlers, or SVG attack vectors.\n' +
-        'This method should only be called with DOMPurify-sanitized HTML.\n' +
-        'Use m-html directive with DOMPurify configured instead of calling setInnerHTML directly.\n' +
+        'Reflex SECURITY ERROR: setInnerHTML() detected dangerous content.\n\n' +
+        'CRITICAL: This check is NOT a security feature! It can be bypassed.\n' +
+        'It only catches OBVIOUS XSS patterns to prevent accidental misuse.\n\n' +
+        'Detected patterns: <script>, javascript:, data URIs, <object>, <embed>,\n' +
+        '<iframe>, event handlers, or SVG attack vectors.\n\n' +
+        'SOLUTION:\n' +
+        '  1. Install DOMPurify: npm install dompurify\n' +
+        '  2. Sanitize BEFORE calling this method:\n' +
+        '     const safe = DOMPurify.sanitize(html);\n' +
+        '     setInnerHTML(element, safe);\n' +
+        '  3. Or use m-html directive (handles sanitization automatically)\n\n' +
         'Element: ' + node.tagName
       );
     }
 
     if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
       console.warn(
-        'Reflex Security Warning: setInnerHTML() called. Ensure HTML is sanitized.\n' +
-        'This method does NOT sanitize HTML. Use DOMPurify before calling.\n' +
+        'Reflex Security Warning: setInnerHTML() called.\n\n' +
+        'IMPORTANT: This method does NOT sanitize HTML!\n' +
+        'The basic danger checks can be easily bypassed.\n' +
+        'You MUST use DOMPurify to sanitize HTML before calling this method.\n\n' +
+        'Recommended:\n' +
+        '  const safe = DOMPurify.sanitize(html);\n' +
+        '  setInnerHTML(element, safe);\n\n' +
         'Element:', node.tagName
       );
     }

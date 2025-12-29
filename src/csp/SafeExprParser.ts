@@ -631,8 +631,43 @@ export class SafeExprParser {
   }
 
   isDigit(c) { return c >= '0' && c <= '9'; }
-  isIdentStart(c) { return c && /[a-zA-Z_$]/.test(c); }
-  isIdentPart(c) { return c && /[\w$]/.test(c); }
+
+  // CRITICAL FIX #8: Unicode Identifier Support
+  //
+  // PREVIOUS BUG: Strict ASCII-only regex /[a-zA-Z_$]/ rejected valid Unicode identifiers
+  // This broke applications using internationalized variable names (common in non-English teams)
+  // Example failures: accented characters (café), emojis (💡), non-Latin scripts (日本語)
+  //
+  // SOLUTION: Use Unicode property escapes to match ECMAScript identifier syntax
+  // - \p{ID_Start} matches all characters valid at the start of an identifier
+  // - \p{ID_Continue} matches all characters valid in the rest of an identifier
+  // - Includes Latin, Greek, Cyrillic, CJK, Arabic, Hebrew, Devanagari, and more
+  // - Also includes combining marks, digits, and connectors in ID_Continue
+  //
+  // PERFORMANCE NOTE: Unicode regex with 'u' flag is slightly slower than ASCII-only
+  // However, correctness and i18n support are more important than micro-optimization
+  isIdentStart(c) {
+    if (!c) return false;
+    // Fast path for common ASCII identifiers (optimization)
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c === '_' || c === '$') {
+      return true;
+    }
+    // Unicode path for international identifiers
+    // Use \p{ID_Start} for ECMAScript-compliant identifier start characters
+    return /[\p{ID_Start}$_]/u.test(c);
+  }
+
+  isIdentPart(c) {
+    if (!c) return false;
+    // Fast path for common ASCII identifiers (optimization)
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c === '_' || c === '$') {
+      return true;
+    }
+    // Unicode path for international identifiers
+    // Use \p{ID_Continue} for ECMAScript-compliant identifier continuation characters
+    // Includes digits, combining marks (U+200C, U+200D), and all ID_Start characters
+    return /[\p{ID_Continue}$\u200c\u200d]/u.test(c);
+  }
 
   /**
    * Evaluate an AST node.
@@ -825,6 +860,13 @@ export class SafeExprParser {
           const key = prop.computed
             ? this._evaluate(prop.key, state, context, $event, $el, reflex)
             : prop.key;
+          // CRITICAL SECURITY FIX #1: Prototype Pollution via Object Literals
+          // Validate key against UNSAFE_PROPS and dangerous patterns before assignment
+          // Without this, {{ { ["__proto__"]: { polluted: true } } }} pollutes Object.prototype
+          if (UNSAFE_PROPS[key] || isDangerousPropertyPattern(key)) {
+            console.warn('Reflex: Blocked unsafe object key in literal:', key);
+            continue; // Skip this property
+          }
           obj[key] = this._evaluate(prop.value, state, context, $event, $el, reflex);
         }
         return obj;
