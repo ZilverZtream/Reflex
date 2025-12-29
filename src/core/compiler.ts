@@ -131,41 +131,49 @@ export function runTransition(el, name, type, done, reflex?) {
   // Use renderer's requestAnimationFrame if available, otherwise use global
   const raf = renderer?.requestAnimationFrame ?? requestAnimationFrame;
 
-  // Next frame: start transition
+  // CRITICAL FIX #8: Flaky Transitions - Use Double RAF
+  // A single requestAnimationFrame is often insufficient for the browser to apply the initial styles
+  // Browsers batch style updates, and a single frame may not guarantee the '-from' class has rendered
+  // Using two frames ensures the initial state is fully applied before transitioning
   raf(() => {
     if (cleaned || transitionCallback.cancelled) return; // Transition was cancelled before it started
 
-    el.classList.remove(from);
-    el.classList.add(to);
+    // Second frame: Now swap classes to trigger the transition
+    raf(() => {
+      if (cleaned || transitionCallback.cancelled) return; // Transition was cancelled during first frame
 
-    // Listen for transition end
-    el.addEventListener('transitionend', onEnd);
-    el.addEventListener('animationend', onEnd);
+      el.classList.remove(from);
+      el.classList.add(to);
 
-    // Use renderer's getComputedStyle if available, otherwise use global
-    const getStyle = renderer?.getComputedStyle ?? getComputedStyle;
+      // Listen for transition end
+      el.addEventListener('transitionend', onEnd);
+      el.addEventListener('animationend', onEnd);
 
-    // Fallback timeout (in case transitionend doesn't fire)
-    const style = getStyle(el);
-    const duration = parseFloat(style.transitionDuration) || parseFloat(style.animationDuration) || 0;
-    const delay = parseFloat(style.transitionDelay) || parseFloat(style.animationDelay) || 0;
-    const timeout = (duration + delay) * 1000 + 50; // Add 50ms buffer
+      // Use renderer's getComputedStyle if available, otherwise use global
+      const getStyle = renderer?.getComputedStyle ?? getComputedStyle;
 
-    if (timeout > 50) {
-      timeoutId = setTimeout(() => {
-        if (cleaned || transitionCallback.cancelled) return;
+      // Fallback timeout (in case transitionend doesn't fire)
+      const style = getStyle(el);
+      const duration = parseFloat(style.transitionDuration) || parseFloat(style.animationDuration) || 0;
+      const delay = parseFloat(style.transitionDelay) || parseFloat(style.animationDelay) || 0;
+      const timeout = (duration + delay) * 1000 + 50; // Add 50ms buffer
+
+      if (timeout > 50) {
+        timeoutId = setTimeout(() => {
+          if (cleaned || transitionCallback.cancelled) return;
+          cleanup();
+          if (!transitionCallback.cancelled && done) {
+            done();
+          }
+        }, timeout) as any;
+      } else {
+        // No transition defined, complete immediately
         cleanup();
         if (!transitionCallback.cancelled && done) {
           done();
         }
-      }, timeout) as any;
-    } else {
-      // No transition defined, complete immediately
-      cleanup();
-      if (!transitionCallback.cancelled && done) {
-        done();
       }
-    }
+    });
   });
 }
 
@@ -196,15 +204,33 @@ export const CompilerMixin = {
    * Uses iterative walking with explicit stack to prevent stack overflow.
    * This approach handles deeply nested DOM structures (10,000+ levels) safely.
    *
-   * The stack stores {node, scope} pairs to process.
-   * Each node's children are pushed in reverse order to maintain left-to-right processing.
+   * CRITICAL FIX #6: Component stack overflow prevention
+   * Instead of calling _comp recursively (which calls _w, which calls _comp...),
+   * we now queue component work onto the same stack as DOM nodes.
+   *
+   * The stack stores work items that can be:
+   * - { node, scope }: Regular DOM walking
+   * - { comp, tag, scope }: Component to render
    */
   _w(n, o) {
     // Explicit stack prevents recursive call stack overflow
     const stack = [{ node: n, scope: o }];
 
     while (stack.length > 0) {
-      const { node, scope } = stack.pop();
+      const item = stack.pop();
+
+      // Handle component rendering work item
+      if (item.comp) {
+        const inst = this._compNoRecurse(item.comp, item.tag, item.scope);
+        // Queue the component instance for walking
+        if (inst) {
+          stack.push({ node: inst, scope: this._scopeMap.get(inst) || item.scope });
+        }
+        continue;
+      }
+
+      // Handle regular DOM node walking
+      const { node, scope } = item;
       let c = node.firstChild;
 
       while (c) {
@@ -234,7 +260,9 @@ export const CompilerMixin = {
               } else {
                 const t = tag.toLowerCase();
                 if (this._cp.has(t)) {
-                  this._comp(c, t, scope);
+                  // CRITICAL FIX #6: Queue component for iterative processing
+                  // Instead of calling _comp (which recurses), queue it on the stack
+                  stack.push({ comp: c, tag: t, scope: scope });
                 } else if (this._acp.has(t)) {
                   // Async component: lazy-load the handler
                   this._asyncComp(c, t, scope);
@@ -1207,6 +1235,18 @@ export const CompilerMixin = {
     const isNum = type === 'number' || type === 'range';
     const isMultiSelect = type === 'select-multiple';
     const isLazy = modifiers.includes('lazy');
+    // CRITICAL FIX #5: m-model File Input Crash
+    // File inputs have a read-only .value property (security restriction)
+    // Attempting to set it throws an error or fails silently
+    // For file inputs, we can only read .files, not set .value
+    const isFile = type === 'file';
+    if (isFile) {
+      console.warn(
+        'Reflex: m-model is not supported on file inputs (security restriction).\n' +
+        'Use @change="handler" and access el.files instead.'
+      );
+      return; // Skip m-model binding for file inputs
+    }
     // CRITICAL FIX: Unsupported contenteditable
     // Elements with contenteditable="true" use innerText/innerHTML, not value
     const isContentEditable = el.contentEditable === 'true';
@@ -1293,9 +1333,19 @@ export const CompilerMixin = {
             // If array contains numbers and value is numeric, push as number
             let valueToAdd = el.value;
             if (arr.length > 0 && typeof arr[0] === 'number') {
-              // CRITICAL FIX: NaN Pollution - Validate numeric conversion
-              // Number("foo") results in NaN, which pollutes numeric arrays
-              // Only convert to number if the result is a valid number
+              // CRITICAL FIX #9: Loose Number Conversion - Empty string becomes 0
+              // Number("") and Number(" ") return 0, which is valid (not NaN)
+              // But empty/whitespace checkbox values should be ignored, not converted to 0
+              // Check for empty/whitespace strings BEFORE numeric conversion
+              const trimmed = el.value.trim();
+              if (trimmed === '') {
+                // Empty or whitespace value - skip adding to numeric array
+                console.warn(
+                  `Reflex: Skipping empty checkbox value for numeric array binding.`
+                );
+                return;
+              }
+              // Now check for valid numeric conversion
               const numValue = Number(el.value);
               if (!isNaN(numValue)) {
                 valueToAdd = numValue;
@@ -1391,7 +1441,26 @@ export const CompilerMixin = {
         }
         t = t[p];
       }
-      t[end] = v;
+
+      // CRITICAL FIX #4: Scope Shadowing in m-model
+      // When m-model is used inside m-for, the loop creates child scopes via Object.create(parent)
+      // Simple assignment `t[end] = v` would create a shadow property on the child scope
+      // instead of updating the parent, breaking two-way binding.
+      // Solution: Walk up the prototype chain to find the owner of the property
+      let owner = t;
+      while (owner && !Object.prototype.hasOwnProperty.call(owner, end)) {
+        const proto = Object.getPrototypeOf(owner);
+        // Stop if we've reached the top of the chain or hit null/non-object
+        if (!proto || typeof proto !== 'object') break;
+        owner = proto;
+      }
+      // If we found an owner in the prototype chain that has this property, update it there
+      // Otherwise, create the property on the current object (t)
+      if (owner && Object.prototype.hasOwnProperty.call(owner, end)) {
+        owner[end] = v;
+      } else {
+        t[end] = v;
+      }
     };
 
     // IME composition event handlers
