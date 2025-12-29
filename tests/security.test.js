@@ -184,6 +184,37 @@ describe('Security', () => {
   });
 
   describe('Expression Sandboxing', () => {
+    it('should compile expressions without strict mode syntax errors', async () => {
+      // CRITICAL: Cannot use "use strict" with "with" statements (SyntaxError)
+      // This test ensures the expression compiler doesn't generate invalid code
+      document.body.innerHTML = '<button @click="count++">Click</button><span m-text="count"></span>';
+      const app = new Reflex({ count: 0 });
+      await app.nextTick();
+
+      // The expression should compile successfully (no SyntaxError)
+      const button = document.querySelector('button');
+      button.click();
+      await app.nextTick();
+
+      expect(document.querySelector('span').textContent).toBe('1');
+    });
+
+    it('should compile handler expressions without syntax errors', async () => {
+      // Test various handler expressions to ensure no SyntaxError with "with" statements
+      document.body.innerHTML = `
+        <button @click="handleClick">Simple Handler</button>
+        <button @click="count = count + 1">Expression</button>
+        <button @click="handleClick(); count++">Multi-statement</button>
+      `;
+      const app = new Reflex({
+        count: 0,
+        handleClick: () => {}
+      });
+
+      // Should not throw SyntaxError during compilation
+      expect(() => app.mount()).not.toThrow();
+    });
+
     it('should allow access to reserved window identifier', async () => {
       document.body.innerHTML = '<span m-text="typeof window"></span>';
       const app = new Reflex({});

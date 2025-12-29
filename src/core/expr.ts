@@ -215,11 +215,12 @@ export const ExprMixin = {
 
       // For single expressions (like function calls), add return to capture cleanup
       // For multi-statement expressions (with ;), don't add return
-      // CRITICAL SECURITY FIX: Add 'use strict' to prevent 'this' from defaulting to global object
-      // Without strict mode, {{ this.constructor.constructor("code")() }} can execute arbitrary code
+      // SECURITY NOTE: Cannot use 'use strict' with 'with' statements (SyntaxError)
+      // Instead, we rely on the Iron Membrane (createMembrane) for runtime security
+      // The membrane blocks dangerous property access ('constructor', '__proto__', etc)
       const body = useReturn
-        ? `"use strict";${magicArgs}with(c||{}){with(s){return(${handlerExp})}}`
-        : `"use strict";${magicArgs}with(c||{}){with(s){${handlerExp}}}`;
+        ? `${magicArgs}with(c||{}){with(s){return(${handlerExp})}}`
+        : `${magicArgs}with(c||{}){with(s){${handlerExp}}}`;
       try {
         rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el', body);
         return this._ec.set(k, (s, c, e, el) => {
