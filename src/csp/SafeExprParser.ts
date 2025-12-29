@@ -18,6 +18,269 @@
 
 import { META, createElementMembrane } from '../core/symbols.js';
 
+// Symbol for identifying ScopeContainer instances
+const SCOPE_CONTAINER_MARKER = Symbol.for('reflex.ScopeContainer');
+
+// Dangerous property names that must be blocked to prevent prototype pollution
+// CRITICAL: __proto__ cannot be set via object literal syntax as it's treated as prototype setter
+// We must use Object.defineProperty or direct assignment after creation
+const DANGEROUS_PROPS: { [key: string]: boolean } = Object.create(null);
+DANGEROUS_PROPS['__proto__'] = true;
+DANGEROUS_PROPS['constructor'] = true;
+DANGEROUS_PROPS['prototype'] = true;
+
+/**
+ * ScopeContainer - Secure scope storage that prevents prototype pollution
+ *
+ * SECURITY CRITICAL:
+ * This class replaces Object.create() for scope inheritance to prevent
+ * prototype chain attacks. All scope data is stored in a Map, isolating
+ * it from the JavaScript prototype chain.
+ *
+ * The returned object is a Proxy that intercepts property access,
+ * allowing it to work with JavaScript's `with` statement while still
+ * providing security guarantees.
+ *
+ * BREAKING CHANGE: Regular objects are no longer allowed as scopes.
+ * All code must use ScopeContainer instances.
+ */
+export interface ScopeContainerAPI {
+  /** Check if a name exists in this scope or any parent scope */
+  has(name: string): boolean;
+  /** Get a value from this scope or any parent scope */
+  get(name: string): any;
+  /** Set a value in this scope (never writes to parent) */
+  set(name: string, value: any): void;
+  /** Delete a value from this scope */
+  delete(name: string): boolean;
+  /** Get all keys in this scope (not including parent) */
+  keys(): IterableIterator<string>;
+  /** Get the parent scope */
+  getParent(): ScopeContainerAPI | null;
+  /** Marker symbol access */
+  readonly [key: symbol]: any;
+}
+
+// Type that combines the API with arbitrary property access
+export type ScopeContainerInstance = ScopeContainerAPI & { [key: string]: any };
+
+/**
+ * ScopeContainer factory - creates a secure scope with Proxy-based property access
+ *
+ * The returned object is a Proxy that:
+ * - Intercepts property gets/sets and delegates to internal Map
+ * - Looks up parent scope for missing properties
+ * - Blocks dangerous properties like __proto__, constructor, prototype
+ * - Works with JavaScript's `with` statement for expression evaluation
+ */
+export class ScopeContainer {
+  // Private constructor - use ScopeContainer.create() or new ScopeContainer()
+  private _data: Map<string, any>;
+  private _parent: ScopeContainerInstance | null;
+
+  constructor(parent: ScopeContainerInstance | null = null) {
+    this._data = new Map();
+    this._parent = parent;
+
+    // Return a Proxy that intercepts property access
+    // This allows the scope to work with JavaScript's `with` statement
+    return new Proxy(this, {
+      get(target, prop, receiver) {
+        // Symbol access (including our marker)
+        if (typeof prop === 'symbol') {
+          if (prop === SCOPE_CONTAINER_MARKER) return true;
+          return undefined;
+        }
+
+        // Block dangerous properties
+        if (DANGEROUS_PROPS[prop]) {
+          return undefined;
+        }
+
+        // API methods
+        if (prop === 'has') return target.has.bind(target);
+        if (prop === 'get') return target.get.bind(target);
+        if (prop === 'set') return target.set.bind(target);
+        if (prop === 'delete') return target.delete.bind(target);
+        if (prop === 'keys') return target.keys.bind(target);
+        if (prop === 'getParent') return target.getParent.bind(target);
+
+        // Property lookup - check own data first, then parent chain
+        if (target._data.has(prop)) {
+          return target._data.get(prop);
+        }
+        if (target._parent) {
+          // Parent is also a Proxy, so direct property access works
+          return (target._parent as any)[prop];
+        }
+        return undefined;
+      },
+
+      set(target, prop, value, receiver) {
+        if (typeof prop === 'symbol') return false;
+
+        // Block dangerous properties
+        if (DANGEROUS_PROPS[prop]) {
+          throw new Error(
+            `Reflex Security: Cannot set dangerous property "${prop}" in scope.\n` +
+            `This property is blocked to prevent prototype pollution.`
+          );
+        }
+
+        target._data.set(prop, value);
+        return true;
+      },
+
+      has(target, prop) {
+        if (typeof prop === 'symbol') {
+          return prop === SCOPE_CONTAINER_MARKER;
+        }
+
+        // Block dangerous properties
+        if (DANGEROUS_PROPS[prop]) {
+          return false;
+        }
+
+        if (target._data.has(prop)) return true;
+        if (target._parent) return prop in target._parent;
+        return false;
+      },
+
+      deleteProperty(target, prop) {
+        if (typeof prop === 'symbol') return false;
+        if (DANGEROUS_PROPS[prop]) return false;
+        return target._data.delete(prop);
+      },
+
+      ownKeys(target) {
+        return [...target._data.keys()];
+      },
+
+      getOwnPropertyDescriptor(target, prop) {
+        if (typeof prop === 'symbol') return undefined;
+        if (DANGEROUS_PROPS[prop]) return undefined;
+        if (target._data.has(prop)) {
+          return {
+            value: target._data.get(prop),
+            writable: true,
+            enumerable: true,
+            configurable: true
+          };
+        }
+        return undefined;
+      },
+
+      // CRITICAL: Block __proto__ modification via setPrototypeOf
+      // __proto__ assignment may bypass the set trap in some engines
+      setPrototypeOf(target, proto) {
+        throw new Error(
+          'Reflex Security: Cannot change prototype of ScopeContainer.\n' +
+          'This operation is blocked to prevent prototype pollution.'
+        );
+      },
+
+      // Also need to define __proto__ as a non-writable property
+      // to prevent some __proto__ bypass techniques
+      defineProperty(target, prop, descriptor) {
+        if (typeof prop === 'symbol') return false;
+        if (DANGEROUS_PROPS[prop]) {
+          throw new Error(
+            `Reflex Security: Cannot define dangerous property "${prop}" in scope.\n` +
+            `This property is blocked to prevent prototype pollution.`
+          );
+        }
+        // For regular properties, just store in the Map
+        if ('value' in descriptor) {
+          target._data.set(prop, descriptor.value);
+        }
+        return true;
+      }
+    }) as any;
+  }
+
+  /**
+   * Check if a name exists in this scope or any parent scope
+   */
+  has(name: string): boolean {
+    if (this._data.has(name)) return true;
+    if (this._parent) return this._parent.has(name);
+    return false;
+  }
+
+  /**
+   * Get a value from this scope or any parent scope
+   */
+  get(name: string): any {
+    if (this._data.has(name)) return this._data.get(name);
+    if (this._parent) return this._parent.get(name);
+    return undefined;
+  }
+
+  /**
+   * Set a value in this scope (never writes to parent)
+   */
+  set(name: string, value: any): void {
+    // Block dangerous property names
+    if (DANGEROUS_PROPS[name]) {
+      throw new Error(
+        `Reflex Security: Cannot set dangerous property "${name}" in scope.\n` +
+        `This property is blocked to prevent prototype pollution.`
+      );
+    }
+    this._data.set(name, value);
+  }
+
+  /**
+   * Delete a value from this scope
+   */
+  delete(name: string): boolean {
+    return this._data.delete(name);
+  }
+
+  /**
+   * Get all keys in this scope (not including parent)
+   */
+  keys(): IterableIterator<string> {
+    return this._data.keys();
+  }
+
+  /**
+   * Get the parent scope
+   */
+  getParent(): ScopeContainerInstance | null {
+    return this._parent;
+  }
+
+  /**
+   * Static method to check if an object is a ScopeContainer
+   */
+  static isScopeContainer(obj: any): obj is ScopeContainerInstance {
+    return obj !== null &&
+           typeof obj === 'object' &&
+           obj[SCOPE_CONTAINER_MARKER] === true;
+  }
+
+  /**
+   * Create a ScopeContainer from a plain object (migration helper)
+   * This allows one-time conversion of legacy objects.
+   *
+   * WARNING: This is for migration only. New code should create
+   * ScopeContainer instances directly.
+   */
+  static fromObject(obj: Record<string, any>, parent: ScopeContainerInstance | null = null): ScopeContainerInstance {
+    const container = new ScopeContainer(parent) as ScopeContainerInstance;
+    for (const key of Object.keys(obj)) {
+      // Skip dangerous keys during migration
+      if (DANGEROUS_PROPS[key]) {
+        console.warn(`Reflex Security: Skipping dangerous key "${key}" during scope migration`);
+        continue;
+      }
+      container.set(key, obj[key]);
+    }
+    return container;
+  }
+}
+
 // Safe globals accessible in expressions
 // Note: Object is wrapped via SAFE_OBJECT to restrict dangerous methods
 const SAFE_GLOBALS = {
@@ -694,12 +957,30 @@ export class SafeExprParser {
         if (name === '$refs') return reflex._refs;
         if (name === '$dispatch') return reflex._dispatch.bind(reflex);
         if (name === '$nextTick') return reflex.nextTick.bind(reflex);
-        // Context lookup
-        if (context && name in context) {
-          const meta = context[META] || reflex._mf.get(context);
-          if (meta) reflex.trackDependency(meta, name);
-          return context[name];
+
+        // MANDATORY: Context MUST be ScopeContainer (when provided)
+        // BREAKING CHANGE: Regular objects are no longer allowed as scopes
+        if (context) {
+          if (!ScopeContainer.isScopeContainer(context)) {
+            throw new TypeError(
+              `Reflex Security: Context must be a ScopeContainer instance.\n` +
+              `Received: ${typeof context} ${context?.constructor?.name || 'unknown'}\n\n` +
+              `BREAKING CHANGE: Regular objects are no longer allowed as scopes.\n` +
+              `Migration: Use new ScopeContainer() instead of Object.create()`
+            );
+          }
+
+          if (context.has(name)) {
+            const value = context.get(name);
+            // Track dependency if reactive
+            if (value !== null && typeof value === 'object') {
+              const meta = value[META] || reflex._mf.get(value);
+              if (meta) reflex.trackDependency(meta, name);
+            }
+            return value;
+          }
         }
+
         // State lookup
         if (state && name in state) {
           return state[name];

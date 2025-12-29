@@ -28,6 +28,7 @@
 import { META, ITERATE, SKIP, UNSAFE_PROPS } from '../core/symbols.js';
 import { runTransition, cloneNodeWithProps } from '../core/compiler.js';
 import { resolveDuplicateKey } from '../core/reconcile.js';
+import { ScopeContainer } from '../csp/SafeExprParser.js';
 
 /**
  * Hydration mixin methods.
@@ -595,15 +596,21 @@ const HydrationMixin = {
           item = this._r(item);
         }
 
-        const sc = Object.create(o || {});
-        sc[alias] = item;
-        if (idxAlias) sc[idxAlias] = i;
+        // BREAKING CHANGE: MUST use ScopeContainer, no Object.create()
+        const sc = new ScopeContainer(
+          o && ScopeContainer.isScopeContainer(o)
+            ? o
+            : o ? ScopeContainer.fromObject(o, null) : null
+        );
+        sc.set(alias, item);
+        if (idxAlias) sc.set(idxAlias, i);
 
         let key = kAttr ? (keyIsProp ? (item && item[kAttr]) : keyFn(this.s, sc)) : i;
         // CRITICAL: Resolve duplicate keys to prevent ghost nodes
         key = resolveDuplicateKey(seenKeys, key, i);
 
-        const scope = this._r(sc);
+        // ScopeContainer is already sealed, no need to wrap in reactive proxy
+        const scope = sc;
 
         // Remove m-for and m-key attributes from hydrated nodes
         node.removeAttribute('m-for');
@@ -642,9 +649,14 @@ const HydrationMixin = {
           if (item !== null && typeof item === 'object' && !item[SKIP]) {
             item = this._r(item);
           }
-          const sc = Object.create(o || {});
-          sc[alias] = item;
-          if (idxAlias) sc[idxAlias] = i;
+          // BREAKING CHANGE: MUST use ScopeContainer, no Object.create()
+          const sc = new ScopeContainer(
+            o && ScopeContainer.isScopeContainer(o)
+              ? o
+              : o ? ScopeContainer.fromObject(o, null) : null
+          );
+          sc.set(alias, item);
+          if (idxAlias) sc.set(idxAlias, i);
 
           const key = kAttr ? (keyIsProp ? (item && item[kAttr]) : keyFn(this.s, sc)) : i;
           newKeys[i] = key;
@@ -652,16 +664,18 @@ const HydrationMixin = {
           const existing = rows.get(key);
           if (existing) {
             const p = this._scopeMap.get(existing.node);
-            if (p) {
-              p[alias] = item;
-              if (idxAlias) p[idxAlias] = i;
+            // BREAKING CHANGE: Use ScopeContainer methods
+            if (p && ScopeContainer.isScopeContainer(p)) {
+              p.set(alias, item);
+              if (idxAlias) p.set(idxAlias, i);
             }
             newNodes[i] = existing.node;
             oldIndices[i] = keyToOldIdx.get(key) ?? -1;
             rows.delete(key);
           } else {
             const node = cloneNodeWithProps(tpl, true);
-            const scope = this._r(sc);
+            // ScopeContainer is already sealed, no need to wrap in reactive proxy
+            const scope = sc;
             this._scopeMap.set(node, scope);
             this._bnd(node, scope);
             this._w(node, scope);
