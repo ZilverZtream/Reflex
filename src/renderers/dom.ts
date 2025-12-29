@@ -25,6 +25,19 @@ import type { IRendererAdapter, TransitionConfig, VNode } from './types.js';
  * @param reflex - Optional Reflex instance to register cleanup in lifecycle registry
  */
 export function runTransition(el: Element, name: string, type: 'enter' | 'leave', done?: () => void, reflex?: any) {
+  // CRITICAL FIX #10: runTransition Race Condition Prevention
+  // If a transition is already running on this element, cancel it first
+  // Without this, multiple transitions can conflict (e.g., rapid m-if toggles)
+  const elAny = el as any;
+  if (elAny._transCb) {
+    // Cancel the previous transition's done callback
+    elAny._transCb.cancelled = true;
+    // Call cleanup to remove old classes and listeners
+    if (elAny._transCleanup) {
+      elAny._transCleanup();
+    }
+  }
+
   const from = `${name}-${type}-from`;
   const active = `${name}-${type}-active`;
   const to = `${name}-${type}-to`;
@@ -56,7 +69,24 @@ export function runTransition(el: Element, name: string, type: 'enter' | 'leave'
 
     // Remove transition classes
     el.classList.remove(from, active, to);
+
+    // Clear stored callbacks
+    if (elAny._transCb === transitionCallback) {
+      elAny._transCb = null;
+    }
+    if (elAny._transCleanup === cleanup) {
+      elAny._transCleanup = null;
+    }
   };
+
+  // Transition callback wrapper that checks cancellation
+  const transitionCallback = {
+    cancelled: false
+  };
+
+  // Store cleanup and callback on element for race condition prevention
+  elAny._transCleanup = cleanup;
+  elAny._transCb = transitionCallback;
 
   // Register cleanup in element's lifecycle registry if Reflex instance provided
   if (reflex && typeof reflex._reg === 'function') {
@@ -67,7 +97,8 @@ export function runTransition(el: Element, name: string, type: 'enter' | 'leave'
   const onEnd = (e: Event) => {
     if ((e as TransitionEvent).target !== el || cleaned) return;
     cleanup();
-    if (done) done();
+    // Only call done callback if transition wasn't cancelled
+    if (done && !transitionCallback.cancelled) done();
   };
 
   // CRITICAL FIX #8: Flaky Transitions - Use Double RAF
@@ -98,12 +129,14 @@ export function runTransition(el: Element, name: string, type: 'enter' | 'leave'
         timeoutId = setTimeout(() => {
           if (cleaned) return;
           cleanup();
-          if (done) done();
+          // Only call done callback if transition wasn't cancelled
+          if (done && !transitionCallback.cancelled) done();
         }, timeout);
       } else {
         // No transition defined, complete immediately
         cleanup();
-        if (done) done();
+        // Only call done callback if transition wasn't cancelled
+        if (done && !transitionCallback.cancelled) done();
       }
     });
   });
@@ -163,14 +196,19 @@ export const DOMRenderer: IRendererAdapter = {
 
     const tag = tagName.toLowerCase();
 
-    // Check if parent is an SVG element
-    // CRITICAL FIX #7: foreignObject Exception
-    // <foreignObject> is an SVG element, but its children are HTML elements
-    // Without this check, <a> tags inside foreignObject become SVG anchors (broken links)
-    const isParentSVG = parent && (
-      parent.namespaceURI === 'http://www.w3.org/2000/svg' ||
-      parent.tagName === 'svg' || parent.tagName === 'SVG'
-    ) && parent.tagName.toLowerCase() !== 'foreignobject';
+    // CRITICAL FIX #9: Fragile SVG Namespace Handling
+    // Use namespaceURI exclusively instead of string matching on tagName
+    // String matching fails in nested contexts (SVG -> HTML -> SVG) and with custom elements
+    //
+    // EXCEPTION: foreignObject is an SVG element, but its children are HTML elements
+    // Check namespaceURI directly, then check for foreignObject exception
+    let isParentSVG = false;
+    if (parent) {
+      const parentNS = parent.namespaceURI;
+      // Parent is SVG namespace AND not foreignObject
+      isParentSVG = parentNS === 'http://www.w3.org/2000/svg' &&
+                    parent.tagName.toLowerCase() !== 'foreignobject';
+    }
 
     // For ambiguous tags, use parent's namespace
     if (ambiguousTags.has(tag)) {

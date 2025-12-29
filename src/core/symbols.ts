@@ -94,6 +94,10 @@ export const RELATIVE_URL_RE = /^\s*(\/|\.\/|\.\.\/|[a-z0-9])/i;
 // This provides basic defense-in-depth, but determined attackers can bypass regex.
 // For production apps handling untrusted user input, use CSP-safe mode instead.
 //
+// PRIMARY SECURITY: The createMembrane() function (below) provides runtime enforcement
+// via Proxy traps. This regex is DEFENSE-IN-DEPTH only - it catches obvious attacks
+// at compile-time to fail fast, but the membrane is the real security boundary.
+//
 // Dangerous patterns in expressions that could bypass reserved word checks:
 // - ["constructor"], ['constructor'], [`constructor`] - bracket notation access
 // - .constructor() - direct constructor calls
@@ -101,7 +105,9 @@ export const RELATIVE_URL_RE = /^\s*(\/|\.\/|\.\.\/|[a-z0-9])/i;
 // - String concatenation: "con" + "structor" or template literals
 // - Computed property access: obj[variable] where variable = "constructor"
 // - eval(), setTimeout(), setInterval() with string arguments
-export const UNSAFE_EXPR_RE = /\[["'`]constructor["'`]\]|\[["'`]__proto__["'`]\]|\.constructor\s*\(|\bFunction\s*\(|\beval\s*\(|\bsetTimeout\s*\(|\bsetInterval\s*\(|\bimport\s*\(|[\+\-]\s*["'`]constructor|["'`]\s*\+\s*["'`]con/i;
+// - Indirect eval: (0,eval), window.eval, globalThis.eval
+// - .bind, .call, .apply on Function
+export const UNSAFE_EXPR_RE = /\[["'`]constructor["'`]\]|\[["'`]__proto__["'`]\]|\.constructor\s*\(|\bFunction\s*\(|\beval\s*\(|\bsetTimeout\s*\(|\bsetInterval\s*\(|\bimport\s*\(|[\+\-]\s*["'`]constructor|["'`]\s*\+\s*["'`]con|\(0\s*,\s*eval\)|globalThis|\.bind\s*\(|\.call\s*\(|\.apply\s*\(/i;
 
 // === REGEX PATTERNS ===
 // Identifier extraction pattern for expression parsing
