@@ -152,27 +152,234 @@ describe('Functional Fixes', () => {
   });
 
   describe('Issue #7: Data loss in cloned nodes', () => {
-    it('should preserve _rx_value_ref when cloning', () => {
-      const obj = { id: 1, name: 'Test' };
-      const html = `
-        <div m-if="show">
-          <input type="checkbox" :value="obj" m-model="selected">
+    it('should preserve _rx_value_ref in m-if toggles', () => {
+      const container = document.createElement('div');
+      const obj1 = { id: 1, name: 'Option 1' };
+      const obj2 = { id: 2, name: 'Option 2' };
+
+      container.innerHTML = `
+        <div id="app">
+          <div m-if="show">
+            <input type="checkbox" id="cb1" :value="obj1" m-model="selected">
+            <input type="checkbox" id="cb2" :value="obj2" m-model="selected">
+          </div>
         </div>
       `;
+      document.body.appendChild(container);
 
-      // Toggle m-if to trigger clone
-      // Checkbox should still work with object value
+      const { Reflex } = require('../src/core/reflex');
+      const app = new Reflex({
+        show: true,
+        obj1,
+        obj2,
+        selected: [obj1]
+      });
+      app.mount('#app');
+
+      // Initially, first checkbox should be checked
+      let cb1 = document.getElementById('cb1') as HTMLInputElement;
+      let cb2 = document.getElementById('cb2') as HTMLInputElement;
+      expect(cb1.checked).toBe(true);
+      expect(cb2.checked).toBe(false);
+
+      // Toggle m-if off then back on (triggers cloning)
+      app.s.show = false;
+      // Wait for DOM update
+      setTimeout(() => {
+        app.s.show = true;
+        setTimeout(() => {
+          // Get new references after re-render
+          cb1 = document.getElementById('cb1') as HTMLInputElement;
+          cb2 = document.getElementById('cb2') as HTMLInputElement;
+
+          // _rx_value_ref should be preserved, so checked state should be correct
+          expect(cb1.checked).toBe(true);
+          expect(cb2.checked).toBe(false);
+
+          // Verify we can still toggle the checkboxes with object values
+          cb2.click();
+          expect(app.s.selected).toContain(obj1);
+          expect(app.s.selected).toContain(obj2);
+
+          cb1.click();
+          expect(app.s.selected).not.toContain(obj1);
+          expect(app.s.selected).toContain(obj2);
+
+          document.body.removeChild(container);
+        }, 10);
+      }, 10);
     });
 
-    it('should preserve object values in m-for', () => {
-      const items = [{ id: 1 }, { id: 2 }];
-      const html = `
-        <div m-for="item in items">
-          <input type="checkbox" :value="item" m-model="selected">
+    it('should preserve object values in m-for loops', () => {
+      const container = document.createElement('div');
+      const items = [
+        { id: 1, name: 'Item 1' },
+        { id: 2, name: 'Item 2' },
+        { id: 3, name: 'Item 3' }
+      ];
+
+      container.innerHTML = `
+        <div id="app">
+          <div m-for="item in items">
+            <input type="checkbox" :value="item" m-model="selected" class="item-checkbox">
+            <span>{{ item.name }}</span>
+          </div>
         </div>
       `;
+      document.body.appendChild(container);
 
-      // Checkbox values should remain object references
+      const { Reflex } = require('../src/core/reflex');
+      const app = new Reflex({
+        items,
+        selected: [items[0], items[2]]
+      });
+      app.mount('#app');
+
+      // Get all checkboxes
+      const checkboxes = Array.from(document.querySelectorAll('.item-checkbox')) as HTMLInputElement[];
+      expect(checkboxes.length).toBe(3);
+
+      // First and third should be checked
+      expect(checkboxes[0].checked).toBe(true);
+      expect(checkboxes[1].checked).toBe(false);
+      expect(checkboxes[2].checked).toBe(true);
+
+      // Verify _rx_value_ref is set correctly on each input
+      expect((checkboxes[0] as any)._rx_value_ref).toBe(items[0]);
+      expect((checkboxes[1] as any)._rx_value_ref).toBe(items[1]);
+      expect((checkboxes[2] as any)._rx_value_ref).toBe(items[2]);
+
+      // Click second checkbox
+      checkboxes[1].click();
+      expect(app.s.selected).toContain(items[0]);
+      expect(app.s.selected).toContain(items[1]);
+      expect(app.s.selected).toContain(items[2]);
+
+      // Uncheck first checkbox
+      checkboxes[0].click();
+      expect(app.s.selected).not.toContain(items[0]);
+      expect(app.s.selected).toContain(items[1]);
+      expect(app.s.selected).toContain(items[2]);
+
+      document.body.removeChild(container);
+    });
+
+    it('should preserve _rx_value_ref in nested m-for with m-if', () => {
+      const container = document.createElement('div');
+      const groups = [
+        {
+          id: 'A',
+          show: true,
+          items: [{ id: 1, val: 'A1' }, { id: 2, val: 'A2' }]
+        },
+        {
+          id: 'B',
+          show: false,
+          items: [{ id: 3, val: 'B1' }, { id: 4, val: 'B2' }]
+        }
+      ];
+
+      container.innerHTML = `
+        <div id="app">
+          <div m-for="group in groups">
+            <div m-if="group.show">
+              <div m-for="item in group.items">
+                <input type="checkbox" :value="item" m-model="selected">
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(container);
+
+      const { Reflex } = require('../src/core/reflex');
+      const app = new Reflex({
+        groups,
+        selected: []
+      });
+      app.mount('#app');
+
+      // Only group A is visible (2 checkboxes)
+      let checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+      expect(checkboxes.length).toBe(2);
+
+      // Verify _rx_value_ref is preserved
+      expect((checkboxes[0] as any)._rx_value_ref).toBe(groups[0].items[0]);
+      expect((checkboxes[1] as any)._rx_value_ref).toBe(groups[0].items[1]);
+
+      // Toggle group B visibility (triggers cloning)
+      app.s.groups[1].show = true;
+      setTimeout(() => {
+        checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+        expect(checkboxes.length).toBe(4);
+
+        // Verify all _rx_value_ref are preserved after cloning
+        expect((checkboxes[0] as any)._rx_value_ref).toBe(groups[0].items[0]);
+        expect((checkboxes[1] as any)._rx_value_ref).toBe(groups[0].items[1]);
+        expect((checkboxes[2] as any)._rx_value_ref).toBe(groups[1].items[0]);
+        expect((checkboxes[3] as any)._rx_value_ref).toBe(groups[1].items[1]);
+
+        document.body.removeChild(container);
+      }, 10);
+    });
+
+    it('should preserve _rx_value_ref in radio buttons', () => {
+      const container = document.createElement('div');
+      const options = [
+        { id: 'opt1', label: 'Option 1' },
+        { id: 'opt2', label: 'Option 2' },
+        { id: 'opt3', label: 'Option 3' }
+      ];
+
+      container.innerHTML = `
+        <div id="app">
+          <div m-if="show">
+            <div m-for="option in options">
+              <input type="radio" name="choice" :value="option" m-model="selected">
+              <span>{{ option.label }}</span>
+            </div>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(container);
+
+      const { Reflex } = require('../src/core/reflex');
+      const app = new Reflex({
+        show: true,
+        options,
+        selected: options[1]
+      });
+      app.mount('#app');
+
+      // Get all radio buttons
+      let radios = Array.from(document.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
+      expect(radios.length).toBe(3);
+
+      // Second radio should be checked
+      expect(radios[0].checked).toBe(false);
+      expect(radios[1].checked).toBe(true);
+      expect(radios[2].checked).toBe(false);
+
+      // Toggle m-if to trigger cloning
+      app.s.show = false;
+      setTimeout(() => {
+        app.s.show = true;
+        setTimeout(() => {
+          radios = Array.from(document.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
+
+          // After cloning, _rx_value_ref should be preserved
+          expect((radios[0] as any)._rx_value_ref).toBe(options[0]);
+          expect((radios[1] as any)._rx_value_ref).toBe(options[1]);
+          expect((radios[2] as any)._rx_value_ref).toBe(options[2]);
+
+          // Second radio should still be checked
+          expect(radios[0].checked).toBe(false);
+          expect(radios[1].checked).toBe(true);
+          expect(radios[2].checked).toBe(false);
+
+          document.body.removeChild(container);
+        }, 10);
+      }, 10);
     });
   });
 

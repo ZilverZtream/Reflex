@@ -44,6 +44,60 @@ const getRawValue = (v: any): any => {
 };
 
 /**
+ * Clone a node while preserving custom properties like _rx_value_ref.
+ *
+ * CRITICAL FIX: Data Loss in Cloned Nodes
+ * node.cloneNode(true) only copies attributes, not custom properties.
+ * This causes _rx_value_ref (which stores object references for checkbox/radio values)
+ * to be lost when m-if, m-for, or components clone template nodes.
+ *
+ * This helper recursively walks the cloned tree and copies _rx_value_ref from
+ * corresponding source nodes, ensuring object identity is preserved.
+ *
+ * @param {Node} node - The node to clone
+ * @param {boolean} deep - Whether to clone children (default: true)
+ * @returns {Node} The cloned node with properties preserved
+ */
+export function cloneNodeWithProps(node: any, deep = true): any {
+  const cloned = node.cloneNode(deep);
+
+  // Copy _rx_value_ref if it exists on the source node
+  if (node._rx_value_ref !== undefined) {
+    cloned._rx_value_ref = node._rx_value_ref;
+  }
+
+  // If deep cloning, recursively copy _rx_value_ref for all descendants
+  if (deep && node.childNodes && node.childNodes.length > 0) {
+    const copyPropsRecursive = (source: any, target: any) => {
+      // Handle both Element and DocumentFragment
+      const sourceChildren = source.childNodes;
+      const targetChildren = target.childNodes;
+
+      if (sourceChildren && targetChildren && sourceChildren.length === targetChildren.length) {
+        for (let i = 0; i < sourceChildren.length; i++) {
+          const srcChild = sourceChildren[i];
+          const tgtChild = targetChildren[i];
+
+          // Copy _rx_value_ref if present
+          if (srcChild._rx_value_ref !== undefined) {
+            tgtChild._rx_value_ref = srcChild._rx_value_ref;
+          }
+
+          // Recursively process children
+          if (srcChild.childNodes && srcChild.childNodes.length > 0) {
+            copyPropsRecursive(srcChild, tgtChild);
+          }
+        }
+      }
+    };
+
+    copyPropsRecursive(node, cloned);
+  }
+
+  return cloned;
+}
+
+/**
  * Parse a property path that may contain both dot notation and bracket notation.
  * Examples:
  *   'foo.bar' -> ['foo', 'bar']
@@ -420,6 +474,14 @@ export const CompilerMixin = {
   },
 
   /**
+   * Clone a node while preserving custom properties like _rx_value_ref.
+   * Delegates to the standalone cloneNodeWithProps helper.
+   */
+  _cloneNode(node, deep = true) {
+    return cloneNodeWithProps(node, deep);
+  },
+
+  /**
    * Process bindings on an element.
    */
   _bnd(n, o) {
@@ -577,12 +639,12 @@ export const CompilerMixin = {
         if (ok && !cur && !leaving) {
           if (isTemplate) {
             // For <template> tags, insert content instead of the element itself
-            const cloned = el.cloneNode(true) as HTMLTemplateElement;
+            const cloned = this._cloneNode(el, true) as HTMLTemplateElement;
             cloned.removeAttribute('m-if');
             cloned.removeAttribute('m-trans');
 
             // Clone all content nodes from the template
-            const contentNodes = Array.from(cloned.content.childNodes).map(node => node.cloneNode(true));
+            const contentNodes = Array.from(cloned.content.childNodes).map(node => this._cloneNode(node, true));
 
             // Insert all content nodes after the marker
             let insertPoint = cm;
@@ -612,7 +674,7 @@ export const CompilerMixin = {
             }
           } else {
             // Non-template elements: existing logic
-            const cloned = el.cloneNode(true);
+            const cloned = this._cloneNode(el, true);
             cloned.removeAttribute('m-if');
             cloned.removeAttribute('m-trans');
             cm.after(cloned);
@@ -790,7 +852,7 @@ export const CompilerMixin = {
     // Use renderer for DOM operations (supports both web and virtual targets)
     const cm = this._ren.createComment('for');
     this._ren.replaceWith(el, cm);
-    const tpl = el.cloneNode(true);
+    const tpl = this._cloneNode(el, true);
     tpl.removeAttribute('m-for');
     tpl.removeAttribute('m-key');
 
@@ -872,7 +934,7 @@ export const CompilerMixin = {
 
           if (isTemplate) {
             // For <template> tags, clone content instead of the element itself
-            const clonedTpl = tpl.cloneNode(true) as HTMLTemplateElement;
+            const clonedTpl = this._cloneNode(tpl, true) as HTMLTemplateElement;
             if (mIfExpr) {
               clonedTpl.removeAttribute('m-if');
             }
@@ -889,7 +951,7 @@ export const CompilerMixin = {
             if (elementNodes.length === 1) {
               // Single root element - ALWAYS use it directly without wrapper
               // This works for both strict and non-strict parents
-              const singleRoot = elementNodes[0].cloneNode(true) as Element;
+              const singleRoot = this._cloneNode(elementNodes[0], true) as Element;
               this._scopeMap.set(singleRoot, scope);
               this._bnd(singleRoot, scope);
               // CRITICAL FIX: Defer _w call to prevent stack overflow
@@ -899,7 +961,7 @@ export const CompilerMixin = {
               // CRITICAL FIX: For strict parents, NEVER use wrapper elements
               // Instead, use comment-based anchors and manage nodes in a flat array
               // Create a virtual container object to track all nodes
-              const nodes = contentNodes.map(node => node.cloneNode(true));
+              const nodes = contentNodes.map(node => this._cloneNode(node, true));
 
               // Create a container object that acts as a virtual node for reconciliation
               // This object stores all nodes but isn't inserted into the DOM
@@ -938,7 +1000,7 @@ export const CompilerMixin = {
 
               // Clone and append all content nodes
               contentNodes.forEach(childNode => {
-                wrapper.appendChild(childNode.cloneNode(true));
+                wrapper.appendChild(this._cloneNode(childNode, true));
               });
 
               this._scopeMap.set(wrapper, scope);
@@ -957,7 +1019,7 @@ export const CompilerMixin = {
             }
           } else {
             // Non-template elements: existing logic
-            const node = tpl.cloneNode(true);
+            const node = this._cloneNode(tpl, true);
             // Remove m-if since we've already processed it
             if (mIfExpr) {
               node.removeAttribute('m-if');

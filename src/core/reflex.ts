@@ -42,7 +42,7 @@ import { META } from './symbols.js';
 import { ReactivityMixin } from './reactivity.js';
 import { SchedulerMixin } from './scheduler.js';
 import { ExprMixin, ExprCache } from './expr.js';
-import { CompilerMixin } from './compiler.js';
+import { CompilerMixin, cloneNodeWithProps } from './compiler.js';
 import { DOMRenderer } from '../renderers/dom.js';
 import type { IRendererAdapter, RendererOptions } from '../renderers/types.js';
 
@@ -513,7 +513,7 @@ export class Reflex {
       } else {
         // Multiple roots (fragment) - store a cloneable fragment
         // We'll clone the entire template content which preserves all children
-        templateNode = t.content.cloneNode(true);
+        templateNode = cloneNodeWithProps(t.content, true);
       }
 
       this._cp.set(name, {
@@ -624,7 +624,7 @@ export class Reflex {
     if (def._t instanceof DocumentFragment) {
       // Fragment component - clone and collect all children
       isFragment = true;
-      const cloned = def._t.cloneNode(true) as DocumentFragment;
+      const cloned = cloneNodeWithProps(def._t, true) as DocumentFragment;
       // Collect all element children (ignore text nodes for now)
       Array.from(cloned.children).forEach(child => {
         fragmentNodes.push(child as Element);
@@ -633,7 +633,7 @@ export class Reflex {
       inst = fragmentNodes[0];
     } else {
       // Single element component (existing behavior)
-      inst = def._t.cloneNode(true) as Element;
+      inst = cloneNodeWithProps(def._t, true) as Element;
     }
 
     const props = this._r({});
@@ -795,7 +795,7 @@ export class Reflex {
    */
   _comp(el: Element, tag: string, o: any): Element {
     const def = this._cp.get(tag);
-    const inst = def._t.cloneNode(true) as Element;
+    const inst = cloneNodeWithProps(def._t, true) as Element;
     const props = this._r({});
     const propDefs = [];
     const hostHandlers = Object.create(null);
@@ -1006,7 +1006,7 @@ export class Reflex {
       }
 
       fallbackTpl.innerHTML = fallbackHtml;
-      fallbackNode = fallbackTpl.content.firstElementChild?.cloneNode(true) as Element;
+      fallbackNode = cloneNodeWithProps(fallbackTpl.content.firstElementChild, true) as Element;
     }
 
     // Track if this async component has been aborted

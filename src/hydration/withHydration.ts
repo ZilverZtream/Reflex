@@ -26,7 +26,7 @@
  */
 
 import { META, ITERATE, SKIP, UNSAFE_PROPS } from '../core/symbols.js';
-import { runTransition } from '../core/compiler.js';
+import { runTransition, cloneNodeWithProps } from '../core/compiler.js';
 import { resolveDuplicateKey } from '../core/reconcile.js';
 
 /**
@@ -491,12 +491,12 @@ const HydrationMixin = {
 
       let cur = el;
       let leaving = false;
-      const tpl = el.cloneNode(true);
+      const tpl = cloneNodeWithProps(el, true);
 
       const e = this.createEffect(() => {
         const ok = !!fn(this.s, o);
         if (ok && !cur && !leaving) {
-          cur = tpl.cloneNode(true);
+          cur = cloneNodeWithProps(tpl, true);
           cm.after(cur);
           this._bnd(cur, o);
           this._w(cur, o);
@@ -574,7 +574,7 @@ const HydrationMixin = {
       const cm = document.createComment('for');
       existingNodes[0].before(cm);
 
-      const tpl = el.cloneNode(true);
+      const tpl = cloneNodeWithProps(el, true);
       tpl.removeAttribute('m-for');
       tpl.removeAttribute('m-key');
 
@@ -660,7 +660,7 @@ const HydrationMixin = {
             oldIndices[i] = keyToOldIdx.get(key) ?? -1;
             rows.delete(key);
           } else {
-            const node = tpl.cloneNode(true);
+            const node = cloneNodeWithProps(tpl, true);
             const scope = this._r(sc);
             this._scopeMap.set(node, scope);
             this._bnd(node, scope);
