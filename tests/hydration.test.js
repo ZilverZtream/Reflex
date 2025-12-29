@@ -132,7 +132,8 @@ describe('Hydration', () => {
   });
 
   describe('Basic Hydration', () => {
-    it('should hydrate text interpolation', async () => {
+    it('should hydrate text interpolation (legacy path with literal templates)', async () => {
+      // Legacy path: server renders literal template syntax
       document.body.innerHTML = '<div id="app"><span>{{ count }}</span></div>';
       const el = document.getElementById('app');
 
@@ -147,6 +148,44 @@ describe('Hydration', () => {
       await app.nextTick();
 
       expect(el.querySelector('span').textContent).toBe('5');
+    });
+
+    it('should hydrate text interpolation with comment markers (correct SSR)', async () => {
+      // CRITICAL FIX: Server renders the actual value with a comment marker
+      // This is how real SSR works - the server evaluates {{ count }} to "0"
+      // and adds a marker <!--txt:{{ count }}--> so hydration can make it reactive
+      document.body.innerHTML = '<div id="app"><span><!--txt:{{ count }}-->0</span></div>';
+      const el = document.getElementById('app');
+
+      const app = new Reflex({ count: 0 });
+      app.use(withHydration);
+      app.hydrate(el);
+      await app.nextTick();
+
+      expect(el.querySelector('span').textContent).toBe('0');
+
+      app.s.count = 5;
+      await app.nextTick();
+
+      expect(el.querySelector('span').textContent).toBe('5');
+    });
+
+    it('should hydrate complex text interpolation with comment markers', async () => {
+      // Server renders: "Hello World" with template "Hello {{ name }}"
+      document.body.innerHTML = '<div id="app"><span><!--txt:Hello {{ name }}-->Hello World</span></div>';
+      const el = document.getElementById('app');
+
+      const app = new Reflex({ name: 'World' });
+      app.use(withHydration);
+      app.hydrate(el);
+      await app.nextTick();
+
+      expect(el.querySelector('span').textContent).toBe('Hello World');
+
+      app.s.name = 'Reflex';
+      await app.nextTick();
+
+      expect(el.querySelector('span').textContent).toBe('Hello Reflex');
     });
 
     it('should hydrate attribute bindings', async () => {
@@ -303,7 +342,7 @@ describe('Hydration', () => {
   });
 
   describe('Hydrate with default element', () => {
-    it('should hydrate document.body by default', async () => {
+    it('should hydrate document.body by default (legacy)', async () => {
       document.body.innerHTML = '<span>{{ message }}</span>';
 
       const app = new Reflex({ message: 'Hello' });
@@ -312,6 +351,22 @@ describe('Hydration', () => {
       await app.nextTick();
 
       expect(document.body.querySelector('span').textContent).toBe('Hello');
+    });
+
+    it('should hydrate document.body by default with comment markers', async () => {
+      document.body.innerHTML = '<span><!--txt:{{ message }}-->Hello</span>';
+
+      const app = new Reflex({ message: 'Hello' });
+      app.use(withHydration);
+      app.hydrate();
+      await app.nextTick();
+
+      expect(document.body.querySelector('span').textContent).toBe('Hello');
+
+      app.s.message = 'World';
+      await app.nextTick();
+
+      expect(document.body.querySelector('span').textContent).toBe('World');
     });
   });
 
