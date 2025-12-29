@@ -21,12 +21,8 @@
 import { META, ITERATE, SKIP, UNSAFE_PROPS, SAFE_URL_RE, RELATIVE_URL_RE } from './symbols.js';
 import { computeLIS, resolveDuplicateKey, reconcileKeyedList } from './reconcile.js';
 import { ScopeContainer } from '../csp/SafeExprParser.js';
+import { SafeHTML } from '../renderers/dom.js';
 import type { IRendererAdapter } from '../renderers/types.js';
-
-// Basic HTML entity escaping for when DOMPurify is unavailable
-const escapeHTML = s => s.replace(/[&<>"']/g, c => ({
-  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-}[c]));
 
 /**
  * Get the raw (unwrapped) value from a reactive proxy.
@@ -1603,130 +1599,84 @@ export const CompilerMixin = {
   /**
    * HTML binding: m-html="expr"
    *
-   * CRITICAL SECURITY NOTE:
-   * m-html is DANGEROUS and can lead to XSS attacks if used with untrusted content.
+   * BREAKING CHANGE: Expression MUST evaluate to a SafeHTML instance.
+   * Raw strings will throw TypeError.
    *
-   * Requirements:
-   * 1. DOMPurify must be configured: app.configure({ domPurify: DOMPurify })
-   * 2. Never use m-html with user-provided content
-   * 3. Consider using m-text instead for user content
+   * @example
+   * // In your state/computed:
+   * computed: {
+   *   htmlContent() {
+   *     return SafeHTML.sanitize(this.userInput);
+   *   }
+   * }
    *
-   * Without DOMPurify, m-html will THROW AN ERROR to prevent silent XSS vulnerabilities.
+   * // In template:
+   * <div m-html="htmlContent"></div>
    */
   _html(el, exp, o) {
     const fn = this._fn(exp);
-    let prev;
+    let prev: SafeHTML | null = null;
     const self = this;
+
     const e = this.createEffect(() => {
       try {
-        const v = fn(self.s, o);
-        let html = v == null ? '' : String(v);
+        const rawValue = fn(self.s, o);
 
-        // CRITICAL SECURITY FIX #1: Regex-based HTML Sanitization Bypass
-        // ALWAYS require DOMPurify for m-html (fail closed by default)
-        // Regex-based sanitization has been removed as it's fundamentally insecure
-        const purify = self.cfg.domPurify;
-        if (purify && typeof purify.sanitize === 'function') {
-          html = purify.sanitize(html);
-        } else if (Object.prototype.hasOwnProperty.call(self.cfg, 'sanitize') && self.cfg.sanitize === false) {
-          // CRITICAL SECURITY FIX: Prototype Pollution Prevention
-          // Use hasOwnProperty to ensure 'sanitize' is a direct property of cfg, not inherited
-          // This prevents bypass via: Object.prototype.sanitize = false
-          // Explicit opt-out of sanitization (UNSAFE - developer takes responsibility)
-          // Only warn once per instance to avoid console spam
-          if (!self._htmlWarningShown) {
-            self._htmlWarningShown = true;
-            console.error(
-              'Reflex SECURITY ERROR: m-html is being used without sanitization.\n' +
-              'This is a CRITICAL XSS vulnerability if used with user-provided content.\n' +
-              'You have explicitly disabled sanitization with { sanitize: false }.\n' +
-              'NEVER use m-html with user-provided content in this mode.\n\n' +
-              'To fix: app.configure({ domPurify: DOMPurify }) // remove sanitize: false\n' +
-              'Install: npm install dompurify\n' +
-              'See: https://github.com/cure53/DOMPurify'
-            );
-          }
-        } else {
-          // Default behavior: require DOMPurify (fail closed)
-          throw new Error(
-            'Reflex SECURITY ERROR: m-html requires DOMPurify for safe HTML rendering.\n' +
-            'Regex-based sanitization is insecure and has been removed.\n\n' +
-            'Solution:\n' +
-            '  1. Install DOMPurify: npm install dompurify\n' +
-            '  2. Configure: app.configure({ domPurify: DOMPurify })\n' +
-            '  3. Import: import DOMPurify from \'dompurify\'\n\n' +
-            'Alternative (for trusted HTML only):\n' +
-            '  - Use m-text for user content (safer)\n' +
-            '  - Explicitly opt-out: { sanitize: false } (UNSAFE)\n\n' +
-            'Do NOT use m-html with user-provided content without DOMPurify.'
+        // BREAKING CHANGE: Value MUST be SafeHTML
+        if (!SafeHTML.isSafeHTML(rawValue)) {
+          throw new TypeError(
+            `Reflex Security: m-html expression must evaluate to SafeHTML.\n` +
+            `Expression: ${exp}\n` +
+            `Received: ${typeof rawValue}\n\n` +
+            `BREAKING CHANGE: Raw strings are no longer accepted.\n\n` +
+            `Migration:\n` +
+            `  In your state/computed, wrap with SafeHTML:\n` +
+            `  computed: {\n` +
+            `    htmlContent() {\n` +
+            `      return SafeHTML.sanitize(this.userInput);\n` +
+            `    }\n` +
+            `  }\n\n` +
+            `Then use: <div m-html="htmlContent"></div>`
           );
         }
 
-        // CRITICAL FIX: Destructive innerHTML Hydration Prevention
-        // During hydration (this._hydrateMode), compare current innerHTML with new value
+        const safeHtml = rawValue as SafeHTML;
+        const htmlString = safeHtml.toString();
+
+        // During hydration, compare current innerHTML with new value
         // Only update if they differ to prevent destroying iframe state, focus, etc.
-        // CRITICAL FIX: Normalize HTML before comparison to avoid false mismatches
-        // Browsers normalize HTML (add quotes, reorder attributes, lowercase tags)
-        // Example: <div class='foo'> becomes <div class="foo">
-        // Without normalization, we'd destroy and re-parse identical HTML
         if (self._hydrateMode) {
-          // CRITICAL SECURITY FIX #7: XSS via Hydration Bypass
-          //
-          // VULNERABILITY: If sanitize: false is set, the hydration normalization step
-          // (tempDiv.innerHTML = html) could execute malicious code in some contexts
-          // Even though tempDiv is detached, certain payloads can still execute
-          //
-          // SOLUTION: Enforce sanitization during hydration for security
-          // If sanitize: false is explicitly set, skip normalization and force update
-          // This prevents the innerHTML assignment on tempDiv entirely
-          const isSanitizationDisabled = Object.prototype.hasOwnProperty.call(self.cfg, 'sanitize') && self.cfg.sanitize === false;
+          const currentHTML = el.innerHTML;
 
-          if (isSanitizationDisabled) {
-            // SECURITY: Skip normalization when sanitization is disabled
-            // Force innerHTML update (developer has accepted the risk)
-            if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
-              console.warn(
-                'Reflex Security Warning: m-html hydration without sanitization.\n' +
-                'Skipping HTML normalization during hydration to prevent XSS.\n' +
-                'This may cause unnecessary re-renders if HTML differs only in formatting.'
-              );
-            }
-            // Skip normalization, fall through to innerHTML update
-          } else {
-            // Sanitization is enabled - safe to normalize
-            // Normalize both HTMLs by parsing them through the browser
-            // This ensures we compare apples to apples
-            const currentHTML = el.innerHTML;
+          // Fast path: if strings match exactly, skip update
+          if (currentHTML === htmlString) {
+            prev = safeHtml;
+            return;
+          }
 
-            // Fast path: if strings match exactly, skip normalization
-            if (currentHTML === html) {
-              prev = html;
-              return;
-            }
+          // Normalize both HTMLs by parsing them through the browser
+          // This ensures we compare apples to apples
+          // (browsers normalize HTML: add quotes, reorder attributes, lowercase tags)
+          const tempDiv = document.createElement('div');
+          tempDiv.innerHTML = htmlString;
+          const normalizedNew = tempDiv.innerHTML;
 
-            // SECURITY: Only normalize if sanitization is enabled
-            // The html variable is already sanitized by DOMPurify above (line 1604)
-            // So it's safe to assign to tempDiv.innerHTML
-            const tempDiv = document.createElement('div');
-            tempDiv.innerHTML = html; // Safe because html is sanitized
-            const normalizedNew = tempDiv.innerHTML;
-
-            if (currentHTML === normalizedNew) {
-              // Content matches after normalization - skip the destructive innerHTML write
-              prev = html;
-              return;
-            }
+          if (currentHTML === normalizedNew) {
+            // Content matches after normalization - skip the destructive innerHTML write
+            prev = safeHtml;
+            return;
           }
         }
 
-        if (html !== prev) {
-          prev = html;
-          // CRITICAL FIX: m-html Memory Leak - Clean up child resources before innerHTML
+        // Only update if content changed
+        if (prev === null || prev.toString() !== htmlString) {
+          prev = safeHtml;
+
+          // Clean up child resources before innerHTML replacement
           // innerHTML blindly replaces DOM content without cleanup, leaking:
           // - Reactive effects attached to child elements
           // - Event listeners registered via _reg
           // - Component instances and their resources
-          // We must call _kill on all children to clean up Reflex resources
           let child = el.firstChild;
           while (child) {
             const next = child.nextSibling;
@@ -1736,7 +1686,9 @@ export const CompilerMixin = {
             }
             child = next;
           }
-          el.innerHTML = html;
+
+          // Use renderer's setInnerHTML which also enforces SafeHTML
+          this._ren.setInnerHTML(el, safeHtml);
         }
       } catch (err) {
         self._handleError(err, o);

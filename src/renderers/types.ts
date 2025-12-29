@@ -8,6 +8,8 @@
  * - Test environments (Mock rendering for fast tests)
  */
 
+import type { SafeHTML } from './dom.js';
+
 /**
  * Virtual Node representation for non-DOM targets.
  * Implements a minimal DOM-like interface for compatibility.
@@ -228,11 +230,15 @@ export interface IRendererAdapter {
   setTextContent(node: VNode | Text, text: string): void;
 
   /**
-   * Set inner HTML of an element (use with caution - XSS risk)
+   * Set inner HTML of an element
+   *
+   * BREAKING CHANGE: Only accepts SafeHTML instances.
+   * Raw strings will throw TypeError.
+   *
    * @param node - Element node
-   * @param html - HTML content
+   * @param html - SafeHTML instance containing sanitized content
    */
-  setInnerHTML(node: VNode | Element, html: string): void;
+  setInnerHTML(node: VNode | Element, html: SafeHTML): void;
 
   /**
    * Get all attributes of an element

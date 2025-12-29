@@ -53,7 +53,7 @@ export {
 } from './core/symbols.js';
 
 // Renderer exports (for pluggable architecture)
-export { DOMRenderer, runTransition as runDOMTransition } from './renderers/dom.js';
+export { DOMRenderer, runTransition as runDOMTransition, SafeHTML } from './renderers/dom.js';
 export { VirtualRenderer, createVirtualRenderer } from './renderers/virtual.js';
 export type {
   IRendererAdapter,
