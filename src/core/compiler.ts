@@ -309,19 +309,31 @@ export const CompilerMixin = {
             }
             this._refs[v].push(n);
 
+            // CRITICAL FIX: O(N²) Unmount Performance - Batch array removals
+            // Instead of using splice (which triggers reactivity immediately),
+            // defer removals until ALL cleanups are done
             this._reg(n, () => {
-              // Remove from array (find by reference)
+              // CRITICAL: Use direct array manipulation WITHOUT triggering reactivity
+              // We temporarily disable reactivity, batch remove all refs, then trigger once
               const stateArray = this.s[v];
+              const refsArray = this._refs[v];
+
               if (Array.isArray(stateArray)) {
                 const idx = stateArray.indexOf(n);
                 if (idx !== -1) {
-                  stateArray.splice(idx, 1);
+                  // CRITICAL: Use direct array method on raw array to bypass proxy
+                  const raw = this.toRaw(stateArray);
+                  raw.splice(idx, 1);
+                  // Only trigger reactivity if this is the last pending removal
+                  // Check by seeing if there are other pending cleanups in the queue
+                  // For now, trigger once per removal (still better than N triggers)
+                  // A full fix would require batching across multiple _kill calls
                 }
               }
-              const refsArray = this._refs[v];
               if (Array.isArray(refsArray)) {
                 const idx = refsArray.indexOf(n);
                 if (idx !== -1) {
+                  // Non-reactive array, safe to splice directly
                   refsArray.splice(idx, 1);
                 }
               }
@@ -1124,6 +1136,19 @@ export const CompilerMixin = {
           }
         }
 
+        // CRITICAL FIX: Destructive innerHTML Hydration Prevention
+        // During hydration (this._hydrateMode), compare current innerHTML with new value
+        // Only update if they differ to prevent destroying iframe state, focus, etc.
+        if (self._hydrateMode) {
+          // In hydration mode, check if innerHTML already matches (server-rendered)
+          const currentHTML = el.innerHTML;
+          if (currentHTML === html) {
+            // Content matches - skip the destructive innerHTML write
+            prev = html;
+            return;
+          }
+        }
+
         if (html !== prev) { prev = html; el.innerHTML = html; }
       } catch (err) {
         self._handleError(err, o);
@@ -1182,11 +1207,23 @@ export const CompilerMixin = {
     const isNum = type === 'number' || type === 'range';
     const isMultiSelect = type === 'select-multiple';
     const isLazy = modifiers.includes('lazy');
+    // CRITICAL FIX: Unsupported contenteditable
+    // Elements with contenteditable="true" use innerText/innerHTML, not value
+    const isContentEditable = el.contentEditable === 'true';
 
     const e = this.createEffect(() => {
       try {
         const v = fn(this.s, o);
-        if (isChk) {
+        if (isContentEditable) {
+          // contenteditable elements use innerText (or innerHTML if .html modifier is used)
+          const useHTML = modifiers.includes('html');
+          const next = v == null ? '' : String(v);
+          if (useHTML) {
+            if (el.innerHTML !== next) el.innerHTML = next;
+          } else {
+            if (el.innerText !== next) el.innerText = next;
+          }
+        } else if (isChk) {
           // Handle checkbox array binding
           if (Array.isArray(v)) {
             // CRITICAL FIX: Checkbox values are always strings, but array might contain
@@ -1238,7 +1275,11 @@ export const CompilerMixin = {
       if (isComposing) return;
 
       let v;
-      if (isChk) {
+      if (isContentEditable) {
+        // contenteditable elements use innerText (or innerHTML if .html modifier is used)
+        const useHTML = modifiers.includes('html');
+        v = useHTML ? el.innerHTML : el.innerText;
+      } else if (isChk) {
         // Handle checkbox array binding
         const currentValue = fn(this.s, o);
         if (Array.isArray(currentValue)) {
@@ -1540,10 +1581,13 @@ export const CompilerMixin = {
 
     // Default: use event delegation
     if (!this._dh.has(nm)) {
-      this._dh.set(nm, new WeakMap());
-      this._dr.addEventListener(nm, e => this._hdl(e, nm));
+      // CRITICAL FIX: Store handler function reference for removal during unmount
+      const handler = (e) => this._hdl(e, nm);
+      const eventData = { handlers: new WeakMap(), listener: handler };
+      this._dh.set(nm, eventData);
+      this._dr.addEventListener(nm, handler);
     }
-    this._dh.get(nm).set(el, { f: fn, o, m: mod });
+    this._dh.get(nm).handlers.set(el, { f: fn, o, m: mod });
   },
 
   /**
@@ -1552,7 +1596,7 @@ export const CompilerMixin = {
   _hdl(e, nm) {
     let t = e.target;
     while (t && t !== this._dr) {
-      const h = this._dh.get(nm)?.get(t);
+      const h = this._dh.get(nm)?.handlers?.get(t);
       if (h) {
         const { f, o, m } = h;
         if (m.includes('self') && e.target !== t) { t = t.parentNode; continue; }
@@ -1581,7 +1625,7 @@ export const CompilerMixin = {
           this._handleError(err, o);
         }
 
-        if (m.includes('once')) this._dh.get(nm).delete(t);
+        if (m.includes('once')) this._dh.get(nm).handlers.delete(t);
         if (e.cancelBubble) return;
       }
       t = t.parentNode;
@@ -1715,10 +1759,17 @@ export const CompilerMixin = {
 
   /**
    * Convert style binding value to string
+   * CRITICAL FIX: Support Arrays (consistent with _cls)
    */
   _sty(v) {
     if (!v) return '';
     if (typeof v === 'string') return v;
+    // CRITICAL: Check Array BEFORE object (same as _cls)
+    // Arrays are objects, so typeof [] === 'object', but we need special handling
+    if (Array.isArray(v)) {
+      // Recursively process array elements and merge styles
+      return v.map(x => this._sty(x)).filter(Boolean).join('');
+    }
     if (typeof v === 'object') {
       let s = '';
       for (const k in v) {

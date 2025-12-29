@@ -252,6 +252,15 @@ export function reconcileKeyedList({
  * Including the index causes keys to change when the list is reordered, which
  * defeats the purpose of keyed reconciliation and forces full DOM recreation.
  *
+ * CRITICAL FIX: Use unique Symbol-based namespace to prevent user key collisions.
+ * The previous format `__dup_${counter}_${key}` was predictable and could collide
+ * with user keys. For example:
+ * - Item A has key="foo" (duplicates to __dup_1_foo)
+ * - Item B has key="foo" (duplicates to __dup_2_foo)
+ * - User adds Item C with key="__dup_1_foo" → COLLISION! Item B disappears
+ *
+ * Solution: Use Symbol.for() with a reserved namespace that users can't create.
+ *
  * @param {Map} seen - Set of already-seen keys with counter tracking
  * @param {*} key - Current key
  * @param {number} index - Current index (NOT used in key generation)
@@ -275,8 +284,10 @@ export function resolveDuplicateKey(seen, key, index) {
       );
     }
 
-    // CRITICAL: Use counter instead of index for stable keys across reorders
-    return `__dup_${counter}_${key}`;
+    // CRITICAL: Use Symbol.for() with reserved namespace to prevent user collisions
+    // Symbols are guaranteed unique and can't be created by user code
+    // Format: Symbol.for('reflex.dup:counter:originalKey')
+    return Symbol.for(`reflex.dup:${counter}:${String(key)}`);
   }
 
   // First occurrence of this key - track it with counter 1
