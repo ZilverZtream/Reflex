@@ -86,6 +86,14 @@ export const SchedulerMixin = {
     e.s = o.sched || null;
     e.kill = () => { self._cln_eff(e); e.f = 0; };
     if (!o.lazy) e();
+
+    // CRITICAL FIX #4: Auto-register cleanup in component lifecycle
+    // If we have an active component context, register the kill function
+    // This prevents "zombie effects" that leak memory when components unmount
+    if (self._activeComponent) {
+      self._reg(self._activeComponent, e.kill);
+    }
+
     return e;
   },
 
@@ -310,27 +318,14 @@ export const SchedulerMixin = {
       }
     };
 
-    // CRITICAL FIX #8: Auto-register disposal in component lifecycle
+    // CRITICAL FIX #3 & #4: Auto-register disposal in component lifecycle
     // If we have an active component context, register the disposer
     // This prevents "zombie effects" that leak memory when components unmount
     if (self._activeComponent) {
-      // Register disposal callback on the active component
+      // Register disposal callback on the active component element
       const dispose = () => computedObj.dispose();
-      if (typeof self._activeComponent._onUnmount === 'function') {
-        self._activeComponent._onUnmount(dispose);
-      } else if (typeof self._reg === 'function' && self._activeComponent.$el) {
-        // Fallback: register on component's root element
-        self._reg(self._activeComponent.$el, dispose);
-      } else {
-        // Last resort: warn the developer
-        if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
-          console.warn(
-            'Reflex Memory Leak Warning: computed() called without disposal tracking.\n' +
-            'Make sure to call computed.dispose() when the component is destroyed.\n' +
-            'Example: onUnmounted(() => computed.dispose());'
-          );
-        }
-      }
+      // Use _reg to attach cleanup to the component element
+      self._reg(self._activeComponent, dispose);
     }
 
     return computedObj;
@@ -368,7 +363,16 @@ export const SchedulerMixin = {
     if (opts.immediate) job();
     else { old = runner(); if (opts.deep) old = this._clone(old); }
 
-    return () => runner.kill();
+    const stopWatch = () => runner.kill();
+
+    // CRITICAL FIX #4: Auto-register cleanup in component lifecycle
+    // If we have an active component context, register the stop function
+    // This prevents "zombie watchers" that leak memory when components unmount
+    if (self._activeComponent) {
+      self._reg(self._activeComponent, stopWatch);
+    }
+
+    return stopWatch;
   },
 
   /**

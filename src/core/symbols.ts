@@ -175,6 +175,10 @@ const DANGEROUS_GLOBALS = {
   setInterval: 1,
   setImmediate: 1,
   import: 1,
+  // CRITICAL FIX #1: Reflection APIs that enable RCE
+  // Reflect.construct can invoke Function constructor to bypass sandbox
+  // Example exploit: {{ Reflect.construct(Function, ["alert(1)"])() }}
+  Reflect: 1,
   // DOM access
   location: 1,
   document: 1,
@@ -182,13 +186,18 @@ const DANGEROUS_GLOBALS = {
   fetch: 1,
   XMLHttpRequest: 1,
   WebSocket: 1,
-  localStorage: 1,
-  sessionStorage: 1,
-  indexedDB: 1,
+  // CRITICAL FIX #10: Additional network APIs
+  EventSource: 1,  // Server-Sent Events (data exfiltration)
   // Browser APIs
   navigator: 1,
   history: 1,
   screen: 1,
+  // CRITICAL FIX #10: Additional exfiltration vectors
+  sendBeacon: 1,   // Beacon API (data exfiltration)
+  // Storage APIs
+  localStorage: 1,
+  sessionStorage: 1,
+  indexedDB: 1,
   // Additional dangerous APIs
   requestAnimationFrame: 1,
   requestIdleCallback: 1,
@@ -197,7 +206,13 @@ const DANGEROUS_GLOBALS = {
   close: 1,
   alert: 1,
   confirm: 1,
-  prompt: 1
+  prompt: 1,
+  // CRITICAL FIX #10: Internationalization and WebAssembly
+  // These can be used for side-channel attacks or code execution
+  Intl: 1,         // Internationalization API (timing attacks)
+  WebAssembly: 1,  // WebAssembly (arbitrary code execution)
+  // CRITICAL FIX #10: Worker APIs
+  importScripts: 1 // Worker importScripts (code execution in workers)
 };
 
 /**
@@ -272,8 +287,11 @@ export function createMembrane(target: any): any {
         if (Array.isArray(obj) || typeof obj === 'string' || obj instanceof String ||
             obj instanceof Number || obj instanceof Boolean || obj instanceof Date ||
             obj instanceof RegExp || obj instanceof Map || obj instanceof Set) {
-          // Built-in types - allow constructor but don't wrap it
-          return value;
+          // Built-in types - allow constructor but wrap it to prevent chaining
+          // CRITICAL FIX #2: Wrap built-in constructors to block .constructor chain
+          // Without this, ({}).constructor.constructor("code")() bypasses the sandbox
+          // Wrapping prevents access to the constructor's constructor property
+          return createMembrane(value);
         }
         // Block constructor on plain objects and functions - this is the attack vector
         throw new Error(
@@ -300,34 +318,47 @@ export function createMembrane(target: any): any {
         return undefined;
       }
 
-      // Block if the value is a dangerous global object
-      // Only block if it's actually the dangerous global, not just a property with that name
-      if (value != null) {
-        // Check if this is actually the dangerous global object
-        if (DANGEROUS_GLOBALS[keyStr]) {
-          // If it's actually a global object, block it
-          if (typeof globalThis !== 'undefined' && (value === globalThis ||
-              value === (typeof window !== 'undefined' ? window : null) ||
-              value === (typeof global !== 'undefined' ? global : null) ||
-              value === Function || value === eval ||
-              value === setTimeout || value === setInterval)) {
+      // CRITICAL FIX #2: Block dangerous global values even if accessed indirectly
+      // Check the actual value, not just the property name
+      // This blocks: obj.prop where prop's value is Function, even if prop is named "foo"
+      if (value != null && typeof value === 'function') {
+        // Check if this function IS a dangerous global constructor
+        if (typeof globalThis !== 'undefined') {
+          const dangerousFunctions = [
+            Function, eval, setTimeout, setInterval, setImmediate,
+            globalThis, typeof window !== 'undefined' ? window : null,
+            typeof global !== 'undefined' ? global : null,
+            Reflect, Intl, WebAssembly
+          ].filter(f => f != null);
+
+          if (dangerousFunctions.includes(value)) {
             throw new Error(
-              `Reflex Security: Access to global "${keyStr}" is forbidden.`
+              `Reflex Security: Access to dangerous global function is forbidden. ` +
+              `Property "${keyStr}" references a global constructor or function that could enable code execution.`
             );
           }
         }
       }
 
-      // RECURSION: If the value is an object/function, wrap it in the membrane
-      // BUT don't wrap built-in constructors and prototypes
-      if (value != null && (typeof value === 'object' || typeof value === 'function')) {
-        // Don't wrap built-in constructors
-        if (keyStr === 'constructor' && (
-            value === Array || value === String || value === Number ||
-            value === Boolean || value === Object || value === Date ||
-            value === RegExp || value === Map || value === Set)) {
-          return value;
+      // Block if the property NAME is a known dangerous global
+      // Only block if it's actually the dangerous global, not just a property with that name
+      if (value != null && DANGEROUS_GLOBALS[keyStr]) {
+        // If it's actually a global object, block it
+        if (typeof globalThis !== 'undefined' && (value === globalThis ||
+            value === (typeof window !== 'undefined' ? window : null) ||
+            value === (typeof global !== 'undefined' ? global : null) ||
+            value === Function || value === eval ||
+            value === setTimeout || value === setInterval ||
+            value === Reflect || value === Intl || value === WebAssembly)) {
+          throw new Error(
+            `Reflex Security: Access to global "${keyStr}" is forbidden.`
+          );
         }
+      }
+
+      // RECURSION: If the value is an object/function, wrap it in the membrane
+      // This is critical to prevent chained property access attacks
+      if (value != null && (typeof value === 'object' || typeof value === 'function')) {
         return createMembrane(value);
       }
 
