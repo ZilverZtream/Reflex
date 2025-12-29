@@ -1261,12 +1261,27 @@ function querySelectorAll(root: VNode, selector: string): VNode[] {
 }
 
 /**
+ * Escape HTML special characters to prevent XSS in SSR output.
+ * CRITICAL SECURITY: Text content must be escaped before insertion into HTML.
+ */
+function escapeHTML(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
  * Serialize a virtual node to HTML string.
  * Note: Does not add formatting/indentation to preserve exact whitespace for SSR.
  */
 function serializeVNode(node: VNode, indent = 0): string {
   if (node.nodeType === TEXT_NODE) {
-    return node.nodeValue ?? '';
+    // CRITICAL SECURITY FIX: Escape text content to prevent XSS
+    // Without escaping, user input like "<script>alert(1)</script>" would execute
+    return escapeHTML(node.nodeValue ?? '');
   }
 
   if (node.nodeType === COMMENT_NODE) {
@@ -1280,16 +1295,17 @@ function serializeVNode(node: VNode, indent = 0): string {
     let attrs = '';
     if (node.attributes) {
       for (const [key, value] of node.attributes) {
-        // SECURITY: Escape double quotes to prevent XSS in SSR output
-        // Without escaping, title='"><script>alert(1)</script>' becomes: <div title=""><script>alert(1)</script>">
-        const escapedValue = String(value).replace(/"/g, '&quot;');
+        // CRITICAL SECURITY FIX: Escape all HTML special characters in attribute values
+        // Not just quotes - & < > " ' can all break out of attributes
+        // Example: value="a&b" must become value="a&amp;b"
+        const escapedValue = escapeHTML(String(value));
         attrs += ` ${key}="${escapedValue}"`;
       }
     }
-    if (node.id) attrs += ` id="${String(node.id).replace(/"/g, '&quot;')}"`;
-    if (node.className) attrs += ` class="${String(node.className).replace(/"/g, '&quot;')}"`;
+    if (node.id) attrs += ` id="${escapeHTML(String(node.id))}"`;
+    if (node.className) attrs += ` class="${escapeHTML(String(node.className))}"`;
     const classList = node.classList?.toString();
-    if (classList && !node.className) attrs += ` class="${classList.replace(/"/g, '&quot;')}"`;
+    if (classList && !node.className) attrs += ` class="${escapeHTML(classList)}"`;
 
     // CRITICAL FIX: Use the single source of truth VOID_ELEMENTS Set
     // Previously used incomplete hardcoded array, missing: source, track, wbr, col, embed, etc.

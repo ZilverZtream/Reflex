@@ -1335,6 +1335,20 @@ export const CompilerMixin = {
               'Or disable sanitization (UNSAFE): app.configure({ sanitize: false })'
             );
           }
+        } else {
+          // CRITICAL SECURITY WARNING: m-html is unsafe without sanitization
+          // Only warn once per instance to avoid console spam
+          if (!self._htmlWarningShown) {
+            self._htmlWarningShown = true;
+            console.warn(
+              'Reflex SECURITY WARNING: m-html is being used without sanitization.\n' +
+              'This is a CRITICAL XSS vulnerability if used with user-provided content.\n' +
+              'STRONGLY RECOMMENDED: Enable sanitization:\n' +
+              '  app.configure({ sanitize: true, domPurify: DOMPurify })\n' +
+              'Install DOMPurify: npm install dompurify\n' +
+              'See: https://github.com/cure53/DOMPurify'
+            );
+          }
         }
 
         // CRITICAL FIX: Destructive innerHTML Hydration Prevention
@@ -2156,12 +2170,51 @@ export const CompilerMixin = {
   },
 
   /**
+   * Sanitize CSS string to prevent javascript: URL injection
+   * CRITICAL SECURITY FIX: Validate URLs in style strings
+   */
+  _sanitizeStyleString(cssText) {
+    if (!cssText) return '';
+
+    // List of CSS properties that accept URLs
+    const urlSensitiveProps = ['background', 'background-image', 'border-image', 'border-image-source',
+      'list-style-image', 'content', 'cursor', 'mask', 'mask-image', '-webkit-mask-image'];
+
+    // Find all url() functions in the CSS text and validate them
+    let sanitized = cssText;
+    const urlMatches = Array.from(cssText.matchAll(/url\s*\(\s*(['"]?)([^'")\s]+)\1\s*\)/gi));
+
+    for (const match of urlMatches) {
+      const url = match[2];
+      // Validate the URL using the same logic as href/src attributes
+      const isSafe = RELATIVE_URL_RE.test(url) || SAFE_URL_RE.test(url);
+      if (!isSafe) {
+        console.warn(
+          `Reflex: Blocked unsafe URL in style binding: ${url}\n` +
+          'Only http://, https://, mailto:, tel:, sms:, and relative URLs are allowed.\n' +
+          'To prevent CSS injection attacks, dangerous protocols are blocked.'
+        );
+        // Replace the entire url() with 'none'
+        sanitized = sanitized.replace(match[0], 'none');
+      }
+    }
+
+    return sanitized;
+  },
+
+  /**
    * Convert style binding value to string
    * CRITICAL FIX: Support Arrays (consistent with _cls)
+   * CRITICAL SECURITY FIX: Validate URLs in string-based style bindings
    */
   _sty(v) {
     if (!v) return '';
-    if (typeof v === 'string') return v;
+    if (typeof v === 'string') {
+      // CRITICAL SECURITY FIX: String path must also be sanitized
+      // Previously only object bindings were validated, allowing bypass via:
+      // :style="'background-image: url(javascript:alert(1))'"
+      return this._sanitizeStyleString(v);
+    }
     // CRITICAL: Check Array BEFORE object (same as _cls)
     // Arrays are objects, so typeof [] === 'object', but we need special handling
     if (Array.isArray(v)) {

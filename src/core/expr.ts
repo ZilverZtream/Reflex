@@ -215,9 +215,11 @@ export const ExprMixin = {
 
       // For single expressions (like function calls), add return to capture cleanup
       // For multi-statement expressions (with ;), don't add return
+      // CRITICAL SECURITY FIX: Add 'use strict' to prevent 'this' from defaulting to global object
+      // Without strict mode, {{ this.constructor.constructor("code")() }} can execute arbitrary code
       const body = useReturn
-        ? `${magicArgs}with(c||{}){with(s){return(${handlerExp})}}`
-        : `${magicArgs}with(c||{}){with(s){${handlerExp}}}`;
+        ? `"use strict";${magicArgs}with(c||{}){with(s){return(${handlerExp})}}`
+        : `"use strict";${magicArgs}with(c||{}){with(s){${handlerExp}}}`;
       try {
         rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el', body);
         return this._ec.set(k, (s, c, e, el) => {
@@ -271,7 +273,9 @@ export const ExprMixin = {
       `var ${v}=(c&&(${JSON.stringify(v)} in c))?c.${v}:s.${v};`
     ).join('');
 
-    const body = `${magicArgs}${arg}return(${exp});`;
+    // CRITICAL SECURITY FIX: Add 'use strict' to prevent 'this' from defaulting to global object
+    // Without strict mode, {{ this.alert(1) }} can access window.alert
+    const body = `"use strict";${magicArgs}${arg}return(${exp});`;
 
     try {
       rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el', body);

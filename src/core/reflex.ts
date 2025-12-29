@@ -165,8 +165,12 @@ export class Reflex {
     this._m = false;          // Mounted flag (prevents double-mount)
 
     // === CONFIGURATION ===
+    // SECURITY NOTE: sanitize defaults to false for backward compatibility
+    // However, m-html without sanitization is a critical XSS vector
+    // RECOMMENDATION: Always configure DOMPurify for production apps
+    // app.configure({ sanitize: true, domPurify: DOMPurify })
     this.cfg = {
-      sanitize: false,        // Sanitize HTML content (opt-in, requires domPurify)
+      sanitize: false,        // Sanitize HTML content (opt-in for backward compatibility)
       cspSafe: false,         // CSP-safe mode (no new Function)
       cacheSize: 1000,        // Expression cache size
       onError: null,          // Global error handler

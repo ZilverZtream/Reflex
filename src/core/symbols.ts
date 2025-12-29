@@ -150,9 +150,17 @@ export function normalizeUnicodeEscapes(str: string): string {
 
 /**
  * List of dangerous global properties that should be blocked
+ * CRITICAL SECURITY FIX: Extended to include data exfiltration vectors
+ * Without blocking these, expressions can access sensitive browser APIs:
+ * - fetch, XMLHttpRequest: Send user data to attacker server
+ * - localStorage, sessionStorage: Steal stored credentials
+ * - indexedDB: Access persistent app data
+ * - WebSocket: Establish persistent connection to attacker
+ * - navigator: Fingerprint user's browser/device
  */
 const DANGEROUS_GLOBALS = {
   __proto__: null,
+  // Global object access
   global: 1,
   globalThis: 1,
   window: 1,
@@ -160,14 +168,36 @@ const DANGEROUS_GLOBALS = {
   top: 1,
   parent: 1,
   frames: 1,
-  location: 1,
-  document: 1,
+  // Code execution
   eval: 1,
   Function: 1,
   setTimeout: 1,
   setInterval: 1,
   setImmediate: 1,
-  import: 1
+  import: 1,
+  // DOM access
+  location: 1,
+  document: 1,
+  // Network/Storage APIs (data exfiltration vectors)
+  fetch: 1,
+  XMLHttpRequest: 1,
+  WebSocket: 1,
+  localStorage: 1,
+  sessionStorage: 1,
+  indexedDB: 1,
+  // Browser APIs
+  navigator: 1,
+  history: 1,
+  screen: 1,
+  // Additional dangerous APIs
+  requestAnimationFrame: 1,
+  requestIdleCallback: 1,
+  postMessage: 1,
+  open: 1,
+  close: 1,
+  alert: 1,
+  confirm: 1,
+  prompt: 1
 };
 
 /**
