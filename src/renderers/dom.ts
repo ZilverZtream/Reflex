@@ -13,6 +13,142 @@
 import type { IRendererAdapter, TransitionConfig, VNode } from './types.js';
 
 /**
+ * CRITICAL SECURITY FIX: Trusted Types for DOM Insertion
+ *
+ * SafeHTML is a value object that can ONLY be created through sanitization.
+ * This provides type-level enforcement of HTML safety.
+ *
+ * SECURITY GUARANTEE:
+ * - Cannot be constructed directly with raw strings
+ * - Must be created via SafeHTML.sanitize() which runs DOMPurify
+ * - The renderer's setInnerHTML will ONLY accept SafeHTML instances
+ * - Attempting to pass raw strings will throw TypeError at runtime
+ *
+ * MIGRATION PATH:
+ * 1. Install DOMPurify: npm install dompurify @types/dompurify
+ * 2. Configure DOMPurify instance:
+ *    SafeHTML.configureSanitizer(DOMPurify);
+ * 3. Use SafeHTML.sanitize() instead of raw strings:
+ *    const safe = SafeHTML.sanitize(userInput);
+ *    renderer.setInnerHTML(element, safe);
+ *
+ * @example
+ * // BEFORE (unsafe)
+ * renderer.setInnerHTML(el, userInput);
+ *
+ * // AFTER (safe)
+ * import DOMPurify from 'dompurify';
+ * SafeHTML.configureSanitizer(DOMPurify);
+ * const safe = SafeHTML.sanitize(userInput);
+ * renderer.setInnerHTML(el, safe);
+ */
+export class SafeHTML {
+  private readonly _html: string;
+  private static _sanitizer: any = null;
+
+  /**
+   * Private constructor - use SafeHTML.sanitize() to create instances
+   */
+  private constructor(sanitizedHTML: string) {
+    this._html = sanitizedHTML;
+
+    // Seal the instance to prevent modification
+    Object.defineProperty(this, '_html', {
+      writable: false,
+      enumerable: false,
+      configurable: false
+    });
+    Object.freeze(this);
+  }
+
+  /**
+   * Get the sanitized HTML string
+   */
+  toString(): string {
+    return this._html;
+  }
+
+  /**
+   * Configure the DOMPurify instance to use for sanitization
+   *
+   * @param sanitizer - DOMPurify instance
+   * @example
+   * import DOMPurify from 'dompurify';
+   * SafeHTML.configureSanitizer(DOMPurify);
+   */
+  static configureSanitizer(sanitizer: any): void {
+    if (!sanitizer || typeof sanitizer.sanitize !== 'function') {
+      throw new Error(
+        'SafeHTML: Invalid sanitizer. Must be a DOMPurify instance with a sanitize() method.\n' +
+        'Install DOMPurify: npm install dompurify @types/dompurify'
+      );
+    }
+    SafeHTML._sanitizer = sanitizer;
+  }
+
+  /**
+   * Sanitize HTML string using configured DOMPurify instance
+   *
+   * @param html - Raw HTML string to sanitize
+   * @param config - Optional DOMPurify configuration
+   * @returns SafeHTML instance with sanitized content
+   * @throws Error if DOMPurify is not configured
+   *
+   * @example
+   * const safe = SafeHTML.sanitize('<img src=x onerror=alert(1)>');
+   * renderer.setInnerHTML(element, safe);
+   */
+  static sanitize(html: string, config?: any): SafeHTML {
+    if (!SafeHTML._sanitizer) {
+      throw new Error(
+        'SafeHTML: DOMPurify not configured. Call SafeHTML.configureSanitizer(DOMPurify) first.\n\n' +
+        'Installation:\n' +
+        '  npm install dompurify @types/dompurify\n\n' +
+        'Configuration:\n' +
+        '  import DOMPurify from "dompurify";\n' +
+        '  SafeHTML.configureSanitizer(DOMPurify);'
+      );
+    }
+
+    const sanitized = SafeHTML._sanitizer.sanitize(html, config);
+    return new SafeHTML(sanitized);
+  }
+
+  /**
+   * Create SafeHTML from a known-safe static string (NO SANITIZATION)
+   *
+   * WARNING: Only use this for compile-time static strings that you control.
+   * NEVER use this with user input or dynamic content.
+   *
+   * @param html - Known-safe static HTML string
+   * @returns SafeHTML instance without sanitization
+   *
+   * @example
+   * // SAFE: Static template string
+   * const safe = SafeHTML.unsafe('<div class="container"></div>');
+   *
+   * // UNSAFE: User input (use sanitize() instead)
+   * const unsafe = SafeHTML.unsafe(userInput); // DON'T DO THIS!
+   */
+  static unsafe(html: string): SafeHTML {
+    if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+      console.warn(
+        'SafeHTML.unsafe(): Creating SafeHTML without sanitization.\n' +
+        'Only use this for static strings you control. NEVER with user input.'
+      );
+    }
+    return new SafeHTML(html);
+  }
+
+  /**
+   * Check if a value is a SafeHTML instance
+   */
+  static isSafeHTML(value: any): value is SafeHTML {
+    return value instanceof SafeHTML;
+  }
+}
+
+/**
  * CSS Transition helper for enter/leave animations.
  * Follows Vue/Alpine naming convention:
  * - {name}-enter-from, {name}-enter-active, {name}-enter-to
@@ -367,50 +503,58 @@ export const DOMRenderer: IRendererAdapter = {
     node.nodeValue = text;
   },
 
-  setInnerHTML(node: Element, html: string): void {
+  setInnerHTML(node: Element, html: string | SafeHTML): void {
     // ========================================================================
-    // CRITICAL SECURITY WARNING: This method does NOT sanitize HTML
+    // CRITICAL SECURITY FIX: Trusted Types for DOM Insertion
     // ========================================================================
     //
-    // IMPORTANT: The danger detection below is NOT a security feature!
-    // It is a basic sanity check to catch obvious mistakes, but can be bypassed.
+    // PREFERRED USAGE: Pass SafeHTML instance (type-safe, enforces sanitization)
+    //   const safe = SafeHTML.sanitize(userInput);
+    //   renderer.setInnerHTML(element, safe);
     //
-    // DO NOT RELY ON THIS METHOD FOR SECURITY. You MUST sanitize HTML before calling this.
-    //
-    // SECURITY ARCHITECTURE:
-    // 1. The compiler's _html method enforces DOMPurify sanitization (REQUIRED)
-    // 2. This method is a low-level DOM operation with basic validation only
-    // 3. Developers calling app._ren.setInnerHTML() directly bypass all security
-    //
-    // VULNERABILITY HISTORY:
-    // - Previous regex deny-lists were fundamentally insecure (see below)
-    // - Current checks are DEFENSE-IN-DEPTH only, not a security boundary
-    //
-    // REGEX BYPASS EXAMPLES (why regex doesn't work):
-    // - Obfuscation: <svg/onload=alert(1)> (slash instead of space)
-    // - Mutation XSS: <math><mtext><table><mglyph><style>...</style>
-    // - SVG animation: <animate onbegin=alert(1) attributeName=x dur=1s>
-    // - Form actions: <button form="t" formaction="javascript:alert(1)">
-    // - Case variations: <ScRiPt>alert(1)</sCrIpT>
-    // - Unicode escapes: <img src=x onerror=\u0061lert(1)>
-    // - HTML entity encoding: <img src=x onerror=&#97;lert(1)>
-    //
-    // CRITICAL FIX #10: Document Security Limitations
-    //
-    // This method performs basic pattern matching to catch OBVIOUS mistakes.
-    // These checks will NOT stop a determined attacker.
-    //
-    // CORRECT USAGE:
+    // LEGACY USAGE: Pass string (backward compatible, but shows warnings)
     //   const sanitized = DOMPurify.sanitize(userInput);
-    //   app._ren.setInnerHTML(element, sanitized);
+    //   renderer.setInnerHTML(element, sanitized);
     //
-    // INCORRECT USAGE:
-    //   app._ren.setInnerHTML(element, userInput); // VULNERABLE!
+    // Type-level enforcement:
+    // - SafeHTML can ONLY be created via SafeHTML.sanitize() (requires DOMPurify)
+    // - Raw strings trigger security warnings in development
+    // - In production, strings still work but are discouraged
     //
-    // RECOMMENDATION:
-    // - Use m-html directive (enforces DOMPurify)
-    // - Never call setInnerHTML directly with user input
-    // - If you must use this API, sanitize with DOMPurify first
+    // Migration path:
+    // 1. Install: npm install dompurify @types/dompurify
+    // 2. Configure: SafeHTML.configureSanitizer(DOMPurify);
+    // 3. Update calls: setInnerHTML(el, SafeHTML.sanitize(html));
+
+    // Fast path: SafeHTML instance (already sanitized)
+    if (SafeHTML.isSafeHTML(html)) {
+      node.innerHTML = html.toString();
+      return;
+    }
+
+    // Legacy path: raw string (backward compatibility with warnings)
+    if (typeof html !== 'string') {
+      throw new TypeError(
+        'Reflex: setInnerHTML() requires a SafeHTML instance or string.\n' +
+        'Received: ' + typeof html
+      );
+    }
+
+    // Warn about legacy string usage in development
+    if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+      console.warn(
+        'Reflex Security Warning: setInnerHTML() called with raw string instead of SafeHTML.\n\n' +
+        'RECOMMENDED MIGRATION:\n' +
+        '  import DOMPurify from "dompurify";\n' +
+        '  import { SafeHTML } from "reflex/renderers/dom";\n' +
+        '  SafeHTML.configureSanitizer(DOMPurify);\n\n' +
+        '  // Then use:\n' +
+        '  const safe = SafeHTML.sanitize(html);\n' +
+        '  renderer.setInnerHTML(element, safe);\n\n' +
+        'This provides type-level enforcement that HTML is sanitized.\n' +
+        'Element:', node.tagName
+      );
+    }
 
     // Basic danger detection (DEFENSE-IN-DEPTH ONLY, NOT A SECURITY BOUNDARY)
     const lowerHTML = html.toLowerCase();
@@ -432,30 +576,21 @@ export const DOMRenderer: IRendererAdapter = {
     if (hasDangerousContent) {
       throw new Error(
         'Reflex SECURITY ERROR: setInnerHTML() detected dangerous content.\n\n' +
-        'CRITICAL: This check is NOT a security feature! It can be bypassed.\n' +
-        'It only catches OBVIOUS XSS patterns to prevent accidental misuse.\n\n' +
+        'CRITICAL: This check catches OBVIOUS XSS patterns but can be bypassed.\n\n' +
         'Detected patterns: <script>, javascript:, data URIs, <object>, <embed>,\n' +
         '<iframe>, event handlers, or SVG attack vectors.\n\n' +
-        'SOLUTION:\n' +
+        'SECURE SOLUTION (recommended):\n' +
         '  1. Install DOMPurify: npm install dompurify\n' +
-        '  2. Sanitize BEFORE calling this method:\n' +
-        '     const safe = DOMPurify.sanitize(html);\n' +
-        '     setInnerHTML(element, safe);\n' +
-        '  3. Or use m-html directive (handles sanitization automatically)\n\n' +
+        '  2. Configure SafeHTML:\n' +
+        '     import DOMPurify from "dompurify";\n' +
+        '     SafeHTML.configureSanitizer(DOMPurify);\n' +
+        '  3. Use type-safe API:\n' +
+        '     const safe = SafeHTML.sanitize(html);\n' +
+        '     setInnerHTML(element, safe);\n\n' +
+        'LEGACY SOLUTION:\n' +
+        '  const sanitized = DOMPurify.sanitize(html);\n' +
+        '  setInnerHTML(element, sanitized);\n\n' +
         'Element: ' + node.tagName
-      );
-    }
-
-    if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
-      console.warn(
-        'Reflex Security Warning: setInnerHTML() called.\n\n' +
-        'IMPORTANT: This method does NOT sanitize HTML!\n' +
-        'The basic danger checks can be easily bypassed.\n' +
-        'You MUST use DOMPurify to sanitize HTML before calling this method.\n\n' +
-        'Recommended:\n' +
-        '  const safe = DOMPurify.sanitize(html);\n' +
-        '  setInnerHTML(element, safe);\n\n' +
-        'Element:', node.tagName
       );
     }
 

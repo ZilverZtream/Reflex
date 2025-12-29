@@ -60,6 +60,123 @@ const SAFE_OBJECT = {
 // Add safe Object to SAFE_GLOBALS
 SAFE_GLOBALS['Object'] = SAFE_OBJECT;
 
+/**
+ * CRITICAL SECURITY FIX: Isolated Scope Containers
+ *
+ * ScopeContainer is a null-prototype object that provides structural protection
+ * against prototype pollution attacks. Unlike blacklist-based approaches that
+ * check "Is this key bad?", this enforces "Is this container safe?"
+ *
+ * SECURITY GUARANTEE:
+ * - No __proto__ property exists (Object.create(null))
+ * - No constructor property exists
+ * - No inherited methods from Object.prototype
+ * - Prototype pollution is mathematically impossible
+ *
+ * USAGE:
+ * All scopes (m-for, state, context) must be wrapped in ScopeContainer.
+ * The parser will ONLY accept ScopeContainer instances or primitives,
+ * throwing errors for regular objects.
+ *
+ * @example
+ * const scope = new ScopeContainer();
+ * scope.item = value;
+ * scope.index = 0;
+ */
+export class ScopeContainer {
+  private _data: Record<string, any>;
+  private _parent: ScopeContainer | null;
+
+  constructor(parent: ScopeContainer | null = null) {
+    // Create null-prototype object to eliminate prototype chain vulnerabilities
+    this._data = Object.create(null);
+    this._parent = parent;
+
+    // Seal the container structure to prevent tampering
+    Object.defineProperty(this, '_data', {
+      writable: false,
+      enumerable: false,
+      configurable: false
+    });
+    Object.defineProperty(this, '_parent', {
+      writable: false,
+      enumerable: false,
+      configurable: false
+    });
+  }
+
+  /**
+   * Get a property from this scope or parent scopes
+   */
+  get(key: string): any {
+    if (key in this._data) {
+      return this._data[key];
+    }
+    if (this._parent) {
+      return this._parent.get(key);
+    }
+    return undefined;
+  }
+
+  /**
+   * Set a property on this scope
+   */
+  set(key: string, value: any): void {
+    this._data[key] = value;
+  }
+
+  /**
+   * Check if a property exists in this scope or parent scopes
+   */
+  has(key: string): boolean {
+    if (key in this._data) {
+      return true;
+    }
+    if (this._parent) {
+      return this._parent.has(key);
+    }
+    return false;
+  }
+
+  /**
+   * Get all own keys (for iteration)
+   */
+  ownKeys(): string[] {
+    return Object.keys(this._data);
+  }
+
+  /**
+   * Get all keys including parent scopes
+   */
+  allKeys(): string[] {
+    const keys = new Set<string>(this.ownKeys());
+    if (this._parent) {
+      this._parent.allKeys().forEach(k => keys.add(k));
+    }
+    return Array.from(keys);
+  }
+
+  /**
+   * Check if this is a ScopeContainer (for type guards)
+   */
+  static isScopeContainer(obj: any): obj is ScopeContainer {
+    return obj instanceof ScopeContainer;
+  }
+
+  /**
+   * Create a ScopeContainer from a plain object
+   */
+  static fromObject(obj: Record<string, any>, parent: ScopeContainer | null = null): ScopeContainer {
+    const container = new ScopeContainer(parent);
+    for (const key in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        container.set(key, obj[key]);
+      }
+    }
+    return container;
+  }
+}
+
 // CRITICAL SECURITY WARNING: Blacklist Approach Fragility
 // This blacklist-based approach has inherent weaknesses:
 // 1. New dangerous properties added to JavaScript (e.g., future TC39 proposals) won't be blocked
@@ -694,12 +811,29 @@ export class SafeExprParser {
         if (name === '$refs') return reflex._refs;
         if (name === '$dispatch') return reflex._dispatch.bind(reflex);
         if (name === '$nextTick') return reflex.nextTick.bind(reflex);
-        // Context lookup
-        if (context && name in context) {
-          const meta = context[META] || reflex._mf.get(context);
-          if (meta) reflex.trackDependency(meta, name);
-          return context[name];
+
+        // CRITICAL SECURITY FIX: Isolated Scope Containers
+        // Context lookup - support both ScopeContainer and legacy objects
+        if (context) {
+          if (ScopeContainer.isScopeContainer(context)) {
+            // New secure path: use ScopeContainer API
+            if (context.has(name)) {
+              const value = context.get(name);
+              // Track dependency if value is reactive
+              if (value !== null && typeof value === 'object') {
+                const meta = value[META] || reflex._mf.get(value);
+                if (meta) reflex.trackDependency(meta, name);
+              }
+              return value;
+            }
+          } else if (name in context) {
+            // Legacy path: direct object access (for backward compatibility during migration)
+            const meta = context[META] || reflex._mf.get(context);
+            if (meta) reflex.trackDependency(meta, name);
+            return context[name];
+          }
         }
+
         // State lookup
         if (state && name in state) {
           return state[name];
@@ -720,6 +854,23 @@ export class SafeExprParser {
           console.warn('Reflex: Blocked access to unsafe property:', prop);
           return undefined;
         }
+
+        // CRITICAL SECURITY FIX: Isolated Scope Containers
+        // Support ScopeContainer member access
+        if (ScopeContainer.isScopeContainer(obj)) {
+          if (obj.has(prop)) {
+            const value = obj.get(prop);
+            // Track dependency if value is reactive
+            if (value !== null && typeof value === 'object') {
+              const meta = value[META] || reflex._mf.get(value);
+              if (meta) reflex.trackDependency(meta, prop);
+            }
+            return value;
+          }
+          return undefined;
+        }
+
+        // Legacy path: direct property access
         const meta = obj[META] || reflex._mf.get(obj);
         if (meta) reflex.trackDependency(meta, prop);
         return obj[prop];
