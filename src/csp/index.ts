@@ -6,4 +6,4 @@
  * that disallow `new Function()` or `eval()`.
  */
 
-export { SafeExprParser } from './SafeExprParser.js';
+export { SafeExprParser, ScopeContainer } from './SafeExprParser.js';

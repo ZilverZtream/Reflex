@@ -20,6 +20,7 @@
 
 import { META, ITERATE, SKIP, UNSAFE_PROPS, SAFE_URL_RE, RELATIVE_URL_RE } from './symbols.js';
 import { computeLIS, resolveDuplicateKey, reconcileKeyedList } from './reconcile.js';
+import { ScopeContainer } from '../csp/SafeExprParser.js';
 import type { IRendererAdapter } from '../renderers/types.js';
 
 // Basic HTML entity escaping for when DOMPurify is unavailable
@@ -898,20 +899,26 @@ export const CompilerMixin = {
         },
 
         createScope: (item, index) => {
+          // Process item (make reactive if needed)
           let processedItem = item;
           if (processedItem !== null && typeof processedItem === 'object' && !processedItem[SKIP]) {
             processedItem = this._r(processedItem);
           }
 
-          // CRITICAL FIX: Use Object.create for scope inheritance (PERFORMANCE)
-          // Object.create is fast in V8; Object.setPrototypeOf is a de-optimization operation
-          // setPrototypeOf forces V8 to throw away optimizations for that object
-          // In a loop with 1000 items, setPrototypeOf creates a massive performance bottleneck
-          const base = o ? Object.create(o) : {};
-          base[alias] = processedItem;
-          if (idxAlias) base[idxAlias] = index;
+          // BREAKING CHANGE: MUST use ScopeContainer, no Object.create()
+          // ScopeContainer prevents prototype pollution attacks by isolating scope data
+          // in a Map instead of using prototype chain inheritance
+          const scope = new ScopeContainer(
+            o && ScopeContainer.isScopeContainer(o)
+              ? o
+              : o ? ScopeContainer.fromObject(o, null) : null
+          );
 
-          return this._r(base);
+          scope.set(alias, processedItem);
+          if (idxAlias) scope.set(idxAlias, index);
+
+          // Return the ScopeContainer directly (it's already sealed)
+          return scope;
         },
 
         createNode: (item, index) => {
@@ -1058,28 +1065,26 @@ export const CompilerMixin = {
 
         updateNode: (node, item, index) => {
           const scope = this._scopeMap.get(node);
-          if (scope) {
+          if (scope && ScopeContainer.isScopeContainer(scope)) {
             let processedItem = item;
             if (processedItem !== null && typeof processedItem === 'object' && !processedItem[SKIP]) {
               processedItem = this._r(processedItem);
             }
-            scope[alias] = processedItem;
+            // BREAKING CHANGE: Use ScopeContainer.set() instead of bracket notation
+            scope.set(alias, processedItem);
             // CRITICAL FIX: Ensure index updates trigger reactivity
             // When list order changes, child text nodes using {{ index }} must update
-            // Force reactivity by deleting then re-setting to trigger proxy set trap
             if (idxAlias) {
-              if (scope[idxAlias] !== index) {
-                // Use delete + set pattern to ensure reactive notification
-                delete scope[idxAlias];
-                scope[idxAlias] = index;
+              if (scope.get(idxAlias) !== index) {
+                // Use delete + set pattern to ensure notification
+                scope.delete(idxAlias);
+                scope.set(idxAlias, index);
               }
             }
 
             // CRITICAL FIX #8: Nested m-for Scope Staleness (Iterative Version)
             // When parent scopes update, child scopes (nested loops) need to refresh
-            // Child scopes are created via Object.create(parentScope), so they should
-            // see changes through the prototype chain. However, reactive proxies may
-            // not properly propagate notifications through prototypes in all cases.
+            // ScopeContainer uses parent references, not prototype chains
             // Force a refresh by triggering reactivity on the parent scope.
             //
             // PERFORMANCE FIX: Use iterative traversal instead of recursion
@@ -1098,12 +1103,11 @@ export const CompilerMixin = {
                 while (child) {
                   if (child.nodeType === 1) {
                     const childScope = this._scopeMap.get(child);
-                    // Check if this child scope has our scope as its prototype
-                    if (childScope && Object.getPrototypeOf(childScope) === scope) {
+                    // Check if this child scope has our scope as its parent
+                    if (childScope && ScopeContainer.isScopeContainer(childScope) && childScope.getParent() === scope) {
                       // Trigger a reactivity refresh by accessing a property
                       // This forces the reactive system to re-track dependencies
-                      // Use a safe property that won't interfere with user code
-                      const _dummy = childScope[alias];
+                      const _dummy = childScope.get(alias);
                     }
                     // Push child onto stack for iterative processing
                     stack.push(child);
@@ -2144,12 +2148,26 @@ export const CompilerMixin = {
         return;
       }
 
-      let t = o && paths[0] in o ? o : this.s;
+      // BREAKING CHANGE: Handle ScopeContainer for first path lookup
+      const isScopeContainer = o && ScopeContainer.isScopeContainer(o);
+      let t = o && (isScopeContainer ? o.has(paths[0]) : paths[0] in o) ? o : this.s;
+      let isFirstPath = true;
       for (const p of paths) {
         if (UNSAFE_PROPS[p]) {
           console.warn('Reflex: Blocked attempt to traverse unsafe property:', p);
           return;
         }
+        // Handle ScopeContainer lookup for first path segment
+        if (isFirstPath && ScopeContainer.isScopeContainer(t)) {
+          t = t.get(p);
+          isFirstPath = false;
+          if (t == null) {
+            console.warn('Reflex: Cannot traverse null/undefined in path:', p);
+            return;
+          }
+          continue;
+        }
+        isFirstPath = false;
         if (t[p] == null) t[p] = {};
         else if (typeof t[p] !== 'object') {
           console.warn('Reflex: Cannot set nested property on non-object value at path:', p);
@@ -2159,10 +2177,9 @@ export const CompilerMixin = {
       }
 
       // CRITICAL FIX #4: Scope Shadowing in m-model
-      // When m-model is used inside m-for, the loop creates child scopes via Object.create(parent)
-      // Simple assignment `t[end] = v` would create a shadow property on the child scope
-      // instead of updating the parent, breaking two-way binding.
-      // Solution: Walk up the prototype chain to find the owner of the property
+      // With ScopeContainer, we no longer use prototype chains for scope inheritance.
+      // Scopes store their own data in a Map, so shadowing is inherently prevented.
+      // For regular objects, we still need to walk the prototype chain.
       let owner = t;
       while (owner && !Object.prototype.hasOwnProperty.call(owner, end)) {
         const proto = Object.getPrototypeOf(owner);
