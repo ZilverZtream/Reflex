@@ -343,27 +343,19 @@ const HydrationMixin = {
             this.s[v].push(n);
 
             this._reg(n, () => {
-              // CRITICAL FIX: O(N²) Performance DoS - Use swap-and-pop instead of splice
+              // CRITICAL FIX: Preserve DOM order for ref arrays (use splice, not swap-and-pop)
               const refsArray = this._refs[v];
               if (Array.isArray(refsArray)) {
                 const idx = refsArray.indexOf(n);
                 if (idx !== -1) {
-                  const lastIdx = refsArray.length - 1;
-                  if (idx !== lastIdx) {
-                    refsArray[idx] = refsArray[lastIdx];
-                  }
-                  refsArray.pop();
+                  refsArray.splice(idx, 1);
                 }
               }
               const stateArray = this.s[v];
               if (Array.isArray(stateArray)) {
                 const idx = stateArray.indexOf(n);
                 if (idx !== -1) {
-                  const lastIdx = stateArray.length - 1;
-                  if (idx !== lastIdx) {
-                    stateArray[idx] = stateArray[lastIdx];
-                  }
-                  stateArray.pop();
+                  stateArray.splice(idx, 1);
                 }
               }
             });
