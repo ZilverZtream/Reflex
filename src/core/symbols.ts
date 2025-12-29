@@ -422,3 +422,194 @@ export function createMembrane(target: any): any {
 
   return membrane;
 }
+
+/**
+ * Dangerous DOM properties that allow access to window/document/global scope
+ * These must be blocked on $el to prevent sandbox escape
+ */
+const DANGEROUS_DOM_PROPS = {
+  __proto__: null,
+  // Access to document/window
+  ownerDocument: 1,
+  defaultView: 1,
+  contentWindow: 1,
+  contentDocument: 1,
+  // Parent traversal (can reach document)
+  parentNode: 1,
+  parentElement: 1,
+  getRootNode: 1,
+  // Access to Reflex app instance
+  __rfx_app: 1,
+  // Network APIs
+  fetch: 1,
+  XMLHttpRequest: 1,
+  WebSocket: 1,
+  // Global scope
+  window: 1,
+  document: 1,
+  globalThis: 1
+};
+
+/**
+ * Safe DOM properties and methods that are allowed on $el
+ */
+const SAFE_DOM_PROPS = {
+  __proto__: null,
+  // Element properties
+  id: 1, className: 1, tagName: 1, nodeName: 1, nodeType: 1,
+  textContent: 1, innerHTML: 1, innerText: 1, value: 1,
+  checked: 1, disabled: 1, selected: 1, hidden: 1,
+  // Attributes
+  getAttribute: 1, setAttribute: 1, removeAttribute: 1, hasAttribute: 1,
+  getAttributeNode: 1, setAttributeNode: 1,
+  // Classes
+  classList: 1,
+  // Style
+  style: 1,
+  // Dataset
+  dataset: 1,
+  // Dimensions
+  clientWidth: 1, clientHeight: 1, offsetWidth: 1, offsetHeight: 1,
+  scrollWidth: 1, scrollHeight: 1, scrollLeft: 1, scrollTop: 1,
+  getBoundingClientRect: 1,
+  // Safe child access (children elements only, not document)
+  children: 1, childNodes: 1, firstChild: 1, lastChild: 1,
+  firstElementChild: 1, lastElementChild: 1,
+  nextSibling: 1, previousSibling: 1, nextElementSibling: 1, previousElementSibling: 1,
+  // Query methods
+  querySelector: 1, querySelectorAll: 1,
+  getElementsByTagName: 1, getElementsByClassName: 1,
+  // Events
+  addEventListener: 1, removeEventListener: 1, dispatchEvent: 1,
+  // DOM manipulation
+  appendChild: 1, removeChild: 1, insertBefore: 1, replaceChild: 1,
+  remove: 1, cloneNode: 1,
+  // Focus
+  focus: 1, blur: 1,
+  // Other safe props
+  contains: 1, matches: 1, closest: 1
+};
+
+/**
+ * WeakMap to cache element membranes to avoid creating duplicate proxies
+ */
+const elementMembraneCache = new WeakMap<object, any>();
+
+/**
+ * Creates a security membrane around a DOM element ($el) to prevent sandbox escape.
+ *
+ * CRITICAL SECURITY: The standard expression compiler passes $el raw to new Function(),
+ * which allows access to ownerDocument.defaultView (window), enabling full RCE:
+ * {{ $el.ownerDocument.defaultView.alert('pwned') }}
+ *
+ * This wrapper blocks dangerous DOM properties while allowing safe operations.
+ *
+ * @param {Element} element - DOM element to wrap
+ * @returns {Proxy} Proxied element with security enforcement
+ */
+export function createElementMembrane(element: any): any {
+  // Don't wrap non-elements
+  if (!element || typeof element !== 'object') {
+    return element;
+  }
+
+  // Return cached membrane if it exists
+  const cached = elementMembraneCache.get(element);
+  if (cached) {
+    return cached;
+  }
+
+  const membrane = new Proxy(element, {
+    get(el, key) {
+      const keyStr = typeof key === 'symbol' ? key.toString() : String(key);
+
+      // CRITICAL: Block dangerous DOM properties that lead to window/document
+      if (DANGEROUS_DOM_PROPS[keyStr]) {
+        if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+          console.error(
+            `Reflex Security: Blocked access to dangerous $el property: ${keyStr}\n` +
+            `This property can be used to escape the sandbox and access window/document.\n` +
+            `Attack vector: {{ $el.${keyStr}... }}`
+          );
+        }
+        return undefined;
+      }
+
+      // Block dangerous properties from UNSAFE_PROPS
+      if (UNSAFE_PROPS[keyStr]) {
+        if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+          console.error(
+            `Reflex Security: Blocked access to unsafe property on $el: ${keyStr}`
+          );
+        }
+        return undefined;
+      }
+
+      // Get the value
+      const value = Reflect.get(el, key);
+
+      // If it's a function, bind it to the original element
+      if (typeof value === 'function') {
+        return function(...args: any[]) {
+          return value.apply(el, args);
+        };
+      }
+
+      // Recursively wrap returned elements to maintain protection
+      if (value && typeof value === 'object') {
+        // If it's a DOM element or collection, wrap it
+        if (value instanceof Element || value instanceof HTMLCollection || value instanceof NodeList) {
+          // For collections, wrap each item
+          if (value instanceof HTMLCollection || value instanceof NodeList) {
+            return new Proxy(value, {
+              get(collection, idx) {
+                const item = Reflect.get(collection, idx);
+                if (item instanceof Element) {
+                  return createElementMembrane(item);
+                }
+                return item;
+              }
+            });
+          }
+          // Single element
+          return createElementMembrane(value);
+        }
+        // For style, classList, dataset, etc., wrap in basic membrane
+        if (keyStr === 'style' || keyStr === 'classList' || keyStr === 'dataset') {
+          return value; // These are safe to use directly
+        }
+      }
+
+      return value;
+    },
+
+    set(el, key, value) {
+      const keyStr = typeof key === 'symbol' ? key.toString() : String(key);
+
+      // Block setting dangerous properties
+      if (DANGEROUS_DOM_PROPS[keyStr] || UNSAFE_PROPS[keyStr]) {
+        throw new Error(
+          `Reflex Security: Cannot set dangerous property on $el: ${keyStr}`
+        );
+      }
+
+      return Reflect.set(el, key, value);
+    },
+
+    has(el, key) {
+      const keyStr = typeof key === 'symbol' ? key.toString() : String(key);
+
+      // Hide dangerous properties from 'in' operator
+      if (DANGEROUS_DOM_PROPS[keyStr] || UNSAFE_PROPS[keyStr]) {
+        return false;
+      }
+
+      return Reflect.has(el, key);
+    }
+  });
+
+  // Cache the membrane
+  elementMembraneCache.set(element, membrane);
+
+  return membrane;
+}

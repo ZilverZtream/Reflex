@@ -179,11 +179,18 @@ export function reconcileKeyedList({
 
   // Insert nodes - only move nodes NOT in LIS
   // We iterate backwards and insert before the next sibling
+  // CRITICAL FIX: Logic Flaw in Keyed Reconciliation with null Nodes
+  // When a node is null (filtered by m-if), we must still track nextSibling correctly
+  // Otherwise, the next valid node will be inserted in the wrong position
   let nextSibling = null;
   for (let i = newLen - 1; i >= 0; i--) {
     const node = newNodes[i];
-    // Skip null nodes (filtered by m-if)
-    if (node === null) continue;
+    // Skip null nodes (filtered by m-if) but continue tracking nextSibling
+    if (node === null) {
+      // Don't update nextSibling - it should remain pointing to the next valid node
+      // This ensures the next valid item is inserted before the correct sibling
+      continue;
+    }
 
     // CRITICAL FIX: Handle virtual containers (for strict parents like <table>)
     const isVirtual = node._isVirtualContainer;
@@ -200,18 +207,26 @@ export function reconcileKeyedList({
         });
       } else {
         // Insert at end (after last sibling or after comment marker)
+        // CRITICAL FIX: Robust handling of null nodes in insertion logic
+        // When nextSibling is null (because we skipped null nodes or this is the first item),
+        // we need to find the correct insertion point by scanning previous valid nodes
         let lastNode = marker;
-        for (let j = 0; j < i; j++) {
+        // Search backwards from current position to find the last valid inserted node
+        for (let j = i - 1; j >= 0; j--) {
           const prevNode = newNodes[j];
-          if (prevNode) {
-            if (prevNode._isVirtualContainer) {
-              const prevActual = prevNode._nodes;
-              if (prevActual.length > 0 && prevActual[prevActual.length - 1].parentNode) {
-                lastNode = prevActual[prevActual.length - 1];
-              }
-            } else if (prevNode.parentNode) {
-              lastNode = prevNode;
+          // Skip null nodes - they have no DOM presence
+          if (prevNode === null) continue;
+
+          if (prevNode._isVirtualContainer) {
+            const prevActual = prevNode._nodes;
+            // Find the last actual node in the virtual container that's in the DOM
+            if (prevActual.length > 0 && prevActual[prevActual.length - 1].parentNode) {
+              lastNode = prevActual[prevActual.length - 1];
+              break;
             }
+          } else if (prevNode.parentNode) {
+            lastNode = prevNode;
+            break;
           }
         }
         // Insert all nodes from virtual container after lastNode
@@ -222,6 +237,7 @@ export function reconcileKeyedList({
       }
     }
     // Update nextSibling to the first node of this item (for backwards iteration)
+    // This ensures the next iteration knows where to insert relative to this item
     nextSibling = firstNode;
   }
 

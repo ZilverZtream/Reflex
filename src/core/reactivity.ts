@@ -44,6 +44,7 @@ interface ReactivityEngine {
     isMap: boolean
   ) => (...args: any[]) => any;
   toRaw: <T>(value: T) => T;
+  _recursionDepth: number;  // CRITICAL: Track recursion depth to prevent infinite loops
 }
 
 interface ReactiveMeta {
@@ -154,15 +155,19 @@ export const ArrayHandler: ProxyHandler<any[]> = {
         ks.add('length');
         ks.add(ITERATE);
 
-        // CRITICAL FIX: Trigger ALL index watchers, not just first 1000
-        // The previous optimization capped at 1000 indices, but ITERATE does NOT
-        // trigger specific index watchers (e.g., arr[1500]), leaving UI stale.
-        // We must check ALL deleted indices for active watchers to ensure reactivity.
-        // Performance: Only triggers indices that have actual dependencies (checked via meta.d.has)
-        for (let i = newLength; i < oldLength; i++) {
-          const key = String(i);
-          // Only add index if it has watchers (this is the real optimization)
-          if (meta.d.has(key)) {
+        // CRITICAL SECURITY FIX: Prevent DoS via main thread freeze
+        // The previous implementation iterated from newLength to oldLength (O(N) where N could be millions)
+        // This blocked the main thread even with the optimization of checking meta.d.has(key)
+        //
+        // NEW APPROACH: Iterate only over existing dependency keys in meta.d
+        // This is O(D) where D is the number of tracked dependencies (typically << N)
+        // Example: Array with 10M items but only 5 indices are tracked → O(5) instead of O(10M)
+        for (const [key, depSet] of meta.d) {
+          // Skip if this key is not a numeric index
+          if (typeof key !== 'string') continue;
+          const idx = Number(key);
+          // Check if this is a numeric array index that was deleted
+          if (Number.isInteger(idx) && idx >= newLength && idx < oldLength && depSet.size > 0) {
             ks.add(key);
           }
         }
@@ -557,17 +562,39 @@ export const ReactivityMixin = {
       ks.add(k);
       return;
     }
-    // Safe environment check without relying on global namespace
-    if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
-      this._dtEmit('state:change', { target: m.r, key: k, state: this.s });
+
+    // CRITICAL SECURITY FIX: Infinite Loop Risk in Reactive Flush
+    // Without this guard, an effect that modifies its own dependencies (e.g., count++ in a watcher)
+    // will trigger itself synchronously in an infinite loop, crashing the app
+    // Unlike Vue/React which have scheduler deduplication, we need explicit recursion guards
+    const MAX_RECURSION_DEPTH = 100;
+    if (!this._recursionDepth) this._recursionDepth = 0;
+
+    if (++this._recursionDepth > MAX_RECURSION_DEPTH) {
+      this._recursionDepth = 0;
+      console.error(
+        'Reflex: Maximum recursive update depth exceeded.\n' +
+        'This usually means an effect is modifying its own dependencies in a loop.\n' +
+        `Key: ${String(k)}, Target:`, m.r
+      );
+      return;
     }
-    const s = m.d.get(k);
-    if (s) {
-      for (const e of s) {
-        if (e.f & ACTIVE && !(e.f & RUNNING)) {
-          e.s ? e.s(e) : this.queueJob(e);
+
+    try {
+      // Safe environment check without relying on global namespace
+      if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+        this._dtEmit('state:change', { target: m.r, key: k, state: this.s });
+      }
+      const s = m.d.get(k);
+      if (s) {
+        for (const e of s) {
+          if (e.f & ACTIVE && !(e.f & RUNNING)) {
+            e.s ? e.s(e) : this.queueJob(e);
+          }
         }
       }
+    } finally {
+      this._recursionDepth--;
     }
   },
 
