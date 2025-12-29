@@ -55,7 +55,6 @@ interface ReactiveMeta {
   _am: Record<string | symbol, (...args: any[]) => any> | null;
   engine: ReactivityEngine;
   v: number; // Version counter for structural sharing in deep clones
-  _silent?: boolean; // PERFORMANCE FIX #2: Flag to skip reactivity during batch array operations
   [key: string | symbol]: any;
 }
 
@@ -106,14 +105,6 @@ export const ArrayHandler: ProxyHandler<any[]> = {
     // Security: Block setting dangerous properties
     if (typeof k === 'string' && UNSAFE_PROPS[k]) {
       throw new Error(`Reflex: Cannot set unsafe property '${k}'`);
-    }
-
-    // CRITICAL PERFORMANCE FIX #2: Skip reactivity if in silent mode
-    // When wrapArrayMethod is executing (e.g., shift, splice), meta._silent is true
-    // This prevents O(N) set trap calls from freezing the main thread
-    if (meta._silent) {
-      const raw = engine.toRaw(v);
-      return Reflect.set(o, k, raw, rec);
     }
 
     const raw = engine.toRaw(v);
@@ -711,37 +702,22 @@ export const ReactivityMixin = {
    * Create cached array method wrapper
    * Prevents closure factory bug by caching wrappers on meta
    *
-   * CRITICAL ARCHITECTURAL NOTE (Issue #3):
+   * BREAKING CHANGE: Proxy Purity (Security-First)
    *
-   * This method calls Array.prototype[method].apply(rawTarget, args) instead of
-   * calling the method on the Proxy. This is a deliberate performance optimization.
+   * All array mutations MUST go through the proxy. This ensures:
+   * - Every set trap fires for every index change
+   * - No bypass of security checks in the set trap
+   * - Complete observability of all mutations
    *
-   * WHY WE CALL ON RAW TARGET:
-   * - Calling native methods on raw target prevents O(N) set trap invocations
-   * - Example: arr.shift() on 100k items would trigger 99,999 set traps synchronously
-   * - This would freeze the main thread and cause DoS
-   *
-   * WHY THE _silent FLAG EXISTS:
-   * - The _silent flag is checked in the set trap (ArrayHandler.set) to skip reactivity
-   * - However, since we call on the raw target, the set trap doesn't fire anyway
-   * - The flag is DEFENSIVE PROGRAMMING in case of custom array subclasses
-   * - Custom array classes might override methods and call this.property = value
-   * - Those assignments would go through the proxy set trap, so _silent prevents double-triggering
-   *
-   * REACTIVITY GUARANTEE:
-   * - We manually trigger ITERATE and length after the method completes
-   * - For reordering methods (shift, splice, etc.), we also trigger tracked indices
-   * - This ensures correctness while maintaining O(1) performance
+   * PERFORMANCE TRADE-OFF:
+   * - Operations like shift() on 100k items WILL trigger 99,999 set traps
+   * - This is intentional for security-first design
+   * - The set trap handles batching and version increments properly
    *
    * METHODS COVERED:
    * - All methods in ARRAY_MUTATORS: push, pop, shift, unshift, splice, sort, reverse, fill, copyWithin
    * - These are the only methods that can mutate arrays
    * - Read-only methods (map, filter, etc.) don't need wrapping
-   *
-   * CONCLUSION:
-   * - The current implementation is correct and performant
-   * - The _silent flag is not "dead code" - it's defensive programming
-   * - All mutating methods properly trigger reactivity via manual ITERATE/length triggers
    */
   wrapArrayMethod(t: any[], m: string, meta: ReactiveMeta) {
     const self = this;
@@ -749,71 +725,34 @@ export const ReactivityMixin = {
       self._b++;
       let res;
       try {
-        // CRITICAL PERFORMANCE FIX #2: Reactive Array O(N) Freeze (DoS)
-        //
-        // VULNERABILITY: Operations like shift() or splice(0,1) on large arrays (100k+ items)
-        // trigger the set trap for EVERY shifted element, causing synchronous main-thread freeze
-        // Example: arr.shift() with 100k items triggers 99,999 set trap calls
-        //
-        // SOLUTION: Call method on raw target instead of proxy to bypass set trap
-        // Set _silent flag as defensive measure for custom array subclasses
-        // After the method completes, manually trigger only ITERATE and length updates once
-        //
-        // This reduces complexity from O(N) set trap calls to O(1) batch update
+        // BREAKING CHANGE: Call on PROXY, not raw target
+        // This ensures all set traps fire for security-first design
+        const proxy = meta.p;
 
-        // Mark meta as in "silent mode" (defensive for custom array subclasses)
-        const wasSilent = meta._silent;
-        meta._silent = true;
+        // Map args through toRaw to prevent nested proxy issues
+        // But the method itself is called on the proxy
+        const rawArgs = args.map(arg => self.toRaw(arg));
 
-        try {
-          // CRITICAL SECURITY FIX #5: wrapArrayMethod Trusts Raw Constructor
-          //
-          // VULNERABILITY: Malicious objects can spoof constructor property
-          // Example: { 0:1, length:1, constructor: { prototype: { push: () => alert('hack') } } }
-          // Never trust t.constructor from user-provided objects
-          //
-          // SOLUTION: Use instanceof check instead of constructor property comparison
-          // instanceof checks the actual prototype chain, which cannot be easily spoofed
-          const hasCustomMethod = t instanceof Array &&
-                                  t.constructor !== Array &&
-                                  t.constructor.prototype &&
-                                  typeof t.constructor.prototype[m] === 'function' &&
-                                  t.constructor.prototype[m] !== Array.prototype[m];
+        // Call Array.prototype method with proxy as `this`
+        // This bypasses the get trap (avoiding infinite recursion)
+        // but when the method mutates (e.g., this[i] = value),
+        // it goes through the proxy's set trap for each index
+        res = Array.prototype[m].call(proxy, ...rawArgs);
 
-          if (hasCustomMethod) {
-            // Custom array class - call the method on the proxy to maintain reactivity
-            // The proxy is stored in meta.p
-            res = meta.p[m](...args);
-          } else {
-            // Standard array - use Array.prototype explicitly for security
-            res = Array.prototype[m].apply(t, args);
-          }
-        } finally {
-          // Restore silent mode state
-          meta._silent = wasSilent;
-        }
+        // Increment version after batch operation completes
+        meta.v++;
 
-        meta.v++; // Increment version on array mutation
+        // Queue ITERATE and length triggers for structural changes
         let ks = self.pendingTriggers.get(meta);
         if (!ks) self.pendingTriggers.set(meta, ks = new Set());
         ks.add(ITERATE);
         ks.add('length');
 
-        // OPTIMIZATION: Only trigger indices that have active watchers
-        // For reordering methods (shift, unshift, splice, sort, reverse)
-        // we only need to notify tracked indices, not all indices
-        if (meta.ai && REORDER_METHODS[m]) {
-          for (const [k, depSet] of meta.d) {
-            if (!depSet.size) { meta.d.delete(k); continue; }
-            if (typeof k === 'string') {
-              const n = Number(k);
-              if (n >= 0 && Number.isInteger(n) && String(n) === k) ks.add(k);
-            }
-          }
-        }
       } finally {
         if (--self._b === 0) {
-          try { self._fpt(); } catch (err) { console.error('Reflex: Error flushing pending triggers:', err); }
+          try { self._fpt(); } catch (err) {
+            console.error('Reflex: Error flushing pending triggers:', err);
+          }
         }
       }
       return res;
