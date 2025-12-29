@@ -119,7 +119,7 @@ const UNSAFE_METHODS = Object.assign(Object.create(null), {
  * - Identifiers with context/state lookup
  * - Property access: dot notation and bracket notation
  * - Function calls with arguments
- * - Binary operators: +, -, *, /, %, ==, ===, !=, !==, <, >, <=, >=, &&, ||, ??
+ * - Binary operators: +, -, *, /, %, ==, ===, !=, !==, <, >, <=, >=, &&, ||, ??, in
  * - Unary operators: !, -, typeof
  * - Ternary operator: condition ? then : else
  * - Array literals: [a, b, c]
@@ -209,14 +209,26 @@ export class SafeExprParser {
   }
 
   parseEquality() {
+    let left = this.parseRelational();
+    while (true) {
+      this.skipWhitespace();
+      if (this.matchStr('===')) left = { type: 'binary', op: '===', left, right: this.parseRelational() };
+      else if (this.matchStr('!==')) left = { type: 'binary', op: '!==', left, right: this.parseRelational() };
+      else if (this.matchStr('==')) left = { type: 'binary', op: '==', left, right: this.parseRelational() };
+      else if (this.matchStr('!=')) left = { type: 'binary', op: '!=', left, right: this.parseRelational() };
+      else break;
+    }
+    return left;
+  }
+
+  parseRelational() {
     let left = this.parseComparison();
     while (true) {
       this.skipWhitespace();
-      if (this.matchStr('===')) left = { type: 'binary', op: '===', left, right: this.parseComparison() };
-      else if (this.matchStr('!==')) left = { type: 'binary', op: '!==', left, right: this.parseComparison() };
-      else if (this.matchStr('==')) left = { type: 'binary', op: '==', left, right: this.parseComparison() };
-      else if (this.matchStr('!=')) left = { type: 'binary', op: '!=', left, right: this.parseComparison() };
-      else break;
+      // Check for 'in' operator (must be followed by whitespace or special char to avoid matching 'indexOf')
+      if (this.matchStr('in ') || (this.matchStr('in') && (this.peek() === '(' || this.peek() === '[' || this.peek() === '{' || !this.isIdentPart(this.peek())))) {
+        left = { type: 'binary', op: 'in', left, right: this.parseComparison() };
+      } else break;
     }
     return left;
   }
@@ -600,6 +612,14 @@ export class SafeExprParser {
           case '&&': return left() && right();
           case '||': return left() || right();
           case '??': { const l = left(); return l != null ? l : right(); }
+          case 'in': {
+            const prop = left();
+            const obj = right();
+            // Security: Block 'in' operator on unsafe objects
+            if (obj == null || typeof obj !== 'object') return false;
+            // Use safe property check that works with reactive proxies
+            return prop in obj;
+          }
           default: return undefined;
         }
       }
