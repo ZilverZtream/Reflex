@@ -14,10 +14,13 @@
  * extensions like hydration, SSR, and custom features.
  */
 
-// CRITICAL FIX #11: queueMicrotask polyfill for older browsers
+// CRITICAL FIX #11 + #8: queueMicrotask polyfill with pollution prevention
 // Missing in iOS < 13, older Node.js, and legacy browsers
 // Fallback to Promise.resolve().then() which has equivalent semantics
-if (typeof queueMicrotask === 'undefined') {
+// CRITICAL FIX #8: Only polyfill if not already defined to prevent namespace pollution
+// If multiple libraries polyfill queueMicrotask, each overwrites the other's implementation
+// This can break libraries that expect native behavior or have custom polyfills
+if (typeof globalThis !== 'undefined' && typeof globalThis.queueMicrotask === 'undefined') {
   (globalThis as any).queueMicrotask = (callback: () => void) => {
     Promise.resolve().then(callback).catch(err =>
       setTimeout(() => { throw err; }, 0)

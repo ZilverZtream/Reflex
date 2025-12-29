@@ -589,6 +589,29 @@ export const CompilerMixin = {
     const [_, l, r] = match;
     const parts = l.replace(/[()]/g, '').split(',').map(s => s.trim());
     const alias = parts[0], idxAlias = parts[1];
+
+    // CRITICAL FIX #10: Scope Shadowing of Built-ins
+    // If the user aliases a variable to a built-in name (e.g., "toString"),
+    // it shadows the prototype method, causing crashes or unpredictable behavior
+    // when Reflex internals or expressions call scope.toString()
+    const reservedNames = ['toString', 'valueOf', 'toLocaleString', 'hasOwnProperty',
+                           'isPrototypeOf', 'propertyIsEnumerable', 'constructor', '__proto__'];
+    if (reservedNames.includes(alias)) {
+      console.error(
+        `Reflex: Invalid m-for alias "${alias}". This name shadows a JavaScript built-in.\n` +
+        `Reserved names: ${reservedNames.join(', ')}\n` +
+        `Use a different variable name (e.g., "${alias}Item" instead of "${alias}").`
+      );
+      return;
+    }
+    if (idxAlias && reservedNames.includes(idxAlias)) {
+      console.error(
+        `Reflex: Invalid m-for index alias "${idxAlias}". This name shadows a JavaScript built-in.\n` +
+        `Reserved names: ${reservedNames.join(', ')}\n` +
+        `Use a different variable name (e.g., "i" or "index" instead of "${idxAlias}").`
+      );
+      return;
+    }
     const listFn = this._fn(r);
     const keyIsProp = !!kAttr && /^[a-zA-Z_$][\w$]*$/.test(kAttr);
     const keyFn = (!kAttr || keyIsProp) ? null : this._fn(kAttr);
@@ -965,8 +988,12 @@ export const CompilerMixin = {
 
     const fn = this._fn(exp);
     let prev;
+    // CRITICAL SECURITY FIX: Include srcdoc and data in URL validation
+    // srcdoc (iframe) accepts raw HTML and can execute scripts
+    // data (object/embed) can point to javascript: URIs or malicious content
     const isUrlAttr = att === 'href' || att === 'src' || att === 'action' ||
-                      att === 'formaction' || att === 'xlink:href';
+                      att === 'formaction' || att === 'xlink:href' ||
+                      att === 'srcdoc' || att === 'data';
 
     // Handle kebab-case to camelCase conversion for SVG attributes
     // e.g., :view-box -> viewBox
@@ -1257,15 +1284,24 @@ export const CompilerMixin = {
   /**
    * Show/hide: m-show="expr"
    *
-   * CRITICAL FIX: !important Style Binding Defect
+   * CRITICAL FIX: !important Style Binding Defect + CSS Specificity Failure
    * Using el.style.display = 'none' cannot override CSS with !important.
    * We must use setProperty with 'important' priority to ensure m-show works
    * even when utility classes like .flex { display: flex !important; } are used.
+   *
+   * CRITICAL FIX #6: CSS Class with !important Override
+   * When showing an element that has a CSS class with display: none !important,
+   * simply removing the inline style allows the class to win.
+   * Solution: Compute the natural display value and set it with !important.
    */
   _show(el, exp, o, trans) {
     const fn = this._fn(exp);
     const d = el.style.display === 'none' ? '' : el.style.display;
     let prev, transitioning = false;
+
+    // CRITICAL FIX: Cache the computed "natural" display value for this element
+    // This is needed to override class-based !important rules when showing
+    let naturalDisplay = null;
 
     const e = this.createEffect(() => {
       try {
@@ -1276,13 +1312,19 @@ export const CompilerMixin = {
           if (trans && prev !== undefined) {
             transitioning = true;
             if (show) {
-              // Use setProperty with 'important' to override CSS !important
-              if (d) {
-                (el as HTMLElement).style.setProperty('display', d, 'important');
-              } else {
-                // Remove display property to restore default
-                (el as HTMLElement).style.removeProperty('display');
+              // CRITICAL FIX: Compute natural display to override class-based !important
+              if (!naturalDisplay) {
+                // Temporarily show element to compute its natural display value
+                const originalDisplay = el.style.display;
+                el.style.display = '';
+                const computed = getComputedStyle(el).display;
+                // If computed is 'none', element is hidden by CSS rules - use 'block' as fallback
+                naturalDisplay = (computed === 'none') ? 'block' : computed;
+                el.style.display = originalDisplay;
               }
+              // Use computed natural display with !important to override class rules
+              const displayValue = d || naturalDisplay;
+              (el as HTMLElement).style.setProperty('display', displayValue, 'important');
               this._runTrans(el, trans, 'enter', () => { transitioning = false; });
             } else {
               this._runTrans(el, trans, 'leave', () => {
@@ -1298,8 +1340,18 @@ export const CompilerMixin = {
             } else if (next) {
               (el as HTMLElement).style.setProperty('display', next, 'important');
             } else {
-              // Remove display property to restore default
-              (el as HTMLElement).style.removeProperty('display');
+              // CRITICAL FIX: Compute natural display to override class-based !important
+              if (!naturalDisplay) {
+                // Temporarily show element to compute its natural display value
+                const originalDisplay = el.style.display;
+                el.style.display = '';
+                const computed = getComputedStyle(el).display;
+                // If computed is 'none', element is hidden by CSS rules - use 'block' as fallback
+                naturalDisplay = (computed === 'none') ? 'block' : computed;
+                el.style.display = originalDisplay;
+              }
+              // Use computed natural display with !important to override class rules
+              (el as HTMLElement).style.setProperty('display', naturalDisplay, 'important');
             }
           }
           prev = next;
@@ -1345,8 +1397,34 @@ export const CompilerMixin = {
         if (isContentEditable) {
           // contenteditable elements use innerText (or innerHTML if .html modifier is used)
           const useHTML = modifiers.includes('html');
-          const next = v == null ? '' : String(v);
+          let next = v == null ? '' : String(v);
           if (useHTML) {
+            // CRITICAL SECURITY FIX: Sanitize HTML content in m-model.html to prevent XSS
+            // Without sanitization, stored XSS is possible if userBio from database contains malicious scripts
+            if (this.cfg.sanitize) {
+              const purify = this.cfg.domPurify;
+              if (purify && typeof purify.sanitize === 'function') {
+                next = purify.sanitize(next);
+              } else {
+                // Check if we're in development mode
+                const isDev = typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production';
+                if (isDev) {
+                  console.error(
+                    '⚠️ SECURITY WARNING: m-model.html is rendering unsanitized HTML in development mode!\n' +
+                    'This is DANGEROUS and should NEVER be used in production.\n' +
+                    'Configure DOMPurify: app.configure({ domPurify: DOMPurify })\n' +
+                    'Install: npm install dompurify'
+                  );
+                } else {
+                  throw new Error(
+                    'Reflex: SECURITY ERROR - m-model.html requires DOMPurify in production.\n' +
+                    'Configure it with: app.configure({ domPurify: DOMPurify })\n' +
+                    'Install: npm install dompurify\n' +
+                    'Or disable sanitization (UNSAFE): app.configure({ sanitize: false })'
+                  );
+                }
+              }
+            }
             if (el.innerHTML !== next) el.innerHTML = next;
           } else {
             if (el.innerText !== next) el.innerText = next;
@@ -1413,9 +1491,17 @@ export const CompilerMixin = {
         if (Array.isArray(currentValue)) {
           // Toggle value in array with proper type coercion
           const arr = [...currentValue];
-          // CRITICAL FIX: Use type coercion to find matching value
-          // Checkbox values are strings, but array might contain numbers
-          const idx = arr.findIndex(item => String(item) === el.value);
+          // CRITICAL FIX #7: Object Identity Failure - Don't use String() for object comparison
+          // String([{id:1}]) returns "[object Object]" for all objects, making them all match
+          // Use strict equality for objects, type coercion only for primitives
+          const idx = arr.findIndex(item => {
+            // If both are objects, use identity comparison (===)
+            if (item !== null && typeof item === 'object') {
+              return item === el.value || JSON.stringify(item) === el.value;
+            }
+            // For primitives, use type coercion to match DOM string values
+            return String(item) === el.value;
+          });
           if (el.checked && idx === -1) {
             // Try to preserve the original type if the array has a consistent type
             // If array contains numbers and value is numeric, push as number
@@ -1703,8 +1789,14 @@ export const CompilerMixin = {
       return;
     }
 
-    // Use direct binding for .stop and .self (delegation won't work for these)
-    if (mod.includes('stop') || mod.includes('self')) {
+    // CRITICAL FIX: Non-bubbling events (focus, blur, scroll on some elements)
+    // These events don't bubble, so they never reach the root listener
+    // Must use direct binding instead of delegation
+    const nonBubblingEvents = ['focus', 'blur', 'load', 'unload', 'scroll', 'mouseenter', 'mouseleave'];
+    const isNonBubbling = nonBubblingEvents.includes(nm);
+
+    // Use direct binding for .stop, .self, and non-bubbling events (delegation won't work for these)
+    if (mod.includes('stop') || mod.includes('self') || isNonBubbling) {
       const self = this;
       const handler = (e) => {
         if (mod.includes('self') && e.target !== el) return;

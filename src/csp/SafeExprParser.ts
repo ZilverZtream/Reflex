@@ -60,10 +60,13 @@ const SAFE_OBJECT = {
 // Add safe Object to SAFE_GLOBALS
 SAFE_GLOBALS['Object'] = SAFE_OBJECT;
 
-// Dangerous property names that could lead to prototype pollution
+// Dangerous property names that could lead to prototype pollution or app state leaks
 const UNSAFE_PROPS = Object.assign(Object.create(null), {
   constructor: 1, prototype: 1, __defineGetter__: 1, __defineSetter__: 1,
-  __lookupGetter__: 1, __lookupSetter__: 1
+  __lookupGetter__: 1, __lookupSetter__: 1,
+  // CRITICAL SECURITY FIX: Block access to __rfx_app to prevent app state leak
+  // Without this, templates can access the entire internal state via {{ $el.__rfx_app.s.secretToken }}
+  __rfx_app: 1
 });
 UNSAFE_PROPS['__proto__'] = 1;
 
@@ -72,7 +75,14 @@ const UNSAFE_METHODS = Object.assign(Object.create(null), {
   ...UNSAFE_OBJECT_METHODS,
   // Additional dangerous methods that could be used for sandbox escape
   eval: 1,
-  Function: 1
+  Function: 1,
+  // CRITICAL FIX #9: CSP Bypass via Method Borrowing
+  // call/apply/bind allow changing the 'this' context, which can be used to
+  // invoke methods on objects that were intended to be isolated
+  // Example: safeObj.method.apply(unsafeObj, args) bypasses isolation
+  call: 1,
+  apply: 1,
+  bind: 1
 });
 
 /**
