@@ -74,7 +74,10 @@ export const UNSAFE_PROPS = Object.assign(Object.create(null), {
   __defineGetter__: 1,
   __defineSetter__: 1,
   __lookupGetter__: 1,
-  __lookupSetter__: 1
+  __lookupSetter__: 1,
+  // CRITICAL SECURITY FIX: Block access to __rfx_app to prevent app state leak
+  // Without this, templates can access the entire internal state via {{ $el.__rfx_app.s.secretToken }}
+  __rfx_app: 1
 });
 UNSAFE_PROPS['__proto__'] = 1; // Must use bracket notation to avoid syntax error
 

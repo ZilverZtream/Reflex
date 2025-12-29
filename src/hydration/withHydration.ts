@@ -474,17 +474,24 @@ const HydrationMixin = {
     const raw = Array.isArray(list) ? this.toRaw(list) : Array.from(list);
 
     // Collect existing DOM nodes (siblings that match the template structure)
+    // CRITICAL FIX: Robust sibling collection that skips non-matching elements
+    // The previous logic broke early if it encountered a non-matching element,
+    // causing hydration to fail when server renders lists with separators or mixed content
     const existingNodes = [];
     let sibling = el;
+    let collected = 0;
+    const maxSearch = raw.length * 3; // Prevent infinite loops, search up to 3x the expected count
 
-    // First node is the template element itself
-    for (let i = 0; i < raw.length; i++) {
-      if (sibling && sibling.nodeType === 1 && sibling.tagName === el.tagName) {
-        existingNodes.push(sibling);
-        sibling = sibling.nextElementSibling;
-      } else {
-        break;
+    // Collect exactly raw.length matching siblings, skipping non-matching elements
+    while (sibling && collected < raw.length && existingNodes.length < maxSearch) {
+      if (sibling.nodeType === 1) { // Element node
+        if (sibling.tagName === el.tagName) {
+          existingNodes.push(sibling);
+          collected++;
+        }
+        // Skip non-matching elements instead of breaking
       }
+      sibling = sibling.nextElementSibling;
     }
 
     // If we have matching nodes, hydrate them

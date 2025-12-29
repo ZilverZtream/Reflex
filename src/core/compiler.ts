@@ -1109,7 +1109,34 @@ export const CompilerMixin = {
                 // CRITICAL FIX: !important Style Failure
                 // setProperty doesn't parse !important from value string
                 // We must detect it and pass as the 3rd argument
-                const strVal = String(val);
+                let strVal = String(val);
+
+                // CRITICAL SECURITY FIX: CSS Injection via url() in style properties
+                // CSS properties that accept URLs (backgroundImage, borderImage, etc.) can execute
+                // JavaScript in older browsers or when used with javascript: URIs
+                // We must validate URLs inside url() functions
+                const urlSensitiveProps = ['background-image', 'border-image', 'border-image-source',
+                  'list-style-image', 'content', 'cursor', 'mask', 'mask-image', '-webkit-mask-image'];
+
+                if (urlSensitiveProps.includes(cssProp)) {
+                  // Extract URLs from url() functions: url("...") or url('...') or url(...)
+                  const urlMatches = strVal.matchAll(/url\s*\(\s*(['"]?)([^'")\s]+)\1\s*\)/gi);
+                  for (const match of urlMatches) {
+                    const url = match[2];
+                    // Validate the URL using the same logic as href/src attributes
+                    const isSafe = RELATIVE_URL_RE.test(url) || SAFE_URL_RE.test(url);
+                    if (!isSafe) {
+                      console.warn(
+                        `Reflex: Blocked unsafe URL in style property "${key}": ${url}\n` +
+                        'Only http://, https://, mailto:, tel:, sms:, and relative URLs are allowed.\n' +
+                        'To prevent CSS injection attacks, dangerous protocols are blocked.'
+                      );
+                      // Replace the entire url() with a safe placeholder
+                      strVal = strVal.replace(match[0], 'none');
+                    }
+                  }
+                }
+
                 const hasImportant = strVal.includes('!important');
                 if (hasImportant) {
                   // Remove !important from value and pass as priority argument
@@ -1405,6 +1432,7 @@ export const CompilerMixin = {
               const purify = this.cfg.domPurify;
               if (purify && typeof purify.sanitize === 'function') {
                 next = purify.sanitize(next);
+                if (el.innerHTML !== next) el.innerHTML = next;
               } else {
                 // Check if we're in development mode
                 const isDev = typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production';
@@ -1415,6 +1443,9 @@ export const CompilerMixin = {
                     'Configure DOMPurify: app.configure({ domPurify: DOMPurify })\n' +
                     'Install: npm install dompurify'
                   );
+                  // SECURITY: Do NOT set innerHTML in dev mode without DOMPurify
+                  // Allow for development convenience but warn loudly
+                  if (el.innerHTML !== next) el.innerHTML = next;
                 } else {
                   throw new Error(
                     'Reflex: SECURITY ERROR - m-model.html requires DOMPurify in production.\n' +
@@ -1424,8 +1455,16 @@ export const CompilerMixin = {
                   );
                 }
               }
+            } else {
+              // CRITICAL: cfg.sanitize is false - NEVER allow m-model.html
+              // This prevents the XSS vulnerability where innerHTML is set without any sanitization
+              throw new Error(
+                'Reflex: SECURITY ERROR - m-model.html is disabled when sanitization is off.\n' +
+                'To use m-model.html, you MUST configure DOMPurify:\n' +
+                '  app.configure({ sanitize: true, domPurify: DOMPurify })\n' +
+                'Or use m-model (without .html) for plain text binding.'
+              );
             }
-            if (el.innerHTML !== next) el.innerHTML = next;
           } else {
             if (el.innerText !== next) el.innerText = next;
           }
