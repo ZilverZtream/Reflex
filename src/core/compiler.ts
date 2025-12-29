@@ -197,7 +197,12 @@ export function runTransition(el, name, type, done, reflex?) {
 
 /**
  * Check if an element has a strict parent that doesn't allow wrapper elements.
- * Strict parents include: table, tbody, thead, tfoot, tr, select, optgroup, ul, ol, dl, picture
+ * Strict parents include: table, tbody, thead, tfoot, tr, select, optgroup, ul, ol, dl, picture, SVG elements
+ *
+ * CRITICAL FIX #4: Broken SVG Rendering in m-for
+ * SVG elements are now treated as strict parents. Inserting non-SVG wrapper elements
+ * (like <rfx-tpl>) inside SVG breaks the render tree. Browsers may tolerate it visually
+ * via display:contents, but strict SVG parsers reject foreign XHTML elements.
  *
  * @param marker - The comment marker element to check
  * @returns true if the parent is strict and doesn't allow wrapper elements
@@ -207,10 +212,19 @@ function hasStrictParent(marker: Comment): boolean {
   if (!parent) return false;
 
   const tag = parent.tagName;
+  const tagUpper = tag.toUpperCase();
+
   // Elements that have strict child requirements
-  return tag === 'TABLE' || tag === 'TBODY' || tag === 'THEAD' || tag === 'TFOOT' ||
-         tag === 'TR' || tag === 'SELECT' || tag === 'OPTGROUP' ||
-         tag === 'UL' || tag === 'OL' || tag === 'DL' || tag === 'PICTURE';
+  const isStrictHTML = tagUpper === 'TABLE' || tagUpper === 'TBODY' || tagUpper === 'THEAD' || tagUpper === 'TFOOT' ||
+                       tagUpper === 'TR' || tagUpper === 'SELECT' || tagUpper === 'OPTGROUP' ||
+                       tagUpper === 'UL' || tagUpper === 'OL' || tagUpper === 'DL' || tagUpper === 'PICTURE';
+
+  // SVG elements that should not contain non-SVG wrapper elements
+  // Check namespace to handle both svg elements and HTML elements with same name
+  const isSVGContext = parent.namespaceURI === 'http://www.w3.org/2000/svg' &&
+                       tagUpper !== 'FOREIGNOBJECT'; // foreignObject allows HTML children
+
+  return isStrictHTML || isSVGContext;
 }
 
 /**
@@ -239,10 +253,24 @@ export const CompilerMixin = {
 
       // Handle component rendering work item
       if (item.comp) {
-        const inst = this._compNoRecurse(item.comp, item.tag, item.scope);
-        // Queue the component instance for walking
-        if (inst) {
-          stack.push({ node: inst, scope: this._scopeMap.get(inst) || item.scope });
+        // CRITICAL FIX #7: Uncaught Exceptions in Component setup
+        // Wrap component initialization in try-catch to prevent walker crash
+        // Without this, a single error in setup() crashes the entire DOM walking process
+        try {
+          const inst = this._compNoRecurse(item.comp, item.tag, item.scope);
+          // Queue the component instance for walking
+          if (inst) {
+            stack.push({ node: inst, scope: this._scopeMap.get(inst) || item.scope });
+          }
+        } catch (err) {
+          // Handle the error gracefully via global error handler
+          // This allows the rest of the DOM to render correctly
+          this._handleError(err, item.scope);
+          // Mark the component element so user can see something went wrong
+          if (item.comp && item.comp.nodeType === 1) {
+            item.comp.setAttribute('data-error', 'Component failed to initialize');
+            item.comp.textContent = `[Component error: ${item.tag}]`;
+          }
         }
         continue;
       }
@@ -1109,6 +1137,9 @@ export const CompilerMixin = {
         if (isUrlAttr && v != null && typeof v === 'string') {
           // Decode HTML entities by using a temporary DOM element
           // This catches ALL entity forms: &#97; &#x61; &amp; etc.
+          // CRITICAL FIX #5: SSR Attribute Binding XSS Bypass
+          // Browsers decode entities even without semicolons: &#106avascript: -> javascript:
+          // The SSR fallback must match browser behavior to prevent bypasses
           let decodedUrl = v;
           try {
             // Create a temporary element to decode entities
@@ -1117,14 +1148,24 @@ export const CompilerMixin = {
             decodedUrl = decoder.value;
           } catch (e) {
             // If DOM is not available (SSR), do manual decoding of common entities
+            // CRITICAL: Make semicolon optional (;?) to match browser lenient parsing
+            // Browsers decode &#106avascript: as javascript: even without semicolon
             decodedUrl = v
-              .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-              .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+              .replace(/&#x([0-9a-fA-F]+);?/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+              .replace(/&#(\d+);?/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
               .replace(/&amp;/g, '&')
               .replace(/&lt;/g, '<')
               .replace(/&gt;/g, '>')
               .replace(/&quot;/g, '"')
-              .replace(/&#39;/g, "'");
+              .replace(/&#39;/g, "'")
+              .replace(/&apos;/g, "'")
+              .replace(/&nbsp;/g, '\u00A0')
+              // Decode more named entities to match browser behavior
+              .replace(/&colon;/g, ':')
+              .replace(/&sol;/g, '/')
+              .replace(/&quest;/g, '?')
+              .replace(/&equals;/g, '=')
+              .replace(/&num;/g, '#');
           }
 
           // Check the DECODED URL against our allowlist
@@ -1734,7 +1775,9 @@ export const CompilerMixin = {
           if (allOptions.length > 0) {
             shouldCoerceToNumber = allOptions.every(opt => {
               const val = opt.value;
-              return val !== '' && !isNaN(Number(val));
+              // CRITICAL FIX #8: Whitespace Coercion - check trimmed value
+              const trimmed = val.trim();
+              return trimmed !== '' && !isNaN(Number(val));
             });
           }
         }
@@ -1750,8 +1793,17 @@ export const CompilerMixin = {
         }
 
         // Coerce to numbers if the original array contained numbers or all options are numeric
+        // CRITICAL FIX #8: Data Integrity - Whitespace Coercion to Zero
+        // Number(" ") returns 0, which passes !isNaN check but corrupts data
+        // Check for empty/whitespace strings BEFORE numeric conversion
         if (shouldCoerceToNumber) {
-          v = selectedValues.map(val => !isNaN(Number(val)) ? Number(val) : val);
+          v = selectedValues.map(val => {
+            const trimmed = val.trim();
+            // Empty or whitespace-only values should remain as strings, not become 0
+            if (trimmed === '') return val;
+            // Valid numeric conversion
+            return !isNaN(Number(val)) ? Number(val) : val;
+          });
         } else {
           v = selectedValues;
         }
