@@ -129,7 +129,16 @@ export const ArrayHandler: ProxyHandler<any[]> = {
     const ok = Reflect.set(o, k, raw, rec);
     if (!ok) return false;
 
-    meta.v++; // Increment version on mutation
+    // CRITICAL FIX: Version Counter - Only increment if not in a batch
+    // When array methods (push, splice, etc.) are called, they:
+    // 1. Get wrapped by wrapArrayMethod which starts a batch (_b++)
+    // 2. Call native method which triggers this set trap
+    // 3. wrapArrayMethod increments version after method completes
+    // Without this check, version increments twice: once here, once in wrapper
+    // Direct array[index] = value sets are not batched, so increment normally
+    if (engine._b === 0) {
+      meta.v++; // Increment version on mutation
+    }
 
     // CRITICAL FIX #4: O(N) Array Truncation DoS - Batch Notifications
     // When truncating large arrays (e.g., arr.length = 0 on 1M item array),
@@ -278,7 +287,11 @@ export const ObjectHandler: ProxyHandler<ReactiveTarget> = {
     const ok = Reflect.set(o, k, raw, rec);
     if (!ok) return false;
 
-    meta.v++; // Increment version on mutation
+    // CRITICAL FIX: Version Counter - Only increment if not in a batch
+    // Same logic as ArrayHandler: avoid double increment when in batched operations
+    if (engine._b === 0) {
+      meta.v++; // Increment version on mutation
+    }
     engine.triggerEffects(meta, k);
     if (!had) engine.triggerEffects(meta, ITERATE);
     return true;
@@ -442,6 +455,17 @@ export const ReactivityMixin = {
     if (t === null || typeof t !== 'object') return t;
     if ((t as ReactiveTarget)[SKIP]) return t;
     if (t instanceof Node) return t;
+    // CRITICAL FIX: Skip TypedArrays and Buffers
+    // TypedArray methods expect 'this' to be an actual TypedArray, not a Proxy
+    // Wrapping them causes: "Method get TypedArray.prototype.length called on incompatible receiver"
+    // ArrayBuffer.isView() covers all TypedArrays: Uint8Array, Int16Array, Float32Array, etc., and DataView
+    if (ArrayBuffer.isView(t)) return t;
+    // CRITICAL FIX: Skip File, Blob, and FileList objects
+    // These are browser-native objects that break when wrapped in Proxies
+    // File and Blob have special internal slots that can't be proxied
+    if (typeof File !== 'undefined' && t instanceof File) return t;
+    if (typeof Blob !== 'undefined' && t instanceof Blob) return t;
+    if (typeof FileList !== 'undefined' && t instanceof FileList) return t;
 
     // Check for OWN META property to avoid inheriting from prototype chain
     const existing = Object.prototype.hasOwnProperty.call(t, META)

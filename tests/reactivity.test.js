@@ -167,10 +167,13 @@ describe('Reactivity', () => {
       const fn = vi.fn(s => s.count * 2);
       const app = new Reflex({ count: 2 });
       const double = app.computed(fn);
-      // Initially called once for eager eval
-      expect(fn).toHaveBeenCalledTimes(1);
-      // Accessing value should not re-run if not dirty
+      // CRITICAL FIX: Truly lazy - not called until accessed
+      // This prevents expensive computations from running during initialization
+      expect(fn).toHaveBeenCalledTimes(0);
+      // First access should evaluate
       double.value;
+      expect(fn).toHaveBeenCalledTimes(1);
+      // Second access should use cached value (not dirty)
       double.value;
       expect(fn).toHaveBeenCalledTimes(1);
     });
