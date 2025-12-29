@@ -79,6 +79,9 @@ export function runTransition(el, name, type, done, reflex?) {
   // CRITICAL FIX: Track transition completion to prevent early cutoff
   // transitionend fires for EVERY property (opacity, transform, etc.)
   // We must wait for all properties to finish, not just the first one
+  // CRITICAL FIX: Use performance.now() instead of Date.now() for monotonic time
+  // Date.now() can jump backwards/forwards due to NTP sync, causing transitions to hang/skip
+  // performance.now() is monotonic and unaffected by system time adjustments
   let expectedEndTime = 0;
 
   // Cleanup function to cancel transition
@@ -130,7 +133,8 @@ export function runTransition(el, name, type, done, reflex?) {
     // CRITICAL FIX: Only complete if we've reached the expected end time
     // This prevents early completion when multiple properties are transitioning
     // Example: opacity 0.2s, transform 1s - don't complete at 0.2s!
-    const now = Date.now();
+    // CRITICAL FIX: Use performance.now() for monotonic time (not affected by system clock changes)
+    const now = performance.now();
     if (now < expectedEndTime) {
       // Not all properties have finished yet, wait for more events
       return;
@@ -174,7 +178,8 @@ export function runTransition(el, name, type, done, reflex?) {
       const timeout = (duration + delay) * 1000 + 50; // Add 50ms buffer
 
       // Set expected end time for transition completion check
-      expectedEndTime = Date.now() + (duration + delay) * 1000;
+      // CRITICAL FIX: Use performance.now() for monotonic time (not affected by system clock changes)
+      expectedEndTime = performance.now() + (duration + delay) * 1000;
 
       if (timeout > 50) {
         timeoutId = setTimeout(() => {
@@ -715,6 +720,12 @@ export const CompilerMixin = {
       // CRITICAL: Use Map (not Set) to track duplicate counters for stable keys
       const seenKeys = new Map();
 
+      // CRITICAL FIX: Stack Overflow Prevention in m-for
+      // Collect nodes that need walking instead of calling _w immediately
+      // This prevents recursive stack buildup for large lists with nested structure
+      // After reconciliation, we process all walks iteratively
+      const nodesToWalk = [];
+
       // Configure reconciliation with Reflex-specific logic
       const config = {
         getKey: (item, index, scope) => {
@@ -780,7 +791,8 @@ export const CompilerMixin = {
               const singleRoot = elementNodes[0].cloneNode(true) as Element;
               this._scopeMap.set(singleRoot, scope);
               this._bnd(singleRoot, scope);
-              this._w(singleRoot, scope);
+              // CRITICAL FIX: Defer _w call to prevent stack overflow
+              nodesToWalk.push({ node: singleRoot, scope });
               return singleRoot;
             } else if (isStrictParent) {
               // CRITICAL FIX: For strict parents, NEVER use wrapper elements
@@ -804,11 +816,12 @@ export const CompilerMixin = {
 
               this._scopeMap.set(container, scope);
 
-              // Process bindings and walk each child element
+              // Process bindings and defer walk to prevent stack overflow
               nodes.forEach(child => {
                 if (child.nodeType === 1) {
                   this._bnd(child as Element, scope);
-                  this._w(child as Element, scope);
+                  // CRITICAL FIX: Defer _w call to prevent stack overflow
+                  nodesToWalk.push({ node: child as Element, scope });
                 }
               });
 
@@ -829,12 +842,13 @@ export const CompilerMixin = {
 
               this._scopeMap.set(wrapper, scope);
 
-              // Process bindings and walk each child element
+              // Process bindings and defer walk to prevent stack overflow
               const children = Array.from(wrapper.childNodes);
               children.forEach(child => {
                 if (child.nodeType === 1) {
                   this._bnd(child as Element, scope);
-                  this._w(child as Element, scope);
+                  // CRITICAL FIX: Defer _w call to prevent stack overflow
+                  nodesToWalk.push({ node: child as Element, scope });
                 }
               });
 
@@ -872,7 +886,8 @@ export const CompilerMixin = {
             } else {
               this._scopeMap.set(node, scope);
               this._bnd(node, scope);
-              this._w(node, scope);
+              // CRITICAL FIX: Defer _w call to prevent stack overflow
+              nodesToWalk.push({ node, scope });
               return node;
             }
           }
@@ -969,6 +984,13 @@ export const CompilerMixin = {
       rows = result.rows;
       oldKeys = result.keys;
 
+      // CRITICAL FIX: Process deferred walks iteratively to prevent stack overflow
+      // All nodes created during reconciliation are now walked in a flat loop
+      // This prevents O(N) stack depth for large lists with nested structure
+      for (const { node, scope } of nodesToWalk) {
+        this._w(node, scope);
+      }
+
       // CRITICAL FIX #4: m-ref Array Order Desync
       // After DOM reconciliation reorders nodes, m-ref arrays must be updated to match
       // Without this fix, refs[0] points to the wrong element after sorting
@@ -999,14 +1021,19 @@ export const CompilerMixin = {
         nodeList.sort((a, b) => a.index - b.index);
         const orderedNodes = nodeList.map(item => item.node);
 
-        // Update both this._refs and this.s (if it exists)
+        // CRITICAL FIX: Do NOT clobber user state arrays
+        // Only update this._refs (internal reference storage)
+        // Modifying this.s[refName] destroys custom properties and causes data loss
+        // Example: app.s.myRefs.customProp = 'meta' would be lost
+        // Users should manage reactive state explicitly if needed
         this._refs[refName] = orderedNodes;
-        if (refName in this.s && Array.isArray(this.s[refName])) {
-          // Update the reactive state array to match
-          const raw = this.toRaw(this.s[refName]);
-          raw.length = 0;
-          raw.push(...orderedNodes);
-        }
+
+        // REMOVED: Automatic state array clobbering
+        // if (refName in this.s && Array.isArray(this.s[refName])) {
+        //   const raw = this.toRaw(this.s[refName]);
+        //   raw.length = 0;
+        //   raw.push(...orderedNodes);
+        // }
       });
     });
 
@@ -1093,12 +1120,14 @@ export const CompilerMixin = {
 
     const fn = this._fn(exp);
     let prev;
-    // CRITICAL SECURITY FIX: Include srcdoc and data in URL validation
-    // srcdoc (iframe) accepts raw HTML and can execute scripts
+    // CRITICAL SECURITY FIX: Validate URL attributes
+    // CRITICAL FIX: Remove srcdoc from URL validation - it contains HTML, not URLs
+    // srcdoc requires HTML sanitization (DOMPurify), not URL validation
     // data (object/embed) can point to javascript: URIs or malicious content
     const isUrlAttr = att === 'href' || att === 'src' || att === 'action' ||
-                      att === 'formaction' || att === 'xlink:href' ||
-                      att === 'srcdoc' || att === 'data';
+                      att === 'formaction' || att === 'xlink:href' || att === 'data';
+    // srcdoc requires separate HTML sanitization
+    const isSrcdoc = att === 'srcdoc';
 
     // Handle kebab-case to camelCase conversion for SVG attributes
     // e.g., :view-box -> viewBox
@@ -1173,6 +1202,36 @@ export const CompilerMixin = {
           if (!isSafe) {
             console.warn('Reflex: Blocked unsafe URL protocol in', att + ':', v, '(decoded:', decodedUrl + ')');
             v = 'about:blank';
+          }
+        }
+
+        // CRITICAL FIX: srcdoc validation - requires HTML sanitization, not URL validation
+        // srcdoc attribute contains HTML content that can execute scripts
+        // Apply DOMPurify sanitization similar to m-html
+        if (isSrcdoc && v != null && typeof v === 'string') {
+          const purify = this.cfg.domPurify;
+          if (purify && typeof purify.sanitize === 'function') {
+            v = purify.sanitize(v);
+          } else if (Object.prototype.hasOwnProperty.call(this.cfg, 'sanitize') && this.cfg.sanitize === false) {
+            // Explicit opt-out - warn but allow (developer responsibility)
+            console.warn(
+              'Reflex Security Warning: srcdoc binding without sanitization.\n' +
+              'This can lead to XSS if srcdoc contains user-provided content.\n' +
+              'Configure DOMPurify: app.configure({ domPurify: DOMPurify })'
+            );
+          } else {
+            // Default behavior: require DOMPurify for srcdoc (fail closed)
+            throw new Error(
+              'Reflex SECURITY ERROR: srcdoc attribute requires DOMPurify for safe HTML.\n' +
+              'srcdoc accepts HTML content that can execute scripts.\n\n' +
+              'Solution:\n' +
+              '  1. Install DOMPurify: npm install dompurify\n' +
+              '  2. Configure: app.configure({ domPurify: DOMPurify })\n' +
+              '  3. Import: import DOMPurify from \'dompurify\'\n\n' +
+              'Alternative (for trusted HTML only):\n' +
+              '  - Explicitly opt-out: { sanitize: false } (UNSAFE)\n\n' +
+              'Do NOT use srcdoc with user-provided content without DOMPurify.'
+            );
           }
         }
 
@@ -1365,7 +1424,10 @@ export const CompilerMixin = {
         const purify = self.cfg.domPurify;
         if (purify && typeof purify.sanitize === 'function') {
           html = purify.sanitize(html);
-        } else if (self.cfg.sanitize === false) {
+        } else if (Object.prototype.hasOwnProperty.call(self.cfg, 'sanitize') && self.cfg.sanitize === false) {
+          // CRITICAL SECURITY FIX: Prototype Pollution Prevention
+          // Use hasOwnProperty to ensure 'sanitize' is a direct property of cfg, not inherited
+          // This prevents bypass via: Object.prototype.sanitize = false
           // Explicit opt-out of sanitization (UNSAFE - developer takes responsibility)
           // Only warn once per instance to avoid console spam
           if (!self._htmlWarningShown) {
@@ -1553,10 +1615,15 @@ export const CompilerMixin = {
     // For file inputs, we can only read .files, not set .value
     const isFile = type === 'file';
     if (isFile) {
-      console.warn(
-        'Reflex: m-model is not supported on file inputs (security restriction).\n' +
-        'Use @change="handler" and access el.files instead.'
-      );
+      // CRITICAL FIX: Prevent warning spam by only logging once per element
+      // Use WeakSet to track which elements have been warned
+      if (!this._fileInputsWarned.has(el)) {
+        this._fileInputsWarned.add(el);
+        console.warn(
+          'Reflex: m-model is not supported on file inputs (security restriction).\n' +
+          'Use @change="handler" and access el.files instead.'
+        );
+      }
       return; // Skip m-model binding for file inputs
     }
     // CRITICAL FIX: Unsupported contenteditable
@@ -1577,7 +1644,10 @@ export const CompilerMixin = {
             if (purify && typeof purify.sanitize === 'function') {
               next = purify.sanitize(next);
               if (el.innerHTML !== next) el.innerHTML = next;
-            } else if (this.cfg.sanitize === false) {
+            } else if (Object.prototype.hasOwnProperty.call(this.cfg, 'sanitize') && this.cfg.sanitize === false) {
+              // CRITICAL SECURITY FIX: Prototype Pollution Prevention
+              // Use hasOwnProperty to ensure 'sanitize' is a direct property of cfg, not inherited
+              // This prevents bypass via: Object.prototype.sanitize = false
               // Explicit opt-out - NEVER use with user content
               console.error(
                 'Reflex SECURITY ERROR: m-model.html used without sanitization.\n' +
@@ -1947,7 +2017,8 @@ export const CompilerMixin = {
       let last = 0;
       timers.throttle = null;
       fn = (s, c, e) => {
-        const now = Date.now();
+        // CRITICAL FIX: Use performance.now() for monotonic time (not affected by system clock changes)
+        const now = performance.now();
         if (now - last >= delay) {
           last = now;
           origFn(s, c, e);

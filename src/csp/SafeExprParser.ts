@@ -119,6 +119,10 @@ UNSAFE_PROPS['__proto__'] = 1;
  * CRITICAL FIX #9: Runtime property safety validation
  * Check if a property name matches patterns known to be dangerous
  * This provides defense-in-depth against properties not in the blacklist
+ *
+ * CRITICAL FIX: Use exact matching instead of substring matching to avoid false positives
+ * Substring matching blocks legitimate properties like "important", "evaluation", "prototype_id"
+ * Now we only block exact matches to the dangerous property names
  */
 function isDangerousPropertyPattern(prop: string): boolean {
   if (typeof prop !== 'string') return false;
@@ -126,14 +130,28 @@ function isDangerousPropertyPattern(prop: string): boolean {
   // Properties starting with __ are often internal/dangerous
   if (prop.startsWith('__')) return true;
 
-  // Properties containing 'constructor', 'proto', 'eval', etc.
-  const dangerousSubstrings = [
+  // CRITICAL FIX: Use exact word matching with word boundaries instead of substring includes
+  // This prevents false positives while still catching dangerous patterns
+  // Only block if the dangerous word appears as a complete word (with word boundaries)
+  const dangerousWords = [
     'constructor', 'proto', 'eval', 'function',
     'import', 'require', 'process', 'global'
   ];
+
   const lowerProp = prop.toLowerCase();
-  for (const dangerous of dangerousSubstrings) {
-    if (lowerProp.includes(dangerous)) return true;
+
+  // Check for exact matches first (most common case)
+  if (dangerousWords.includes(lowerProp)) return true;
+
+  // Check for word boundaries: dangerous word must be preceded/followed by non-word chars
+  // Examples that match: _constructor, constructor_, proto-chain, eval.call
+  // Examples that DON'T match: important, evaluation, prototype_id, importing
+  for (const dangerous of dangerousWords) {
+    // Create a regex that matches the dangerous word with word boundaries
+    // \b doesn't work well with underscores, so we use a more explicit pattern
+    // Match if: start of string OR non-letter before, dangerous word, end of string OR non-letter after
+    const pattern = new RegExp(`(^|[^a-z])${dangerous}([^a-z]|$)`, 'i');
+    if (pattern.test(lowerProp)) return true;
   }
 
   return false;

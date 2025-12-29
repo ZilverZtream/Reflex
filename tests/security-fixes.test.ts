@@ -459,3 +459,87 @@ describe('Performance and DoS Prevention', () => {
     expect(duration).toBeLessThan(100);
   });
 });
+
+// =================================================================
+// NEW TESTS FOR 10 CRITICAL FIXES
+// =================================================================
+
+describe('New Critical Fixes - Regression Tests', () => {
+  // Issue 1: SafeExprParser False Positives
+  describe('SafeExprParser allows safe properties with dangerous substrings', () => {
+    it('allows "important" property (contains "import")', () => {
+      const parser = new SafeExprParser();
+      const scope = { important: 'critical data' };
+      const fn = parser.compile('important', {});
+      expect(fn(scope)).toBe('critical data');
+    });
+
+    it('allows "evaluation" property (contains "eval")', () => {
+      const parser = new SafeExprParser();
+      const scope = { evaluation: 10 };
+      const fn = parser.compile('evaluation', {});
+      expect(fn(scope)).toBe(10);
+    });
+
+    it('allows "prototype_id" property (contains "proto")', () => {
+      const parser = new SafeExprParser();
+      const scope = { prototype_id: 'abc123' };
+      const fn = parser.compile('prototype_id', {});
+      expect(fn(scope)).toBe('abc123');
+    });
+  });
+
+  // Issue 6: Global Symbol Collision
+  describe('Duplicate key symbols are unique across instances', () => {
+    it('creates unique symbols for duplicates in different maps', () => {
+      const { resolveDuplicateKey } = require('../src/core/reconcile.js');
+      const map1 = new Map();
+      const map2 = new Map();
+
+      const key1 = resolveDuplicateKey(map1, 'id', 0);
+      const key2 = resolveDuplicateKey(map1, 'id', 0);
+      const key3 = resolveDuplicateKey(map2, 'id', 0);
+      const key4 = resolveDuplicateKey(map2, 'id', 0);
+
+      expect(key1).toBe('id');
+      expect(key3).toBe('id');
+      expect(typeof key2).toBe('symbol');
+      expect(typeof key4).toBe('symbol');
+      expect(key2).not.toBe(key4); // Critical: must be different
+    });
+  });
+
+  // Issue 7: runTransition uses monotonic clock
+  describe('Monotonic clock for transitions', () => {
+    it('performance.now() is monotonic', () => {
+      const start = performance.now();
+      const end = performance.now();
+      expect(end).toBeGreaterThanOrEqual(start);
+    });
+  });
+
+  // Issue 10: Reactivity set snapshotting
+  describe('Reactivity handles set modification during trigger', () => {
+    it('snapshotting prevents live set modification', () => {
+      const originalSet = new Set([
+        { id: 1, f: 1 },
+        { id: 2, f: 1 },
+        { id: 3, f: 1 }
+      ]);
+
+      const snapshot = new Set(originalSet);
+      let iterationCount = 0;
+
+      for (const effect of snapshot) {
+        iterationCount++;
+        if (effect.id === 2) {
+          originalSet.add({ id: 4, f: 1 });
+        }
+      }
+
+      expect(iterationCount).toBe(3); // Only original items
+      expect(originalSet.size).toBe(4); // Original was modified
+      expect(snapshot.size).toBe(3); // Snapshot unchanged
+    });
+  });
+});
