@@ -161,6 +161,19 @@ export function runTransition(el: Element, name: string, type: 'enter' | 'leave'
     requestAnimationFrame(() => {
       if (cleaned) return; // Transition was cancelled during first frame
 
+      // CRITICAL SECURITY FIX #6: m-trans Race Condition (Detached Elements)
+      //
+      // VULNERABILITY: If element is removed between transition start and RAF callback,
+      // getComputedStyle() on a detached node returns empty object or throws
+      // parseFloat(empty) returns NaN, leading to timeout = NaN
+      //
+      // SOLUTION: Check if element is still connected before calling getComputedStyle
+      if (!el.isConnected) {
+        cleanup();
+        if (done && !transitionCallback.cancelled) done();
+        return;
+      }
+
       el.classList.remove(from);
       el.classList.add(to);
 
@@ -355,81 +368,27 @@ export const DOMRenderer: IRendererAdapter = {
   },
 
   setInnerHTML(node: Element, html: string): void {
-    // CRITICAL SECURITY WARNING: Unsanitized HTML injection is a severe XSS vector
-    // This method should NEVER be used with user-provided content without sanitization
+    // CRITICAL SECURITY FIX #1: Regex-based HTML Sanitization Bypass
+    //
+    // VULNERABILITY: Regex cannot reliably parse HTML's context-free grammar
+    // Previous implementation used regex deny-lists which are fundamentally insecure:
+    // - Obfuscation bypass: <svg/onload=alert(1)> (using slash instead of space)
+    // - Mutation XSS: <math><mtext><table><mglyph><style>...</style>
+    // - SVG animation: <animate onbegin=alert(1) attributeName=x dur=1s>
+    // - Form actions: <button form="t" formaction="javascript:alert(1)">
+    //
+    // SOLUTION: Removed regex checks entirely. Sanitization must happen at higher level
+    // using DOMPurify in the compiler's _html method before calling this.
+    //
+    // WARNING: This method is UNSAFE and should only be called with pre-sanitized HTML
+    // The compiler enforces DOMPurify usage - see compiler.ts _html method
+
     if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
       console.warn(
-        'Reflex Security Warning: setInnerHTML() is being used without sanitization.\n' +
-        'This is a critical XSS vulnerability if the HTML contains user-provided content.\n' +
-        'Consider using:\n' +
-        '  1. Text content instead (setTextContent)\n' +
-        '  2. A sanitizer like DOMPurify: DOMPurify.sanitize(html)\n' +
-        '  3. Trusted Types API for policy enforcement\n' +
+        'Reflex Security Warning: setInnerHTML() called. Ensure HTML is sanitized.\n' +
+        'This method does NOT sanitize HTML. Use DOMPurify before calling.\n' +
         'Element:', node.tagName
       );
-    }
-
-    // SECURITY: Check for obviously dangerous patterns (defense-in-depth)
-    // This is NOT a complete solution - use a proper sanitizer for production
-    // CRITICAL FIX #2: Enhanced XSS Detection
-    // Previous regex only caught specific patterns like <script and javascript:
-    // Attackers can bypass with: <svg onload=...>, <img onerror=...>, <body onload=...>
-    // New patterns catch ALL event handlers on ANY element, plus common XSS vectors
-    //
-    // CRITICAL FIX #1: Tag Malformation - <script/src="...">
-    // HTML5 allows / as a separator, so <script/src="data:..."> bypasses /<script[\s>]/
-    // Updated regex to /<script[\s/>]/i to catch this pattern
-    //
-    // CRITICAL FIX #2: HTML Entity Decoding
-    // Decode HTML entities before checking to prevent &#106;avascript: bypass
-    const decodeEntities = (str: string): string => {
-      const textarea = document.createElement('textarea');
-      textarea.innerHTML = str;
-      return textarea.textContent || '';
-    };
-    const decodedHtml = decodeEntities(html);
-
-    const dangerousPatterns = [
-      /<script[\s/>]/i,             // Script tags (FIXED: added / to catch <script/src=...>)
-      /javascript:/i,               // javascript: protocol
-      /data:text\/html/i,           // data: URLs with HTML
-      /on\w+\s*=/i,                 // Event handlers: onclick=, onload=, onerror=, etc.
-      /<iframe[\s/>]/i,             // iframe tags
-      /<object[\s/>]/i,             // object tags
-      /<embed[\s/>]/i,              // embed tags
-      /<meta[\s/>]/i,               // meta tags (can redirect)
-      /<link[\s/>]/i,               // link tags (can load external resources)
-      /<svg[^>]*on\w+/i,            // SVG with event handlers
-      /<img[^>]*on\w+/i,            // img with event handlers
-      /<img[^>]*src\s*=\s*["']?\s*x/i, // Common XSS test pattern: <img src=x onerror=...>
-      /<body[^>]*on\w+/i,           // body with event handlers
-      /<form[^>]*action\s*=\s*["']?javascript:/i,  // form with javascript: action
-      /<input[^>]*on\w+/i,          // input with event handlers
-      /<button[^>]*formaction/i,    // CRITICAL FIX #3: button with formaction attribute
-      /<input[^>]*formaction/i,     // CRITICAL FIX #3: input with formaction attribute
-      /<svg[^>]*href\s*=\s*["']?javascript:/i,     // SVG with javascript: in href
-      /<use[^>]*href\s*=\s*["']?javascript:/i,     // SVG use with javascript: in href
-      /<animate[^>]*on\w+/i,        // SVG animate with event handlers
-      /<set[^>]*on\w+/i,            // SVG set with event handlers
-      /<style[^>]*>.*@import/i,     // style with @import (can load malicious CSS)
-      /expression\s*\(/i,           // CSS expression() (IE legacy XSS)
-      /-moz-binding/i,              // XBL binding (Firefox legacy XSS)
-      /behavior\s*:/i               // IE behavior (legacy XSS)
-    ];
-
-    // CRITICAL FIX: Test both original and decoded HTML to catch entity-encoded attacks
-    for (const pattern of dangerousPatterns) {
-      if (pattern.test(html) || pattern.test(decodedHtml)) {
-        console.error(
-          'Reflex Security: BLOCKED dangerous HTML content in setInnerHTML()\n' +
-          `Pattern detected: ${pattern}\n` +
-          'This content was blocked to prevent XSS attacks.\n' +
-          'If this is trusted content, use a sanitizer to mark it as safe.'
-        );
-        // Set safe error message instead
-        node.textContent = '[Content blocked for security reasons]';
-        return;
-      }
     }
 
     node.innerHTML = html;

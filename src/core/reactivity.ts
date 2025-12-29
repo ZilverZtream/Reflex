@@ -55,6 +55,7 @@ interface ReactiveMeta {
   _am: Record<string | symbol, (...args: any[]) => any> | null;
   engine: ReactivityEngine;
   v: number; // Version counter for structural sharing in deep clones
+  _silent?: boolean; // PERFORMANCE FIX #2: Flag to skip reactivity during batch array operations
   [key: string | symbol]: any;
 }
 
@@ -105,6 +106,14 @@ export const ArrayHandler: ProxyHandler<any[]> = {
     // Security: Block setting dangerous properties
     if (typeof k === 'string' && UNSAFE_PROPS[k]) {
       throw new Error(`Reflex: Cannot set unsafe property '${k}'`);
+    }
+
+    // CRITICAL PERFORMANCE FIX #2: Skip reactivity if in silent mode
+    // When wrapArrayMethod is executing (e.g., shift, splice), meta._silent is true
+    // This prevents O(N) set trap calls from freezing the main thread
+    if (meta._silent) {
+      const raw = engine.toRaw(v);
+      return Reflect.set(o, k, raw, rec);
     }
 
     const raw = engine.toRaw(v);
@@ -637,21 +646,48 @@ export const ReactivityMixin = {
       self._b++;
       let res;
       try {
-        // CRITICAL FIX #7: Raw Target Exposure in Array Methods
-        // Check if the target has a custom implementation of this method
-        // For custom array classes, use the instance method (maintains reactivity)
-        // For standard arrays, use Array.prototype (prevents prototype pollution)
-        const hasCustomMethod = t.constructor !== Array &&
-                                t.constructor.prototype &&
-                                t.constructor.prototype[m] !== Array.prototype[m];
+        // CRITICAL PERFORMANCE FIX #2: Reactive Array O(N) Freeze (DoS)
+        //
+        // VULNERABILITY: Operations like shift() or splice(0,1) on large arrays (100k+ items)
+        // trigger the set trap for EVERY shifted element, causing synchronous main-thread freeze
+        // Example: arr.shift() with 100k items triggers 99,999 set trap calls
+        //
+        // SOLUTION: Temporarily disable the set trap during the native method execution
+        // Set a flag on meta to signal the set trap to skip reactivity during batch operations
+        // After the method completes, manually trigger only ITERATE and length updates once
+        //
+        // This reduces complexity from O(N) set trap calls to O(1) batch update
 
-        if (hasCustomMethod) {
-          // Custom array class - call the method on the proxy to maintain reactivity
-          // The proxy is stored in meta.p
-          res = meta.p[m](...args);
-        } else {
-          // Standard array - use Array.prototype explicitly for security
-          res = Array.prototype[m].apply(t, args);
+        // Mark meta as in "silent mode" to skip set trap reactivity
+        const wasSilent = meta._silent;
+        meta._silent = true;
+
+        try {
+          // CRITICAL SECURITY FIX #5: wrapArrayMethod Trusts Raw Constructor
+          //
+          // VULNERABILITY: Malicious objects can spoof constructor property
+          // Example: { 0:1, length:1, constructor: { prototype: { push: () => alert('hack') } } }
+          // Never trust t.constructor from user-provided objects
+          //
+          // SOLUTION: Use instanceof check instead of constructor property comparison
+          // instanceof checks the actual prototype chain, which cannot be easily spoofed
+          const hasCustomMethod = t instanceof Array &&
+                                  t.constructor !== Array &&
+                                  t.constructor.prototype &&
+                                  typeof t.constructor.prototype[m] === 'function' &&
+                                  t.constructor.prototype[m] !== Array.prototype[m];
+
+          if (hasCustomMethod) {
+            // Custom array class - call the method on the proxy to maintain reactivity
+            // The proxy is stored in meta.p
+            res = meta.p[m](...args);
+          } else {
+            // Standard array - use Array.prototype explicitly for security
+            res = Array.prototype[m].apply(t, args);
+          }
+        } finally {
+          // Restore silent mode state
+          meta._silent = wasSilent;
         }
 
         meta.v++; // Increment version on array mutation
@@ -660,6 +696,9 @@ export const ReactivityMixin = {
         ks.add(ITERATE);
         ks.add('length');
 
+        // OPTIMIZATION: Only trigger indices that have active watchers
+        // For reordering methods (shift, unshift, splice, sort, reverse)
+        // we only need to notify tracked indices, not all indices
         if (meta.ai && REORDER_METHODS[m]) {
           for (const [k, depSet] of meta.d) {
             if (!depSet.size) { meta.d.delete(k); continue; }
@@ -691,6 +730,16 @@ export const ReactivityMixin = {
       return meta[m] = function() {
         self.trackDependency(meta, ITERATE);
         const it = fn.call(t);
+
+        // CRITICAL PERFORMANCE FIX #7: Map/Set Iterator Allocation Storm
+        //
+        // VULNERABILITY: Creating new [k,v] array for every iteration on large Maps (100k+ items)
+        // causes massive GC pressure and can freeze UI with Major GC pause
+        //
+        // SOLUTION: Reuse the same array object for entries iteration
+        // This reduces allocations from O(N) to O(1)
+        let reusableArray = isMap && (m === 'entries' || m === Symbol.iterator) ? [null, null] : null;
+
         return {
           [Symbol.iterator]() { return this; },
           next() {
@@ -704,10 +753,14 @@ export const ReactivityMixin = {
                 const val = n.value;
                 return { done: false, value: (val !== null && typeof val === 'object') ? self._wrap(val) : val };
               }
+              // For entries/default iteration, reuse the array
               const [k, v] = n.value;
               const wrappedK = (k !== null && typeof k === 'object') ? self._wrap(k) : k;
               const wrappedV = (v !== null && typeof v === 'object') ? self._wrap(v) : v;
-              return { done: false, value: [wrappedK, wrappedV] };
+              // Reuse the same array instance, just update the values
+              reusableArray[0] = wrappedK;
+              reusableArray[1] = wrappedV;
+              return { done: false, value: reusableArray };
             }
             const val = n.value;
             return { done: false, value: (val !== null && typeof val === 'object') ? self._wrap(val) : val };

@@ -682,7 +682,43 @@ export class SafeExprParser {
         }
         if (typeof callee !== 'function') return undefined;
         const args = node.arguments.map(a => this._evaluate(a, state, context, $event, $el, reflex));
-        return callee.apply(thisArg, args);
+
+        // CRITICAL SECURITY FIX #3: SafeExprParser Context Leak (this binding)
+        //
+        // VULNERABILITY: Functions can return `this` to leak the state proxy
+        // Example: state = { getSelf: function() { return this; } }
+        //          Template: {{ getSelf().constructor.constructor('return process')() }}
+        //
+        // SOLUTION: Wrap the result in a membrane that blocks dangerous properties
+        // This prevents access to constructor, __proto__, and other escape vectors
+        const result = callee.apply(thisArg, args);
+
+        // If result is an object, wrap it in a protective membrane
+        if (result !== null && typeof result === 'object') {
+          return new Proxy(result, {
+            get(target, key) {
+              // Block access to dangerous properties on returned objects
+              if (typeof key === 'string' && (UNSAFE_PROPS[key] || isDangerousPropertyPattern(key))) {
+                if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+                  console.warn('Reflex Security: Blocked access to unsafe property on function return value:', key);
+                }
+                return undefined;
+              }
+              const value = target[key];
+              // Recursively wrap returned objects
+              if (value !== null && typeof value === 'object') {
+                return new Proxy(value, this);
+              }
+              return value;
+            },
+            set() {
+              // Block all property assignments on returned objects
+              throw new Error('Reflex Security: Cannot modify properties on function return values');
+            }
+          });
+        }
+
+        return result;
       }
 
       case 'binary': {
@@ -710,15 +746,21 @@ export class SafeExprParser {
             const obj = right();
             // Security: Block 'in' operator on unsafe objects
             if (obj == null || typeof obj !== 'object') return false;
-            // CRITICAL SECURITY FIX: Prototype Leak via 'in' Operator
-            // Without this check, {{ "constructor" in obj }} returns true even though
-            // accessing obj.constructor is blocked. This leaks prototype information.
-            // Example exploit: {{ "constructor" in obj ? "has proto access" : "safe" }}
-            if (UNSAFE_PROPS[prop]) {
-              if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
-                console.warn('Reflex Security: Blocked unsafe property check in "in" operator:', prop);
-              }
-              return false;
+
+            // CRITICAL SECURITY FIX #10: SafeExprParser Blacklist Probing
+            //
+            // VULNERABILITY: Returning false for unsafe properties leaks information
+            // Attacker can probe: {{ 'constructor' in obj }} returns false (blocked)
+            //                    {{ 'foo' in obj }} returns true/false (allowed)
+            // This confirms which properties are protected, aiding bypass attempts
+            //
+            // SOLUTION: Throw error consistently for unsafe property checks
+            // This stops the attack trace and prevents information disclosure
+            if (UNSAFE_PROPS[prop] || isDangerousPropertyPattern(prop)) {
+              throw new Error(
+                `Reflex Security: Cannot check unsafe property '${prop}' with 'in' operator.\n` +
+                'This property is restricted to prevent sandbox escape.'
+              );
             }
             // Use safe property check that works with reactive proxies
             return prop in obj;

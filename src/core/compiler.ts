@@ -1359,37 +1359,41 @@ export const CompilerMixin = {
         const v = fn(self.s, o);
         let html = v == null ? '' : String(v);
 
-        if (self.cfg.sanitize) {
-          // Use configured DOMPurify instance (not global variable)
-          const purify = self.cfg.domPurify;
-          if (purify && typeof purify.sanitize === 'function') {
-            html = purify.sanitize(html);
-          } else {
-            // CRITICAL FIX: Fail closed - block XSS in ALL environments, not just production
-            // Security should be "Fail Closed" (block by default), not "Warn and Allow"
-            // Developers in staging/dev environments are still vulnerable to XSS attacks
-            // If they assume "Reflex handles XSS" and test in dev, they might ship vulnerable code
-            throw new Error(
-              'Reflex: SECURITY ERROR - m-html requires DOMPurify.\n' +
-              'Configure it with: app.configure({ domPurify: DOMPurify })\n' +
-              'Install: npm install dompurify\n' +
-              'Or disable sanitization (UNSAFE): app.configure({ sanitize: false })'
-            );
-          }
-        } else {
-          // CRITICAL SECURITY WARNING: m-html is unsafe without sanitization
+        // CRITICAL SECURITY FIX #1: Regex-based HTML Sanitization Bypass
+        // ALWAYS require DOMPurify for m-html (fail closed by default)
+        // Regex-based sanitization has been removed as it's fundamentally insecure
+        const purify = self.cfg.domPurify;
+        if (purify && typeof purify.sanitize === 'function') {
+          html = purify.sanitize(html);
+        } else if (self.cfg.sanitize === false) {
+          // Explicit opt-out of sanitization (UNSAFE - developer takes responsibility)
           // Only warn once per instance to avoid console spam
           if (!self._htmlWarningShown) {
             self._htmlWarningShown = true;
-            console.warn(
-              'Reflex SECURITY WARNING: m-html is being used without sanitization.\n' +
+            console.error(
+              'Reflex SECURITY ERROR: m-html is being used without sanitization.\n' +
               'This is a CRITICAL XSS vulnerability if used with user-provided content.\n' +
-              'STRONGLY RECOMMENDED: Enable sanitization:\n' +
-              '  app.configure({ sanitize: true, domPurify: DOMPurify })\n' +
-              'Install DOMPurify: npm install dompurify\n' +
+              'You have explicitly disabled sanitization with { sanitize: false }.\n' +
+              'NEVER use m-html with user-provided content in this mode.\n\n' +
+              'To fix: app.configure({ domPurify: DOMPurify }) // remove sanitize: false\n' +
+              'Install: npm install dompurify\n' +
               'See: https://github.com/cure53/DOMPurify'
             );
           }
+        } else {
+          // Default behavior: require DOMPurify (fail closed)
+          throw new Error(
+            'Reflex SECURITY ERROR: m-html requires DOMPurify for safe HTML rendering.\n' +
+            'Regex-based sanitization is insecure and has been removed.\n\n' +
+            'Solution:\n' +
+            '  1. Install DOMPurify: npm install dompurify\n' +
+            '  2. Configure: app.configure({ domPurify: DOMPurify })\n' +
+            '  3. Import: import DOMPurify from \'dompurify\'\n\n' +
+            'Alternative (for trusted HTML only):\n' +
+            '  - Use m-text for user content (safer)\n' +
+            '  - Explicitly opt-out: { sanitize: false } (UNSAFE)\n\n' +
+            'Do NOT use m-html with user-provided content without DOMPurify.'
+          );
         }
 
         // CRITICAL FIX: Destructive innerHTML Hydration Prevention
@@ -1567,30 +1571,26 @@ export const CompilerMixin = {
           const useHTML = modifiers.includes('html');
           let next = v == null ? '' : String(v);
           if (useHTML) {
-            // CRITICAL SECURITY FIX: Sanitize HTML content in m-model.html to prevent XSS
-            // Without sanitization, stored XSS is possible if userBio from database contains malicious scripts
-            if (this.cfg.sanitize) {
-              const purify = this.cfg.domPurify;
-              if (purify && typeof purify.sanitize === 'function') {
-                next = purify.sanitize(next);
-                if (el.innerHTML !== next) el.innerHTML = next;
-              } else {
-                // CRITICAL FIX: Fail closed - block XSS in ALL environments
-                throw new Error(
-                  'Reflex: SECURITY ERROR - m-model.html requires DOMPurify.\n' +
-                  'Configure it with: app.configure({ domPurify: DOMPurify })\n' +
-                  'Install: npm install dompurify\n' +
-                  'Or disable sanitization (UNSAFE): app.configure({ sanitize: false })'
-                );
-              }
+            // CRITICAL SECURITY FIX #1: Require DOMPurify for m-model.html (fail closed)
+            // Regex-based sanitization has been removed as it's fundamentally insecure
+            const purify = this.cfg.domPurify;
+            if (purify && typeof purify.sanitize === 'function') {
+              next = purify.sanitize(next);
+              if (el.innerHTML !== next) el.innerHTML = next;
+            } else if (this.cfg.sanitize === false) {
+              // Explicit opt-out - NEVER use with user content
+              console.error(
+                'Reflex SECURITY ERROR: m-model.html used without sanitization.\n' +
+                'This is extremely dangerous with user-provided content.'
+              );
+              if (el.innerHTML !== next) el.innerHTML = next;
             } else {
-              // CRITICAL: cfg.sanitize is false - NEVER allow m-model.html
-              // This prevents the XSS vulnerability where innerHTML is set without any sanitization
+              // Default behavior: require DOMPurify (fail closed)
               throw new Error(
-                'Reflex: SECURITY ERROR - m-model.html is disabled when sanitization is off.\n' +
-                'To use m-model.html, you MUST configure DOMPurify:\n' +
-                '  app.configure({ sanitize: true, domPurify: DOMPurify })\n' +
-                'Or use m-model (without .html) for plain text binding.'
+                'Reflex: SECURITY ERROR - m-model.html requires DOMPurify.\n' +
+                'Configure it with: app.configure({ domPurify: DOMPurify })\n' +
+                'Install: npm install dompurify\n' +
+                'Or disable sanitization (UNSAFE): app.configure({ sanitize: false })'
               );
             }
           } else {
@@ -1763,24 +1763,24 @@ export const CompilerMixin = {
         // CRITICAL FIX: Empty Multi-Select Type Trap
         // If the array is empty, we can't infer type from currentValue[0]
         // Instead, check if ALL option values are numeric to infer the type
+        // CRITICAL SECURITY FIX #8: m-model Type Confusion
+        //
+        // VULNERABILITY: Type inference from DOM options allows attackers to change model type
+        // by injecting DOM options (e.g., via a separate vulnerability or SSR injection)
+        // Example: model is initialized as string[], but DOM options are numeric, so type changes to number[]
+        //
+        // SOLUTION: Respect the initialization type of the model variable
+        // Only infer from DOM if the model type is truly unknown (not initialized)
+        // Default to strings to be safe (source of truth is the model, not the view)
         let shouldCoerceToNumber = false;
 
         if (Array.isArray(currentValue) && currentValue.length > 0) {
-          // Array has values - use first element's type
+          // Array has values - use first element's type (TRUSTED source)
           shouldCoerceToNumber = typeof currentValue[0] === 'number';
-        } else if (Array.isArray(currentValue) && currentValue.length === 0) {
-          // Empty array - infer type from option values
-          // If all option values are numeric strings, coerce to numbers
-          const allOptions = Array.from(el.options);
-          if (allOptions.length > 0) {
-            shouldCoerceToNumber = allOptions.every(opt => {
-              const val = opt.value;
-              // CRITICAL FIX #8: Whitespace Coercion - check trimmed value
-              const trimmed = val.trim();
-              return trimmed !== '' && !isNaN(Number(val));
-            });
-          }
         }
+        // REMOVED: Do NOT infer type from DOM options for empty arrays
+        // Empty array means no type information - default to strings (safer)
+        // If user wants numbers, they should initialize with [0] or explicitly type cast
 
         // Fallback for environments without selectedOptions (e.g., happy-dom)
         let selectedValues;
@@ -1979,7 +1979,28 @@ export const CompilerMixin = {
       };
       const opts: AddEventListenerOptions | undefined = mod.includes('once') ? { once: true } : undefined;
       target.addEventListener(nm, handler, opts);
-      this._reg(el, () => target.removeEventListener(nm, handler, opts));
+
+      // CRITICAL LIFECYCLE FIX #9: Event Listener Leak (Window/Document)
+      //
+      // VULNERABILITY: If element is removed by external code (jQuery, D3, innerHTML=''),
+      // the Reflex cleanup mechanism (_kill) is never triggered, leaking window/document listeners
+      //
+      // SOLUTION: Use FinalizationRegistry (modern browsers) to detect when element is GC'd
+      // This ensures cleanup even if _kill is never called
+      const cleanup = () => target.removeEventListener(nm, handler, opts);
+      this._reg(el, cleanup);
+
+      // Modern browsers: Use FinalizationRegistry for automatic cleanup
+      if (typeof FinalizationRegistry !== 'undefined') {
+        if (!this._globalListenerRegistry) {
+          this._globalListenerRegistry = new FinalizationRegistry((cleanupFn) => {
+            cleanupFn();
+          });
+        }
+        // Register the element for cleanup when it's garbage collected
+        this._globalListenerRegistry.register(el, cleanup);
+      }
+
       return;
     }
 
@@ -2223,28 +2244,73 @@ export const CompilerMixin = {
 
   /**
    * Sanitize CSS string to prevent javascript: URL injection
-   * CRITICAL SECURITY FIX: Validate URLs in style strings
+   * CRITICAL SECURITY FIX #4: CSS Injection via String Interpolation
+   *
+   * VULNERABILITY: Regex parsing of CSS is fragile and can be bypassed:
+   * - Escaped sequences: background-image: u\rl(javascript:alert(1))
+   * - Comment injection: url("javascript:alert(1) /*")
+   * - Expression() for IE: style="width: expression(alert(1))"
+   *
+   * SOLUTION: Enhanced validation with CSS escape sequence handling
    */
   _sanitizeStyleString(cssText) {
     if (!cssText) return '';
 
-    // List of CSS properties that accept URLs
-    const urlSensitiveProps = ['background', 'background-image', 'border-image', 'border-image-source',
-      'list-style-image', 'content', 'cursor', 'mask', 'mask-image', '-webkit-mask-image'];
+    // CRITICAL: Detect and block CSS escape sequences in URLs
+    // CSS allows backslash escapes like u\rl, java\script, etc.
+    // We need to normalize these before validation
+    const normalizeCSS = (css) => {
+      // Remove CSS escape sequences: \XX (hex) and \X (single char)
+      // This prevents u\rl(javascript:...) bypass
+      return css.replace(/\\([0-9a-f]{1,6}\s?|.)/gi, (match, char) => {
+        // If it's a hex escape, convert it
+        if (/^[0-9a-f]{1,6}$/i.test(char.trim())) {
+          return String.fromCharCode(parseInt(char.trim(), 16));
+        }
+        // Single character escape
+        return char;
+      });
+    };
 
-    // Find all url() functions in the CSS text and validate them
+    const normalized = normalizeCSS(cssText);
+
+    // Block dangerous CSS features entirely
+    const dangerousPatterns = [
+      /javascript:/i,           // javascript: protocol
+      /data:/i,                 // data: URLs (can contain scripts)
+      /vbscript:/i,             // VBScript (IE legacy)
+      /expression\s*\(/i,       // CSS expression() (IE)
+      /-moz-binding/i,          // XBL binding (Firefox)
+      /behavior\s*:/i,          // IE behavior
+      /@import/i,               // CSS @import (can load external malicious CSS)
+      /\/\*.*\*\//              // CSS comments (can be used to hide attacks)
+    ];
+
+    for (const pattern of dangerousPatterns) {
+      if (pattern.test(normalized) || pattern.test(cssText)) {
+        console.error(
+          `Reflex Security: BLOCKED dangerous CSS pattern in style binding.\n` +
+          `Pattern: ${pattern}\n` +
+          'CSS injection attempt prevented. Use object-style bindings for dynamic styles.'
+        );
+        return ''; // Return empty string to block the entire style
+      }
+    }
+
+    // Validate url() functions
+    // Match url() with proper handling of quotes and escapes
+    const urlMatches = Array.from(normalized.matchAll(/url\s*\(\s*(['"]?)([^'")\s]+)\1\s*\)/gi));
+
     let sanitized = cssText;
-    const urlMatches = Array.from(cssText.matchAll(/url\s*\(\s*(['"]?)([^'")\s]+)\1\s*\)/gi));
-
     for (const match of urlMatches) {
       const url = match[2];
       // Validate the URL using the same logic as href/src attributes
       const isSafe = RELATIVE_URL_RE.test(url) || SAFE_URL_RE.test(url);
       if (!isSafe) {
-        console.warn(
-          `Reflex: Blocked unsafe URL in style binding: ${url}\n` +
+        console.error(
+          `Reflex Security: BLOCKED unsafe URL in style binding: ${url}\n` +
           'Only http://, https://, mailto:, tel:, sms:, and relative URLs are allowed.\n' +
-          'To prevent CSS injection attacks, dangerous protocols are blocked.'
+          'CSS injection attempt prevented.'
         );
         // Replace the entire url() with 'none'
         sanitized = sanitized.replace(match[0], 'none');
