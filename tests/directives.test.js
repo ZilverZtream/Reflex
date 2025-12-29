@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { Reflex } from '../src/index.ts';
+import { Reflex, SafeHTML } from '../src/index.ts';
 
 describe('Directives', () => {
   beforeEach(() => {
@@ -480,8 +480,7 @@ describe('Directives', () => {
   describe('m-html', () => {
     it('should set innerHTML', async () => {
       document.body.innerHTML = '<div m-html="content"></div>';
-      const app = new Reflex({ content: '<strong>Bold</strong>' });
-      app.configure({ sanitize: false }); // Disable sanitization for test
+      const app = new Reflex({ content: SafeHTML.unsafe('<strong>Bold</strong>') });
       await app.nextTick();
 
       expect(document.querySelector('div').innerHTML).toBe('<strong>Bold</strong>');
