@@ -103,7 +103,12 @@ const UNSAFE_METHODS = Object.assign(Object.create(null), {
   // Example: safeObj.method.apply(unsafeObj, args) bypasses isolation
   call: 1,
   apply: 1,
-  bind: 1
+  bind: 1,
+  // CRITICAL FIX: Sandbox Escape via getRootNode()
+  // getRootNode() provides access to the document root which can lead to window access
+  // Example: $el.getRootNode() returns the document, which has defaultView (window)
+  // This bypasses all sandbox restrictions and allows full DOM/window access
+  getRootNode: 1
 });
 
 /**

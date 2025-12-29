@@ -559,23 +559,31 @@ export const CompilerMixin = {
             }
             cur = null;
           } else if (isAsyncComp) {
-            // For async components, we need to find all nodes between marker and end
-            // For now, remove all siblings after the marker until we hit another comment/marker
-            // Remove all content from async component (marker, fallback, or loaded component)
+            // CRITICAL FIX: Remove ALL nodes from async component (handles fragments)
+            // Previous code broke after first element, leaking remaining fragment nodes
+            // Now continues removing until hitting another structural directive marker
             let node = cm.nextSibling;
+            let foundAsyncMarker = false;
             while (node) {
               const next = node.nextSibling;
-              // Stop if we hit another structural directive marker
-              if (node.nodeType === 8 && ((node as Comment).nodeValue?.startsWith('if') ||
-                  (node as Comment).nodeValue?.startsWith('for'))) {
+              // Stop if we hit another structural directive marker (but not our own async marker)
+              if (node.nodeType === 8 && !foundAsyncMarker &&
+                  ((node as Comment).nodeValue?.startsWith('if') ||
+                   (node as Comment).nodeValue?.startsWith('for'))) {
+                break;
+              }
+              // Track if we found our async marker
+              if (node.nodeType === 8 && (node as Comment).nodeValue?.startsWith('async:')) {
+                foundAsyncMarker = true;
+              }
+              // Stop if we found the async marker and now hit another one (adjacent async components)
+              if (foundAsyncMarker && node.nodeType === 8 &&
+                  (node as Comment).nodeValue?.startsWith('async:') &&
+                  node !== cm.nextSibling) {
                 break;
               }
               this._kill(node);
               (node as ChildNode).remove();
-              // For async, remove only one element/marker set
-              if (node.nodeType === 1 || (node as Comment).nodeValue?.startsWith('async:')) {
-                break;
-              }
               node = next;
             }
             cur = null;
@@ -1675,7 +1683,19 @@ export const CompilerMixin = {
         if (el.validity && el.validity.badInput) {
           return; // Don't update if input is invalid
         }
-        v = el.value === '' ? null : parseFloat(el.value);
+        // CRITICAL FIX: Preserve intermediate number formats during typing
+        // Don't parse values like "1.", "-", "0." that users type mid-input
+        // These are valid intermediate states that should not update state
+        // until the user finishes typing a complete number
+        const raw = el.value;
+        if (raw === '' || raw === null) {
+          v = null;
+        } else if (raw === '-' || raw.endsWith('.') || raw.endsWith('e') || raw.endsWith('e-') || raw.endsWith('e+')) {
+          // Intermediate typing state - don't update state to prevent cursor jump
+          return;
+        } else {
+          v = parseFloat(raw);
+        }
       } else if (isMultiSelect) {
         // For multi-select, return array of selected values
         // CRITICAL FIX: Preserve number types (like checkbox array binding)

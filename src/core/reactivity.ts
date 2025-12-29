@@ -145,20 +145,18 @@ export const ArrayHandler: ProxyHandler<any[]> = {
         ks.add('length');
         ks.add(ITERATE);
 
-        // OPTIMIZATION: Limit index triggers to only those with active watchers
-        // Instead of blindly adding all deleted indices, only trigger indices
-        // that have actual dependencies registered (saves memory and CPU)
-        const maxIndexToCheck = Math.min(oldLength, newLength + 1000); // Cap at 1000 deleted indices
-        for (let i = newLength; i < maxIndexToCheck; i++) {
+        // CRITICAL FIX: Trigger ALL index watchers, not just first 1000
+        // The previous optimization capped at 1000 indices, but ITERATE does NOT
+        // trigger specific index watchers (e.g., arr[1500]), leaving UI stale.
+        // We must check ALL deleted indices for active watchers to ensure reactivity.
+        // Performance: Only triggers indices that have actual dependencies (checked via meta.d.has)
+        for (let i = newLength; i < oldLength; i++) {
           const key = String(i);
-          // Only add index if it has watchers
+          // Only add index if it has watchers (this is the real optimization)
           if (meta.d.has(key)) {
             ks.add(key);
           }
         }
-
-        // If truncating beyond 1000 items, just trigger ITERATE (catch-all)
-        // Individual index watchers will still fire via ITERATE dependency
       } finally {
         if (--engine._b === 0) {
           try { engine._fpt(); } catch (err) { console.error('Reflex: Error flushing pending triggers:', err); }

@@ -22,9 +22,18 @@
 // This can break libraries that expect native behavior or have custom polyfills
 if (typeof globalThis !== 'undefined' && typeof globalThis.queueMicrotask === 'undefined') {
   (globalThis as any).queueMicrotask = (callback: () => void) => {
-    Promise.resolve().then(callback).catch(err =>
-      setTimeout(() => { throw err; }, 0)
-    );
+    Promise.resolve().then(callback).catch(err => {
+      // CRITICAL FIX: Better error reporting for polyfill
+      // Use reportError if available (modern browsers), fallback to console.error
+      // This preserves the error context better than setTimeout(() => throw)
+      if (typeof globalThis.reportError === 'function') {
+        globalThis.reportError(err);
+      } else {
+        // Fallback for older browsers: log and rethrow async
+        console.error('Uncaught error in queueMicrotask:', err);
+        setTimeout(() => { throw err; }, 0);
+      }
+    });
   };
 }
 
@@ -1066,7 +1075,7 @@ export class Reflex {
       // are removed via m-if or list reconciliation
       if (node && typeof node === 'object') {
         const childApp = (node as any).__rfx_app;
-        if (childApp && typeof childApp.unmount === 'function') {
+        if (childApp && childApp !== this && typeof childApp.unmount === 'function') {
           try {
             childApp.unmount();
           } catch (err) {
