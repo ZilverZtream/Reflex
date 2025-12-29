@@ -85,6 +85,11 @@ const HydrationMixin = {
    * CRITICAL FIX: Whitespace filtering to prevent hydration mismatches.
    * Browsers and minifiers treat whitespace differently between server and client.
    * We skip whitespace-only text nodes to align the trees.
+   *
+   * CRITICAL FIX: Text Interpolation Hydration
+   * The server renders evaluated values ("Hello World") not templates ("{{ value }}").
+   * We detect reactive text nodes via comment markers: <!--txt:{{ expr }}-->
+   * This allows the server to render the final value while preserving template info.
    */
   _hydrateWalk(n, o) {
     // Stack of {node, scope} pairs to process
@@ -106,8 +111,29 @@ const HydrationMixin = {
         // Skipping them causes visual layout corruption (elements mashing together)
         // Instead, hydration must preserve ALL text nodes exactly as the server rendered them
 
+        // Comment node (8) - check for text interpolation markers
+        if (nt === 8) {
+          const cv = c.nodeValue;
+          // CRITICAL FIX: Server marks reactive text with <!--txt:{{ expr }}-->
+          // This allows SSR to render the evaluated value while preserving template info
+          if (cv && cv.startsWith('txt:')) {
+            const template = cv.slice(4); // Remove 'txt:' prefix
+            // Find the next text node (skip whitespace-only text nodes)
+            let textNode = c.nextSibling;
+            while (textNode && textNode.nodeType === 3 && !textNode.nodeValue.trim()) {
+              textNode = textNode.nextSibling;
+            }
+
+            if (textNode && textNode.nodeType === 3) {
+              // Apply the template to the text node
+              this._hydrateTextWithTemplate(textNode, template, parentScope);
+              // Remove the marker comment
+              c.remove();
+            }
+          }
+        }
         // Element node (1)
-        if (nt === 1) {
+        else if (nt === 1) {
           const mIgnore = c.getAttribute('m-ignore');
           if (mIgnore === null) {
             const tag = c.tagName;
@@ -136,7 +162,8 @@ const HydrationMixin = {
             }
           }
         } else if (nt === 3) {
-          // Text node with interpolation
+          // Text node with interpolation (legacy path for backward compatibility)
+          // This handles cases where the server still renders literal {{ }} syntax
           const nv = c.nodeValue;
           if (typeof nv === 'string' && nv.indexOf('{{') !== -1) {
             this._hydrateText(c, parentScope);
@@ -376,12 +403,41 @@ const HydrationMixin = {
   },
 
   /**
-   * Hydrate text interpolation.
+   * Hydrate text interpolation (legacy path).
    * The text node already has the rendered content, we just attach reactivity.
+   * This handles cases where the server still renders literal {{ }} syntax.
    */
   _hydrateText(n, o) {
     // Use the existing _txt method - it will update the text reactively
     this._txt(n, o);
+  },
+
+  /**
+   * Hydrate text interpolation with explicit template.
+   * CRITICAL FIX: Handles server-rendered values with preserved template info.
+   *
+   * During SSR, the server renders the evaluated value (e.g., "Hello World")
+   * and adds a comment marker with the template (e.g., <!--txt:{{ user.name }}-->).
+   * This method applies the template to the text node to make it reactive.
+   *
+   * @param {Text} n - The text node containing the server-rendered value
+   * @param {string} template - The template expression (e.g., "{{ value }}" or "Hello {{ name }}")
+   * @param {Object} o - The scope object
+   */
+  _hydrateTextWithTemplate(n, template, o) {
+    // Temporarily set the text node to contain the template
+    // so that _txt can parse and apply it correctly
+    const originalValue = n.nodeValue;
+    n.nodeValue = template;
+
+    try {
+      // Use the existing _txt method to set up reactivity
+      this._txt(n, o);
+    } catch (err) {
+      // If _txt fails, restore the original value
+      n.nodeValue = originalValue;
+      this._handleError(err, o);
+    }
   },
 
   /**
