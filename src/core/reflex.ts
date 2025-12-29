@@ -459,12 +459,41 @@ export class Reflex {
       });
     }
 
-    t.innerHTML = template;
-    this._cp.set(name, {
-      _t: t.content.firstElementChild,
-      p: def.props || [],
-      s: def.setup
-    });
+    // CRITICAL FIX #3: SVG Context Loss in Component Templates
+    // When a component template starts with an SVG element (not <svg> itself),
+    // template.innerHTML parses it as HTML, creating HTMLUnknownElement instead of SVGElement
+    // Example: template: '<circle cx="10" cy="10" r="5"/>' becomes HTMLUnknownElement
+    // Fix: Detect SVG elements and wrap in <svg> for parsing, then extract the element
+    const trimmed = template.trim();
+    const svgTagMatch = trimmed.match(/^<(\w+)/);
+    const rootTag = svgTagMatch ? svgTagMatch[1].toLowerCase() : '';
+
+    // List of SVG tags (excluding <svg> itself, which parses correctly)
+    const svgElements = new Set([
+      'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse', 'path',
+      'text', 'tspan', 'textPath', 'g', 'defs', 'symbol', 'use',
+      'linearGradient', 'radialGradient', 'stop', 'pattern',
+      'clipPath', 'mask', 'marker', 'image', 'foreignObject'
+    ]);
+
+    if (svgElements.has(rootTag)) {
+      // Wrap in <svg> for correct parsing, then extract the element
+      t.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg">${template}</svg>`;
+      const svgContainer = t.content.firstElementChild;
+      const actualElement = svgContainer?.firstElementChild;
+      this._cp.set(name, {
+        _t: actualElement,
+        p: def.props || [],
+        s: def.setup
+      });
+    } else {
+      t.innerHTML = template;
+      this._cp.set(name, {
+        _t: t.content.firstElementChild,
+        p: def.props || [],
+        s: def.setup
+      });
+    }
     return this;
   }
 
@@ -974,12 +1003,37 @@ export class Reflex {
         });
       }
 
-      t.innerHTML = template;
-      self._cp.set(tag, {
-        _t: t.content.firstElementChild,
-        p: def.props || [],
-        s: def.setup
-      });
+      // CRITICAL FIX #3: SVG Context Loss in Component Templates (async components)
+      // Apply same fix as sync components
+      const trimmed = template.trim();
+      const svgTagMatch = trimmed.match(/^<(\w+)/);
+      const rootTag = svgTagMatch ? svgTagMatch[1].toLowerCase() : '';
+
+      const svgElements = new Set([
+        'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse', 'path',
+        'text', 'tspan', 'textPath', 'g', 'defs', 'symbol', 'use',
+        'linearGradient', 'radialGradient', 'stop', 'pattern',
+        'clipPath', 'mask', 'marker', 'image', 'foreignObject'
+      ]);
+
+      if (svgElements.has(rootTag)) {
+        // Wrap in <svg> for correct parsing, then extract the element
+        t.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg">${template}</svg>`;
+        const svgContainer = t.content.firstElementChild;
+        const actualElement = svgContainer?.firstElementChild;
+        self._cp.set(tag, {
+          _t: actualElement,
+          p: def.props || [],
+          s: def.setup
+        });
+      } else {
+        t.innerHTML = template;
+        self._cp.set(tag, {
+          _t: t.content.firstElementChild,
+          p: def.props || [],
+          s: def.setup
+        });
+      }
 
       // Remove fallback if present
       if (fallbackNode && fallbackNode.parentNode) {
@@ -1052,6 +1106,9 @@ export class Reflex {
    * CRITICAL FIX: Also unmounts any child Reflex instances to prevent memory leaks.
    * CRITICAL FIX: Bottom-Up unmounting (children first) to prevent context collapse.
    * CRITICAL FIX: Iterative approach to prevent stack overflow on deep DOM trees.
+   * CRITICAL FIX #10: DOM Traversal Instability During Unmount
+   * Snapshot children using Array.from instead of linked list traversal
+   * This prevents issues if cleanup functions modify DOM structure during unmount
    */
   _kill(node) {
     // CRITICAL FIX: Use iterative stack-based approach instead of recursion
@@ -1060,18 +1117,27 @@ export class Reflex {
     const stack = [node];
 
     // First pass: collect all nodes in post-order (children before parents)
+    // CRITICAL FIX #10: Snapshot children to prevent instability
+    // If cleanup functions modify DOM (remove siblings), linked list traversal can skip nodes
+    // Array.from creates a stable snapshot that won't be affected by DOM modifications
     const nodesToKill: any[] = [];
     while (stack.length > 0) {
       const current = stack.pop();
       nodesToKill.push(current);
 
-      // Add children to stack (in reverse order for correct processing)
-      for (let ch = current.lastChild; ch; ch = ch.previousSibling) {
-        stack.push(ch);
+      // Snapshot children before iterating to prevent instability
+      // This ensures cleanup functions can safely modify DOM without breaking traversal
+      if (current.childNodes && current.childNodes.length > 0) {
+        const children = Array.from(current.childNodes);
+        // Push in reverse order to maintain correct post-order traversal
+        for (let i = children.length - 1; i >= 0; i--) {
+          stack.push(children[i]);
+        }
       }
     }
 
     // Second pass: kill nodes in reverse order (children first)
+    // This ensures child cleanups run before parent cleanups
     for (let i = nodesToKill.length - 1; i >= 0; i--) {
       const node = nodesToKill[i];
 
@@ -1093,6 +1159,8 @@ export class Reflex {
       }
 
       // Run this node's cleanups
+      // Even if the node was removed from DOM by another cleanup, we still need to
+      // run its cleanup functions to prevent memory leaks (event listeners, effects, etc.)
       const c = this._cl.get(node);
       if (c) {
         for (let i = 0; i < c.length; i++) {

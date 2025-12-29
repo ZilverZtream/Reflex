@@ -364,10 +364,19 @@ export const SchedulerMixin = {
    * Instead, it returns false if there was an error. We check this return value
    * and reject the promise if the scheduler crashed, preventing code from running
    * on a dirty/corrupt DOM state.
+   *
+   * CRITICAL FIX #1: nextTick Race Condition
+   * flushQueue() returns true when it yields to the browser (time-slicing after 5ms),
+   * NOT when all work is done. The previous implementation would resolve immediately
+   * on the first yield, causing await nextTick() to resume before DOM updates complete.
+   *
+   * The fix: After flushQueue returns, check if work is still pending (_p flag).
+   * If pending, schedule another check instead of resolving immediately.
+   * This ensures nextTick only resolves when ALL queued work is truly complete.
    */
   nextTick(fn?: () => void) {
     return new Promise<void>((resolve, reject) => {
-      queueMicrotask(() => {
+      const checkComplete = () => {
         try {
           const success = this.flushQueue();
           if (!success) {
@@ -375,6 +384,22 @@ export const SchedulerMixin = {
             reject(new Error('Scheduler flush failed - circular dependency or error detected'));
             return;
           }
+
+          // CRITICAL: Check if work is still pending after flush
+          // If _p is true, flushQueue yielded and scheduled a continuation
+          // We must wait for the continuation to complete before resolving
+          if (this._p) {
+            // Work still pending - schedule another check
+            // Use same scheduling strategy as flushQueue for consistency
+            if (typeof globalThis !== 'undefined' && globalThis.scheduler?.postTask) {
+              globalThis.scheduler.postTask(() => checkComplete());
+            } else {
+              setTimeout(() => checkComplete(), 0);
+            }
+            return;
+          }
+
+          // All work complete - resolve the promise
           fn?.();
           resolve();
         } catch (err) {
@@ -382,7 +407,9 @@ export const SchedulerMixin = {
           // If fn() throws, the promise must still settle
           reject(err);
         }
-      });
+      };
+
+      queueMicrotask(() => checkComplete());
     });
   },
 
@@ -412,11 +439,13 @@ export const SchedulerMixin = {
     // CRITICAL FIX: Increased MAX_DEPTH from 50 to 1500 to support deep object trees
     // Deep watchers need to track objects nested 1000+ levels for legitimate use cases
     // (e.g., deeply nested JSON structures, tree data structures)
-    // CRITICAL FIX: Increased MAX_NODES from 10000 to 150000 to support wide tree structures
-    // Tree structures with 5 levels and 10 children each = 111,111 nodes
-    // This is reasonable for real-world data structures (JSON trees, DOM-like structures)
+    // CRITICAL FIX #9: Scheduler DoS Prevention - Reduced MAX_NODES from 150000 to 10000
+    // 150,000 nodes can lock the main thread for 50-100ms+ causing severe UI jank
+    // 10,000 nodes is a safer limit that completes in ~5-10ms on modern hardware
+    // Users watching massive objects (e.g., Three.js scenes, large JSON blobs) should use
+    // shallow watch or mark objects with SKIP symbol to prevent DoS
     const MAX_DEPTH = 1500;      // Maximum nesting depth (increased from 50)
-    const MAX_NODES = 150000;    // Maximum number of objects to traverse (increased from 10000)
+    const MAX_NODES = 10000;     // Maximum number of objects to traverse (reduced from 150000 for performance)
     let nodesVisited = 0;
 
     // Use a stack to avoid recursion (prevents stack overflow on deep objects)

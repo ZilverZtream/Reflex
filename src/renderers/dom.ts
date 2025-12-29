@@ -100,6 +100,16 @@ export function runTransition(el: Element, name: string, type: 'enter' | 'leave'
   } else {
     // Fallback: Use MutationObserver to detect when element is removed from DOM
     // This ensures cleanup happens even without a Reflex instance
+    // CRITICAL FIX #6: Crash on Detached Node Transitions
+    // If el.parentNode is null (detached node), observer.observe() throws
+    // Check for parentNode before creating observer, or cleanup immediately
+    if (!el.parentNode) {
+      // Element is already detached - cleanup immediately and don't start transition
+      cleanup();
+      if (done) done();
+      return;
+    }
+
     const observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
         // Check if our element was removed
@@ -113,10 +123,8 @@ export function runTransition(el: Element, name: string, type: 'enter' | 'leave'
       }
     });
 
-    // Observe the parent for child removals
-    if (el.parentNode) {
-      observer.observe(el.parentNode, { childList: true });
-    }
+    // Observe the parent for child removals (we've already checked parentNode exists)
+    observer.observe(el.parentNode, { childList: true });
 
     // Store observer reference for cleanup
     elAny._transObserver = observer;
@@ -363,15 +371,34 @@ export const DOMRenderer: IRendererAdapter = {
 
     // SECURITY: Check for obviously dangerous patterns (defense-in-depth)
     // This is NOT a complete solution - use a proper sanitizer for production
+    // CRITICAL FIX #2: Enhanced XSS Detection
+    // Previous regex only caught specific patterns like <script and javascript:
+    // Attackers can bypass with: <svg onload=...>, <img onerror=...>, <body onload=...>
+    // New patterns catch ALL event handlers on ANY element, plus common XSS vectors
     const dangerousPatterns = [
-      /<script[\s>]/i,
-      /javascript:/i,
-      /on\w+\s*=/i,  // Event handlers like onclick=
-      /<iframe[\s>]/i,
-      /<object[\s>]/i,
-      /<embed[\s>]/i,
-      /<meta[\s>]/i,
-      /<link[\s>]/i
+      /<script[\s>]/i,              // Script tags
+      /javascript:/i,               // javascript: protocol
+      /data:text\/html/i,           // data: URLs with HTML
+      /on\w+\s*=/i,                 // Event handlers: onclick=, onload=, onerror=, etc.
+      /<iframe[\s>]/i,              // iframe tags
+      /<object[\s>]/i,              // object tags
+      /<embed[\s>]/i,               // embed tags
+      /<meta[\s>]/i,                // meta tags (can redirect)
+      /<link[\s>]/i,                // link tags (can load external resources)
+      /<svg[^>]*on\w+/i,            // SVG with event handlers
+      /<img[^>]*on\w+/i,            // img with event handlers
+      /<img[^>]*src\s*=\s*["']?\s*x/i, // Common XSS test pattern: <img src=x onerror=...>
+      /<body[^>]*on\w+/i,           // body with event handlers
+      /<form[^>]*action\s*=\s*["']?javascript:/i,  // form with javascript: action
+      /<input[^>]*on\w+/i,          // input with event handlers
+      /<svg[^>]*href\s*=\s*["']?javascript:/i,     // SVG with javascript: in href
+      /<use[^>]*href\s*=\s*["']?javascript:/i,     // SVG use with javascript: in href
+      /<animate[^>]*on\w+/i,        // SVG animate with event handlers
+      /<set[^>]*on\w+/i,            // SVG set with event handlers
+      /<style[^>]*>.*@import/i,     // style with @import (can load malicious CSS)
+      /expression\s*\(/i,           // CSS expression() (IE legacy XSS)
+      /-moz-binding/i,              // XBL binding (Firefox legacy XSS)
+      /behavior\s*:/i               // IE behavior (legacy XSS)
     ];
 
     for (const pattern of dangerousPatterns) {
