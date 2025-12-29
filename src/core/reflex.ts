@@ -104,6 +104,10 @@ export class Reflex {
   declare _dtRegister?: () => void;
   declare _dtEmit?: (event: string, payload: any) => void;
   declare customMethod?: (...args: any[]) => any;
+  // CRITICAL FIX #3: Active component tracking for auto-cleanup
+  // This property holds the currently rendering component instance
+  // Effects created during component setup will auto-attach their cleanup
+  declare _activeComponent?: Element | null;
   declare cfg: {
     sanitize: boolean;
     cspSafe: boolean;
@@ -674,18 +678,29 @@ export class Reflex {
     scopeRaw.$props = props;
     scopeRaw.$emit = emit;
 
-    if (def.s) {
-      const result = def.s(props, { emit, props, slots: {}, onCleanup });
-      if (result && typeof result === 'object') {
-        for (const k in result) {
-          scopeRaw[k] = (result[k] !== null && typeof result[k] === 'object')
-            ? this._r(result[k])
-            : result[k];
+    // CRITICAL FIX #3 & #4: Set active component for auto-cleanup
+    // This allows computed(), watch(), and createEffect() called in setup()
+    // to automatically register their cleanup when the component unmounts
+    const prevActiveComponent = this._activeComponent;
+    this._activeComponent = inst;
+
+    try {
+      if (def.s) {
+        const result = def.s(props, { emit, props, slots: {}, onCleanup });
+        if (result && typeof result === 'object') {
+          for (const k in result) {
+            scopeRaw[k] = (result[k] !== null && typeof result[k] === 'object')
+              ? this._r(result[k])
+              : result[k];
+          }
         }
       }
-    }
-    if (typeof scopeRaw.catchError !== 'function' && typeof def.catchError === 'function') {
-      scopeRaw.catchError = def.catchError;
+      if (typeof scopeRaw.catchError !== 'function' && typeof def.catchError === 'function') {
+        scopeRaw.catchError = def.catchError;
+      }
+    } finally {
+      // CRITICAL: Always restore previous active component, even if setup() throws
+      this._activeComponent = prevActiveComponent;
     }
 
     const scope = this._r(scopeRaw);
@@ -846,18 +861,29 @@ export class Reflex {
     scopeRaw.$props = props;
     scopeRaw.$emit = emit;
 
-    if (def.s) {
-      const result = def.s(props, { emit, props, slots: {}, onCleanup });
-      if (result && typeof result === 'object') {
-        for (const k in result) {
-          scopeRaw[k] = (result[k] !== null && typeof result[k] === 'object')
-            ? this._r(result[k])
-            : result[k];
+    // CRITICAL FIX #3 & #4: Set active component for auto-cleanup
+    // This allows computed(), watch(), and createEffect() called in setup()
+    // to automatically register their cleanup when the component unmounts
+    const prevActiveComponent = this._activeComponent;
+    this._activeComponent = inst;
+
+    try {
+      if (def.s) {
+        const result = def.s(props, { emit, props, slots: {}, onCleanup });
+        if (result && typeof result === 'object') {
+          for (const k in result) {
+            scopeRaw[k] = (result[k] !== null && typeof result[k] === 'object')
+              ? this._r(result[k])
+              : result[k];
+          }
         }
       }
-    }
-    if (typeof scopeRaw.catchError !== 'function' && typeof def.catchError === 'function') {
-      scopeRaw.catchError = def.catchError;
+      if (typeof scopeRaw.catchError !== 'function' && typeof def.catchError === 'function') {
+        scopeRaw.catchError = def.catchError;
+      }
+    } finally {
+      // CRITICAL: Always restore previous active component, even if setup() throws
+      this._activeComponent = prevActiveComponent;
     }
 
     const scope = this._r(scopeRaw);

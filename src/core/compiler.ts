@@ -1013,34 +1013,41 @@ export const CompilerMixin = {
               }
             }
 
-            // CRITICAL FIX: Nested m-for Scope Staleness
+            // CRITICAL FIX #8: Nested m-for Scope Staleness (Iterative Version)
             // When parent scopes update, child scopes (nested loops) need to refresh
             // Child scopes are created via Object.create(parentScope), so they should
             // see changes through the prototype chain. However, reactive proxies may
             // not properly propagate notifications through prototypes in all cases.
             // Force a refresh by triggering reactivity on the parent scope.
-            // We recursively walk child DOM nodes and update their scopes.
-            const refreshNestedScopes = (node) => {
-              if (!node || node.nodeType !== 1) return;
-              let child = node.firstChild;
-              while (child) {
-                if (child.nodeType === 1) {
-                  const childScope = this._scopeMap.get(child);
-                  // Check if this child scope has our scope as its prototype
-                  if (childScope && Object.getPrototypeOf(childScope) === scope) {
-                    // Trigger a reactivity refresh by accessing a property
-                    // This forces the reactive system to re-track dependencies
-                    // Use a safe property that won't interfere with user code
-                    const _dummy = childScope[alias];
-                    // Also recursively refresh deeper nested scopes
-                    refreshNestedScopes(child);
-                  } else {
-                    // Still recurse even if this node doesn't have a matching scope
-                    // as deeper descendants might
-                    refreshNestedScopes(child);
+            //
+            // PERFORMANCE FIX: Use iterative traversal instead of recursion
+            // to prevent stack overflow on deeply nested structures (1000+ levels)
+            const refreshNestedScopes = (startNode) => {
+              if (!startNode || startNode.nodeType !== 1) return;
+
+              // Use stack-based iteration to avoid call stack overflow
+              const stack = [startNode];
+
+              while (stack.length > 0) {
+                const node = stack.pop();
+                if (!node || node.nodeType !== 1) continue;
+
+                let child = node.firstChild;
+                while (child) {
+                  if (child.nodeType === 1) {
+                    const childScope = this._scopeMap.get(child);
+                    // Check if this child scope has our scope as its prototype
+                    if (childScope && Object.getPrototypeOf(childScope) === scope) {
+                      // Trigger a reactivity refresh by accessing a property
+                      // This forces the reactive system to re-track dependencies
+                      // Use a safe property that won't interfere with user code
+                      const _dummy = childScope[alias];
+                    }
+                    // Push child onto stack for iterative processing
+                    stack.push(child);
                   }
+                  child = child.nextSibling;
                 }
-                child = child.nextSibling;
               }
             };
             refreshNestedScopes(node);
@@ -1728,6 +1735,17 @@ export const CompilerMixin = {
 
     const e = this.createEffect(() => {
       try {
+        // CRITICAL FIX #5: Dynamic Type Switching Protection
+        // Check if the input has dynamically changed to type="file"
+        // File inputs have read-only .value, so setting it throws InvalidStateError
+        const currentType = (el.type || '').toLowerCase();
+        if (currentType === 'file') {
+          // Type changed to file - skip value assignment to prevent crash
+          // The initial isFile check above prevents initial binding, but this
+          // prevents crashes when type changes dynamically via :type binding
+          return;
+        }
+
         const v = fn(this.s, o);
         if (isContentEditable) {
           // contenteditable elements use innerText (or innerHTML if .html modifier is used)
