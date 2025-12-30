@@ -85,6 +85,7 @@ export class Reflex {
   declare _mf: WeakMap<object, any>;
   declare _cl: WeakMap<Node, Array<() => void>>;
   declare _scopeMap: WeakMap<Node, any>;
+  declare _nodeState: WeakMap<Element, any>; // TASK 6: Node state storage (valueRef, etc.)
   declare _dh: Map<any, any>;
   declare _dr: Element | null;
   declare _cp: Map<string, any>;
@@ -202,6 +203,7 @@ export class Reflex {
     // === DOM ===
     this._cl = new WeakMap();        // Cleanup registry (lifecycle hooks)
     this._scopeMap = new WeakMap();  // Node -> Scope mapping (replaces node._sc)
+    this._nodeState = new WeakMap(); // TASK 6: Node -> State mapping (replaces el._rx_value_ref)
     this._dh = new Map();            // Delegated event Handlers
     this._dr = null;                 // DOM Root
 
@@ -620,7 +622,8 @@ export class Reflex {
       } else {
         // Multiple roots (fragment) - store a cloneable fragment
         // We'll clone the entire template content which preserves all children
-        templateNode = cloneNodeWithProps(t.content, true);
+        // TASK 6: Pass _nodeState WeakMap to preserve node state
+        templateNode = cloneNodeWithProps(t.content, true, this._nodeState);
       }
 
       this._cp.set(name, {
@@ -731,7 +734,8 @@ export class Reflex {
     if (def._t instanceof DocumentFragment) {
       // Fragment component - clone and collect all children
       isFragment = true;
-      const cloned = cloneNodeWithProps(def._t, true) as DocumentFragment;
+      // TASK 6: Pass _nodeState WeakMap to preserve node state
+      const cloned = cloneNodeWithProps(def._t, true, this._nodeState) as DocumentFragment;
       // Collect all element children (ignore text nodes for now)
       Array.from(cloned.children).forEach(child => {
         fragmentNodes.push(child as Element);
@@ -740,7 +744,8 @@ export class Reflex {
       inst = fragmentNodes[0];
     } else {
       // Single element component (existing behavior)
-      inst = cloneNodeWithProps(def._t, true) as Element;
+      // TASK 6: Pass _nodeState WeakMap to preserve node state
+      inst = cloneNodeWithProps(def._t, true, this._nodeState) as Element;
     }
 
     const props = this._r({});
@@ -902,7 +907,8 @@ export class Reflex {
    */
   _comp(el: Element, tag: string, o: any): Element {
     const def = this._cp.get(tag);
-    const inst = cloneNodeWithProps(def._t, true) as Element;
+    // TASK 6: Pass _nodeState WeakMap to preserve node state
+    const inst = cloneNodeWithProps(def._t, true, this._nodeState) as Element;
     const props = this._r({});
     const propDefs = [];
     const hostHandlers = Object.create(null);
@@ -1113,7 +1119,8 @@ export class Reflex {
       }
 
       fallbackTpl.innerHTML = fallbackHtml;
-      fallbackNode = cloneNodeWithProps(fallbackTpl.content.firstElementChild, true) as Element;
+      // TASK 6: Pass _nodeState WeakMap to preserve node state
+      fallbackNode = cloneNodeWithProps(fallbackTpl.content.firstElementChild, true, this._nodeState) as Element;
     }
 
     // Track if this async component has been aborted

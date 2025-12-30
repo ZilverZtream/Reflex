@@ -50,31 +50,40 @@ const getRawValue = (v: any): any => {
 };
 
 /**
- * Clone a node while preserving custom properties like _rx_value_ref.
+ * Clone a node while preserving node state (valueRef) from WeakMap.
+ *
+ * TASK 6: THE "PHANTOM STATE" MANDATE
+ * BREAKING CHANGE: State is NO LONGER stored on DOM nodes (el._rx_value_ref).
+ * All state is stored in a closure-protected WeakMap<Element, NodeState>.
  *
  * CRITICAL FIX: Data Loss in Cloned Nodes
- * node.cloneNode(true) only copies attributes, not custom properties.
- * This causes _rx_value_ref (which stores object references for checkbox/radio values)
- * to be lost when m-if, m-for, or components clone template nodes.
- *
- * This helper recursively walks the cloned tree and copies _rx_value_ref from
+ * node.cloneNode(true) only copies attributes, not WeakMap entries.
+ * This helper recursively walks the cloned tree and copies nodeState from
  * corresponding source nodes, ensuring object identity is preserved.
+ *
+ * Security Impact: Malicious scripts can NO LONGER access or spoof internal
+ * state because it doesn't exist on the DOM - it lives in a closure-protected WeakMap.
  *
  * @param {Node} node - The node to clone
  * @param {boolean} deep - Whether to clone children (default: true)
- * @returns {Node} The cloned node with properties preserved
+ * @param {WeakMap} nodeState - Optional WeakMap to copy state from (if available)
+ * @returns {Node} The cloned node with state preserved in WeakMap
  */
-export function cloneNodeWithProps(node: any, deep = true): any {
+export function cloneNodeWithProps(node: any, deep = true, nodeState?: WeakMap<Element, any>): any {
   const cloned = node.cloneNode(deep);
 
-  // Copy _rx_value_ref if it exists on the source node
-  if (node._rx_value_ref !== undefined) {
-    cloned._rx_value_ref = node._rx_value_ref;
+  // TASK 6: Copy node state from WeakMap if provided
+  if (nodeState && node.nodeType === 1) { // Element node
+    const state = nodeState.get(node);
+    if (state && state.valueRef !== undefined) {
+      // Copy state to the cloned node
+      nodeState.set(cloned, { valueRef: state.valueRef });
+    }
   }
 
-  // If deep cloning, recursively copy _rx_value_ref for all descendants
+  // If deep cloning, recursively copy node state for all descendants
   if (deep && node.childNodes && node.childNodes.length > 0) {
-    const copyPropsRecursive = (source: any, target: any) => {
+    const copyStateRecursive = (source: any, target: any) => {
       // Handle both Element and DocumentFragment
       const sourceChildren = source.childNodes;
       const targetChildren = target.childNodes;
@@ -84,20 +93,23 @@ export function cloneNodeWithProps(node: any, deep = true): any {
           const srcChild = sourceChildren[i];
           const tgtChild = targetChildren[i];
 
-          // Copy _rx_value_ref if present
-          if (srcChild._rx_value_ref !== undefined) {
-            tgtChild._rx_value_ref = srcChild._rx_value_ref;
+          // TASK 6: Copy node state from WeakMap
+          if (nodeState && srcChild.nodeType === 1) {
+            const childState = nodeState.get(srcChild);
+            if (childState && childState.valueRef !== undefined) {
+              nodeState.set(tgtChild, { valueRef: childState.valueRef });
+            }
           }
 
           // Recursively process children
           if (srcChild.childNodes && srcChild.childNodes.length > 0) {
-            copyPropsRecursive(srcChild, tgtChild);
+            copyStateRecursive(srcChild, tgtChild);
           }
         }
       }
     };
 
-    copyPropsRecursive(node, cloned);
+    copyStateRecursive(node, cloned);
   }
 
   return cloned;
@@ -520,11 +532,11 @@ export const CompilerMixin = {
   },
 
   /**
-   * Clone a node while preserving custom properties like _rx_value_ref.
-   * Delegates to the standalone cloneNodeWithProps helper.
+   * Clone a node while preserving node state from WeakMap.
+   * TASK 6: Delegates to the standalone cloneNodeWithProps helper with _nodeState WeakMap.
    */
   _cloneNode(node, deep = true) {
-    return cloneNodeWithProps(node, deep);
+    return cloneNodeWithProps(node, deep, this._nodeState);
   },
 
   /**
@@ -537,8 +549,8 @@ export const CompilerMixin = {
 
     // CRITICAL FIX: Pre-set object value reference for checkboxes/radios
     // Attributes are processed in reverse order, so m-model runs before :value.
-    // We need to eagerly evaluate and store the object reference BEFORE any effects run.
-    // This ensures m-model can find _rx_value_ref when setting initial checked state.
+    // TASK 6: Eagerly evaluate and store the object reference in WeakMap BEFORE any effects run.
+    // This ensures m-model can find the valueRef when setting initial checked state.
     if ((n.type === 'checkbox' || n.type === 'radio') && n.hasAttribute(':value')) {
       const valueExp = n.getAttribute(':value');
       if (valueExp) {
@@ -546,7 +558,10 @@ export const CompilerMixin = {
           const fn = this._fn(valueExp);
           const initialValue = fn(this.s, o);
           if (initialValue !== null && typeof initialValue === 'object') {
-            (n as any)._rx_value_ref = initialValue;
+            // TASK 6: Store in WeakMap instead of DOM property
+            const state = this._nodeState.get(n) || {};
+            state.valueRef = initialValue;
+            this._nodeState.set(n, state);
           }
         } catch (e) {
           // Ignore errors - effect will handle it
@@ -1620,13 +1635,16 @@ export const CompilerMixin = {
           // In strict mode (ES modules), assigning to read-only properties throws TypeError
           // Use try-catch to gracefully fall back to setAttribute for read-only properties
           try {
-            // CRITICAL FIX: Object Identity for Checkbox/Radio Values
+            // TASK 6: Object Identity for Checkbox/Radio Values
             // When binding :value="obj" to a checkbox or radio, the DOM stringifies objects to "[object Object]"
             // This makes it impossible to match objects in m-model array binding since all objects become identical strings
-            // Solution: Store the original object reference as _rx_value_ref for later retrieval by m-model
+            // Solution: Store the original object reference in WeakMap for later retrieval by m-model
             if (att === 'value' && v !== null && typeof v === 'object' &&
                 (el.type === 'checkbox' || el.type === 'radio')) {
-              (el as any)._rx_value_ref = v;
+              // TASK 6: Store in WeakMap instead of DOM property
+              const state = this._nodeState.get(el) || {};
+              state.valueRef = v;
+              this._nodeState.set(el, state);
             }
             el[att] = v ?? '';
           } catch (err) {
@@ -1924,10 +1942,11 @@ export const CompilerMixin = {
         } else if (isChk) {
           // Handle checkbox array binding
           if (Array.isArray(v)) {
-            // CRITICAL FIX: Object Identity for Checkbox Values
+            // TASK 6: Object Identity for Checkbox Values
             // When binding :value="obj" to a checkbox, el.value becomes "[object Object]"
-            // which makes all objects appear identical. Use _rx_value_ref to get the original object.
-            const elValue = (el as any)._rx_value_ref !== undefined ? (el as any)._rx_value_ref : el.value;
+            // which makes all objects appear identical. Get the original object from WeakMap.
+            const state = this._nodeState.get(el);
+            const elValue = (state && state.valueRef !== undefined) ? state.valueRef : el.value;
             // Unwrap reactive proxy to get the raw object for identity comparison
             const rawElValue = getRawValue(elValue);
             el.checked = v.some(item => {
@@ -1996,10 +2015,11 @@ export const CompilerMixin = {
         if (Array.isArray(currentValue)) {
           // Toggle value in array with proper type coercion
           const arr = [...currentValue];
-          // CRITICAL FIX: Object Identity for Checkbox Values
+          // TASK 6: Object Identity for Checkbox Values
           // When binding :value="obj" to a checkbox, el.value becomes "[object Object]"
-          // Use _rx_value_ref to get the original object reference
-          const elValue = (el as any)._rx_value_ref !== undefined ? (el as any)._rx_value_ref : el.value;
+          // Get the original object reference from WeakMap
+          const state = this._nodeState.get(el);
+          const elValue = (state && state.valueRef !== undefined) ? state.valueRef : el.value;
           const isObjectValue = elValue !== null && typeof elValue === 'object';
           // Unwrap reactive proxy for identity comparison
           const rawElValue = getRawValue(elValue);

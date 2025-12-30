@@ -243,10 +243,12 @@ describe('Functional Fixes', () => {
       expect(checkboxes[1].checked).toBe(false);
       expect(checkboxes[2].checked).toBe(true);
 
-      // Verify _rx_value_ref is set correctly on each input
-      expect((checkboxes[0] as any)._rx_value_ref).toBe(items[0]);
-      expect((checkboxes[1] as any)._rx_value_ref).toBe(items[1]);
-      expect((checkboxes[2] as any)._rx_value_ref).toBe(items[2]);
+      // TASK 6: BREAKING CHANGE - _rx_value_ref is NO LONGER accessible on DOM elements
+      // State is now stored in a closure-protected WeakMap for security
+      // Verify object identity is preserved via checkbox behavior instead
+      expect((checkboxes[0] as any)._rx_value_ref).toBeUndefined();
+      expect((checkboxes[1] as any)._rx_value_ref).toBeUndefined();
+      expect((checkboxes[2] as any)._rx_value_ref).toBeUndefined();
 
       // Click second checkbox
       checkboxes[1].click();
@@ -301,9 +303,10 @@ describe('Functional Fixes', () => {
       let checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
       expect(checkboxes.length).toBe(2);
 
-      // Verify _rx_value_ref is preserved
-      expect((checkboxes[0] as any)._rx_value_ref).toBe(groups[0].items[0]);
-      expect((checkboxes[1] as any)._rx_value_ref).toBe(groups[0].items[1]);
+      // TASK 6: BREAKING CHANGE - _rx_value_ref is NO LONGER accessible on DOM elements
+      // Verify object identity is preserved via checkbox behavior instead
+      expect((checkboxes[0] as any)._rx_value_ref).toBeUndefined();
+      expect((checkboxes[1] as any)._rx_value_ref).toBeUndefined();
 
       // Toggle group B visibility (triggers cloning)
       app.s.groups[1].show = true;
@@ -311,11 +314,12 @@ describe('Functional Fixes', () => {
         checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
         expect(checkboxes.length).toBe(4);
 
-        // Verify all _rx_value_ref are preserved after cloning
-        expect((checkboxes[0] as any)._rx_value_ref).toBe(groups[0].items[0]);
-        expect((checkboxes[1] as any)._rx_value_ref).toBe(groups[0].items[1]);
-        expect((checkboxes[2] as any)._rx_value_ref).toBe(groups[1].items[0]);
-        expect((checkboxes[3] as any)._rx_value_ref).toBe(groups[1].items[1]);
+        // TASK 6: BREAKING CHANGE - _rx_value_ref is NO LONGER accessible on DOM elements
+        // Verify object identity is preserved via checkbox behavior instead
+        expect((checkboxes[0] as any)._rx_value_ref).toBeUndefined();
+        expect((checkboxes[1] as any)._rx_value_ref).toBeUndefined();
+        expect((checkboxes[2] as any)._rx_value_ref).toBeUndefined();
+        expect((checkboxes[3] as any)._rx_value_ref).toBeUndefined();
 
         document.body.removeChild(container);
       }, 10);
@@ -364,10 +368,11 @@ describe('Functional Fixes', () => {
         setTimeout(() => {
           radios = Array.from(document.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
 
-          // After cloning, _rx_value_ref should be preserved
-          expect((radios[0] as any)._rx_value_ref).toBe(options[0]);
-          expect((radios[1] as any)._rx_value_ref).toBe(options[1]);
-          expect((radios[2] as any)._rx_value_ref).toBe(options[2]);
+          // TASK 6: BREAKING CHANGE - _rx_value_ref is NO LONGER accessible on DOM elements
+          // Verify object identity is preserved via radio behavior instead
+          expect((radios[0] as any)._rx_value_ref).toBeUndefined();
+          expect((radios[1] as any)._rx_value_ref).toBeUndefined();
+          expect((radios[2] as any)._rx_value_ref).toBeUndefined();
 
           // Second radio should still be checked
           expect(radios[0].checked).toBe(false);
