@@ -374,7 +374,7 @@ class SimpleCache {
 // The parser must implement: compile(expression, reflex) => (state, context, $event) => result
 
 class Reflex {
-  constructor(init = {}) {
+  constructor(init = {}, config = {}) {
     this.s = null;      // State
     this._e = null;     // Active Effect
     this._es = [];      // Effect Stack
@@ -384,7 +384,7 @@ class Reflex {
     this._p = false;    // Flush Pending
     this._b = 0;        // Batch Depth
     this._pt = new Map(); // Pending Triggers (Batching)
-    this._ec = new SimpleCache(1000); // Expression Cache (wipe strategy to prevent memory leak)
+    this._ec = new SimpleCache(config.cacheSize || 1000); // Expression Cache (wipe strategy to prevent memory leak)
     this._mf = new WeakMap(); // Meta Fallback (for non-extensible objects)
     this._cl = new WeakMap(); // Cleanup registry (lifecycle hooks) - avoids modifying DOM nodes
     this._dh = new Map(); // Delegated Handlers
@@ -392,11 +392,11 @@ class Reflex {
     this._cp = new Map(); // Component Definitions
     this._cd = new Map(); // Custom Directives
     this._refs = {};      // $refs registry
-    this._parser = null;  // CSP parser (lazy-loaded only when needed)
+    this._parser = config.parser || null;  // CSP parser (lazy-loaded only when needed)
     this.cfg = {
-      sanitize: true,
-      cspSafe: false,        // Enable CSP-safe mode (no new Function)
-      cacheSize: 1000        // Expression cache size
+      sanitize: config.sanitize !== undefined ? config.sanitize : true,
+      cspSafe: config.cspSafe || false,        // Enable CSP-safe mode (no new Function)
+      cacheSize: config.cacheSize || 1000        // Expression cache size
     };
 
     this.s = this._r(init);
@@ -1164,14 +1164,14 @@ class Reflex {
     const e = this._ef(() => {
       const v = fn(this.s, o);
       let html = v == null ? "" : String(v);
-      // FIX #2: Always sanitize when cfg.sanitize is true; escape HTML if DOMPurify unavailable
+      // FIX #1: Require DOMPurify for m-html by default (sanitize: true)
       if (this.cfg.sanitize) {
         if (typeof DOMPurify !== "undefined") {
           html = DOMPurify.sanitize(html);
         } else {
-          // Fallback: escape HTML entities to prevent XSS when DOMPurify is not available
-          html = escapeHTML(html);
-          console.warn("Reflex: DOMPurify not loaded. HTML content escaped for safety. Load DOMPurify for proper sanitization.");
+          // Throw error when DOMPurify is not available and sanitize is enabled
+          throw new Error("Reflex: m-html requires DOMPurify for sanitization. " +
+            "Load DOMPurify or set { sanitize: false } to disable (not recommended).");
         }
       }
       if (html !== prev) { prev = html; el.innerHTML = html; }

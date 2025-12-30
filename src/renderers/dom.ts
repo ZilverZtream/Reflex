@@ -204,6 +204,9 @@ export function runTransition(el: Element, name: string, type: 'enter' | 'leave'
   let cleaned = false;
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
+  // Declare onEnd handler early so cleanup can reference it
+  let onEnd: ((e: Event) => void) | null = null;
+
   // Cleanup function to cancel transition
   const cleanup = () => {
     if (cleaned) return;
@@ -215,9 +218,11 @@ export function runTransition(el: Element, name: string, type: 'enter' | 'leave'
       timeoutId = null;
     }
 
-    // Remove event listeners
-    el.removeEventListener('transitionend', onEnd);
-    el.removeEventListener('animationend', onEnd);
+    // Remove event listeners (if onEnd was set)
+    if (onEnd) {
+      el.removeEventListener('transitionend', onEnd);
+      el.removeEventListener('animationend', onEnd);
+    }
 
     // Remove transition classes
     el.classList.remove(from, active, to);
@@ -269,6 +274,8 @@ export function runTransition(el: Element, name: string, type: 'enter' | 'leave'
           if (node === el || (node as Element).contains?.(el)) {
             cleanup();
             observer.disconnect();
+            // Call done callback when element is removed
+            if (done && !transitionCallback.cancelled) done();
             return;
           }
         }
@@ -294,8 +301,8 @@ export function runTransition(el: Element, name: string, type: 'enter' | 'leave'
     elAny._transCleanup = cleanupWithObserver;
   }
 
-  // End handler
-  const onEnd = (e: Event) => {
+  // End handler - assign to the pre-declared variable
+  onEnd = (e: Event) => {
     if ((e as TransitionEvent).target !== el || cleaned) return;
     cleanup();
     // Only call done callback if transition wasn't cancelled
