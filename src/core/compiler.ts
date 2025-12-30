@@ -647,16 +647,27 @@ export const CompilerMixin = {
           //   - Each element gets pushed to the array
           //   - Cleanup removes the element from the array
 
-          // Check if this ref should be an array (for m-for usage)
-          const isArrayRef = v in this.s && Array.isArray(this.s[v]);
+          // TASK 8.4: Check if this ref should be an array (for m-for usage)
+          // Auto-detect array mode by checking:
+          // 1. If state[refName] is already an array (user pre-initialized)
+          // 2. If _refs[refName] is already an array (second+ item in loop)
+          // 3. If scope is a loop scope (has loop variables like item, index)
+          // Use property access instead of 'in' operator for proxy compatibility
+          const isArrayRef = (this.s[v] && Array.isArray(this.s[v])) ||
+                             Array.isArray(this._refs[v]) ||
+                             (o && isFlatScope(o) && Object.keys(o._ids).length > 0);
 
           if (isArrayRef) {
             // Array mode: push element to array
-            this.s[v].push(n);
-            // Also add to $refs as array
+            // TASK 8.4: Initialize arrays if they don't exist
             if (!Array.isArray(this._refs[v])) {
               this._refs[v] = [];
             }
+            // TASK 9.2: Ensure state array exists for synchronization
+            if (!this.s[v] || !Array.isArray(this.s[v])) {
+              this.s[v] = [];
+            }
+            this.s[v].push(n);
             this._refs[v].push(n);
 
             // CRITICAL FIX: Preserve DOM order for ref arrays
@@ -1383,11 +1394,12 @@ export const CompilerMixin = {
         // TASK 9.2: Synchronize Reactive m-ref State
         // After DOM reconciliation, state.refs must match the new order
         // Without this, state.refs[0] points to the wrong element after sorting
-        if (refName in this.s && Array.isArray(this.s[refName])) {
+        // Use property access instead of 'in' operator for better proxy compatibility
+        const stateArray = this.s[refName];
+        if (stateArray && Array.isArray(stateArray)) {
           // Use splice on the proxy to trigger reactivity automatically
           // splice(0, length, ...items) clears and replaces in one operation
           // This preserves the array reference and triggers watchers
-          const stateArray = this.s[refName];
           stateArray.splice(0, stateArray.length, ...orderedNodes);
         }
       });
@@ -1965,9 +1977,6 @@ export const CompilerMixin = {
       }
       return; // Skip m-model binding for file inputs
     }
-    // CRITICAL FIX: Unsupported contenteditable
-    // Elements with contenteditable="true" use innerText/innerHTML, not value
-    const isContentEditable = el.contentEditable === 'true';
 
     const e = this.createEffect(() => {
       try {
@@ -1983,6 +1992,12 @@ export const CompilerMixin = {
         }
 
         const v = fn(this.s, o);
+
+        // TASK 8.3: Check contenteditable inside the effect
+        // Elements with contenteditable="true" use innerText/innerHTML, not value
+        // Check both property and attribute for compatibility with different DOM implementations
+        const isContentEditable = el.contentEditable === 'true' ||
+                                   el.getAttribute('contenteditable') === 'true';
         if (isContentEditable) {
           // contenteditable elements use innerText (or innerHTML if .html modifier is used)
           const useHTML = modifiers.includes('html');
@@ -2078,6 +2093,10 @@ export const CompilerMixin = {
       if (isComposing) return;
 
       let v;
+      // TASK 8.3: Check contenteditable dynamically
+      // Check both property and attribute for compatibility
+      const isContentEditable = el.contentEditable === 'true' ||
+                                 el.getAttribute('contenteditable') === 'true';
       if (isContentEditable) {
         // contenteditable elements use innerText (or innerHTML if .html modifier is used)
         const useHTML = modifiers.includes('html');

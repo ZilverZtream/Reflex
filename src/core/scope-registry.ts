@@ -33,6 +33,14 @@ export class ScopeRegistry {
   private idCounter = 0;
 
   /**
+   * Expose the internal store as _registry for test compatibility.
+   * This allows tests to access the raw Map for verification.
+   */
+  get _registry(): Map<string, any> {
+    return this.store;
+  }
+
+  /**
    * Allocate a unique ID for a variable.
    *
    * The ID format is 'var_{counter}_{varName}' which:
