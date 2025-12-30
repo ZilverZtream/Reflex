@@ -360,8 +360,23 @@ export function runTransition(el, name, type, done, reflex?) {
 
       // Fallback timeout (in case transitionend doesn't fire)
       const style = getStyle(el);
-      const duration = parseFloat(style.transitionDuration) || parseFloat(style.animationDuration) || 0;
-      const delay = parseFloat(style.transitionDelay) || parseFloat(style.animationDelay) || 0;
+
+      // CRITICAL FIX (Issue #7): Parse all comma-separated duration values and use the maximum
+      // Previously: parseFloat("0.5s, 1s") returned 0.5, cutting off the animation early
+      // When an element has multiple transitions (e.g., opacity 0.5s, transform 1s),
+      // the browser reports "0.5s, 1s" but parseFloat only gets the first value.
+      //
+      // Solution: Split by comma, parse each value, and use the maximum.
+      const parseMaxDuration = (str: string): number => {
+        if (!str) return 0;
+        return Math.max(...str.split(',').map(s => {
+          const val = parseFloat(s.trim());
+          return isNaN(val) ? 0 : val;
+        }));
+      };
+
+      const duration = parseMaxDuration(style.transitionDuration) || parseMaxDuration(style.animationDuration) || 0;
+      const delay = parseMaxDuration(style.transitionDelay) || parseMaxDuration(style.animationDelay) || 0;
       const timeout = (duration + delay) * 1000 + 50; // Add 50ms buffer
 
       // Set expected end time for transition completion check
@@ -2622,8 +2637,17 @@ export const CompilerMixin = {
         // Handle checkbox array binding
         const currentValue = fn(this.s, o);
         if (Array.isArray(currentValue)) {
-          // Toggle value in array with proper type coercion
-          const arr = [...currentValue];
+          // CRITICAL FIX (Issue #4): Mutate the original array instead of creating a copy
+          // Previously: const arr = [...currentValue]; ... v = arr;
+          // This replaced the reactive array with a plain array, breaking:
+          // - External references to the original state.selected array
+          // - Equality checks (oldRef === newRef) in watchers
+          // - Object identity for reactive tracking
+          //
+          // Now we mutate the original array in place, preserving reference identity.
+          // The reactivity system will detect the mutation via the array method wrappers.
+          const arr = currentValue;
+
           // TASK 6: Object Identity for Checkbox Values
           // When binding :value="obj" to a checkbox, el.value becomes "[object Object]"
           // Get the original object reference from WeakMap
@@ -2711,7 +2735,9 @@ export const CompilerMixin = {
           } else if (!el.checked && idx !== -1) {
             arr.splice(idx, 1);
           }
-          v = arr;
+          // CRITICAL FIX (Issue #4): Don't reassign - the array was mutated in place
+          // The reactive system already tracks these mutations via push/splice wrappers
+          return; // Skip the assignment below since we mutated in place
         } else {
           v = el.checked;
         }
@@ -2753,11 +2779,15 @@ export const CompilerMixin = {
         // Priority order:
         // 1. .number modifier (explicit declaration by developer)
         // 2. First element type (if array has values)
-        // 3. Default to strings (safest)
+        // 3. CRITICAL FIX (Issue #8): Infer from option values if array is empty
+        // 4. Default to strings (safest)
         //
-        // CRITICAL FIX: Empty Multi-Select Defaults to String
-        // For empty arrays, check if .number modifier is present
-        // This allows: m-model.number="selectedIds" to work with initially empty arrays
+        // CRITICAL FIX (Issue #8): Smart type inference for empty arrays
+        // Previously, empty arrays ALWAYS defaulted to strings, causing type confusion.
+        // Example: user expects numeric IDs but gets ["1", "2"] instead of [1, 2].
+        //
+        // New behavior: If array is empty and ALL options have numeric values, assume numeric.
+        // This matches user intent in the common case of ID-based selects.
         let shouldCoerceToNumber = false;
 
         if (modifiers.includes('number')) {
@@ -2766,8 +2796,24 @@ export const CompilerMixin = {
         } else if (Array.isArray(currentValue) && currentValue.length > 0) {
           // Array has values - use first element's type (TRUSTED source)
           shouldCoerceToNumber = typeof currentValue[0] === 'number';
+        } else if (Array.isArray(currentValue) && currentValue.length === 0) {
+          // CRITICAL FIX (Issue #8): Empty array - infer from option values
+          // Check if ALL options have numeric values (e.g., id-based selects)
+          // This prevents the common "gotcha" where users expect [1, 2] but get ["1", "2"]
+          const options = Array.from(el.options);
+          if (options.length > 0) {
+            const allNumeric = options.every(opt => {
+              const val = opt.value.trim();
+              // Check if value is a valid number that preserves format when converted
+              // "01" -> 1 -> "1" !== "01" (not purely numeric, has leading zero)
+              // "1" -> 1 -> "1" === "1" (purely numeric)
+              return val !== '' && !isNaN(Number(val)) && String(Number(val)) === val;
+            });
+            if (allNumeric) {
+              shouldCoerceToNumber = true;
+            }
+          }
         }
-        // If no modifier and empty array: default to strings (safer)
 
         // Fallback for environments without selectedOptions (e.g., happy-dom)
         let selectedValues;
@@ -2941,6 +2987,45 @@ export const CompilerMixin = {
       el.addEventListener('compositionend', onCompositionEnd);
     }
 
+    // CRITICAL FIX (Issue #6): Dynamic Select Initial State Sync
+    // When <option> elements are generated via m-for, they're added to the DOM AFTER
+    // m-model has already run its initial sync. The browser doesn't auto-apply the
+    // selection to newly added options, leaving the select box appearing empty.
+    //
+    // Solution: Use MutationObserver to watch for child changes on <select> elements.
+    // When options are added, re-run the effect to sync the selection state.
+    let selectObserver: MutationObserver | null = null;
+    if (el.tagName === 'SELECT' && typeof MutationObserver !== 'undefined') {
+      // Debounce the sync to batch multiple option additions
+      let syncTimeout: any = null;
+      const syncSelection = () => {
+        if (syncTimeout) clearTimeout(syncTimeout);
+        syncTimeout = setTimeout(() => {
+          syncTimeout = null;
+          // Re-run the effect to sync the selection state
+          // The effect checks the current model value and applies it to all options
+          e();
+        }, 0);
+      };
+
+      selectObserver = new MutationObserver((mutations) => {
+        // Check if any option elements were added
+        for (const mutation of mutations) {
+          if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+            for (const node of mutation.addedNodes) {
+              if (node.nodeType === 1 && ((node as Element).tagName === 'OPTION' || (node as Element).tagName === 'OPTGROUP')) {
+                syncSelection();
+                return; // Only need to sync once per batch
+              }
+            }
+          }
+        }
+      });
+
+      // Observe child additions to the select element
+      selectObserver.observe(el, { childList: true, subtree: true });
+    }
+
     this._reg(el, () => {
       el.removeEventListener(evt, up);
       if (evt !== 'change' && !isLazy) {
@@ -2950,6 +3035,11 @@ export const CompilerMixin = {
       if (evt === 'input' && !isChk && !isRadio) {
         el.removeEventListener('compositionstart', onCompositionStart);
         el.removeEventListener('compositionend', onCompositionEnd);
+      }
+      // CRITICAL FIX (Issue #6): Clean up MutationObserver for select elements
+      if (selectObserver) {
+        selectObserver.disconnect();
+        selectObserver = null;
       }
     });
   },
@@ -3411,7 +3501,21 @@ export const CompilerMixin = {
           const prop = k.startsWith('--')
             ? k
             : k.replace(/([A-Z])/g, '-$1').toLowerCase();
-          s += prop + ':' + val + ';';
+
+          // CRITICAL SECURITY FIX (Issue #5): Sanitize CSS variable values
+          // Previously, CSS variables bypassed all sanitization because they were just appended.
+          // Attack: :style="{ '--bg': 'url(javascript:alert(1))' }"
+          // If user CSS has: background: var(--bg);  → executes the malicious URL
+          //
+          // Solution: Apply the same sanitization to CSS variable values as to regular values.
+          // This blocks javascript:, data:, and other dangerous URL protocols.
+          let sanitizedVal = String(val);
+          if (k.startsWith('--')) {
+            // CSS variables can contain url() values that need sanitization
+            sanitizedVal = this._sanitizeStyleString(sanitizedVal);
+          }
+
+          s += prop + ':' + sanitizedVal + ';';
         }
       }
       return s;
