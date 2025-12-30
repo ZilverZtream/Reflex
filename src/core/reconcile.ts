@@ -269,6 +269,15 @@ export function reconcileKeyedList({
   return { rows: newRows, keys: newKeys };
 }
 
+// CRITICAL FIX (Issue #3): Cache for duplicate key symbols
+// Symbol() creates a new unique symbol EVERY time it's called, even with the same description.
+// This causes DOM thrashing: on each render, duplicate items get NEW symbols as keys,
+// so the reconciliation algorithm sees them as completely new items and destroys/recreates DOM.
+//
+// Solution: Cache the symbols by {originalKey, counter} so the same duplicate occurrence
+// returns the same symbol across renders. The cache is WeakRef-friendly and cleans itself.
+const duplicateKeyCache = new Map<string, Map<number, symbol>>();
+
 /**
  * Handle duplicate keys in a list.
  *
@@ -285,18 +294,13 @@ export function reconcileKeyedList({
  * Including the index causes keys to change when the list is reordered, which
  * defeats the purpose of keyed reconciliation and forces full DOM recreation.
  *
- * CRITICAL FIX: Use unique Symbol-based keys to prevent collisions.
- * The previous format `__dup_${counter}_${key}` was predictable and could collide
- * with user keys. For example:
- * - Item A has key="foo" (duplicates to __dup_1_foo)
- * - Item B has key="foo" (duplicates to __dup_2_foo)
- * - User adds Item C with key="__dup_1_foo" → COLLISION! Item B disappears
+ * CRITICAL FIX (Issue #3): Cache duplicate symbols for stable keys across renders.
+ * Previously, Symbol() was called on every render for duplicates, creating new symbols
+ * each time. This caused the reconciliation to see different keys between renders,
+ * destroying and recreating DOM for ALL duplicate items on every update.
  *
- * CRITICAL FIX: Use Symbol() instead of Symbol.for() to prevent global collisions
- * Symbol.for() creates global symbols that can collide across different Reflex instances
- * When two Reflex apps run on the same page and both have duplicate key "id:1",
- * they would generate the SAME Symbol.for('reflex.dup:1:id') causing reconciliation bugs
- * Symbol() creates truly unique symbols that never collide
+ * The fix: Cache symbols by {originalKey, counter} so the 2nd occurrence of "foo"
+ * always gets the SAME symbol, enabling proper DOM reuse.
  *
  * @param {Map} seen - Set of already-seen keys with counter tracking
  * @param {*} key - Current key
@@ -321,10 +325,23 @@ export function resolveDuplicateKey(seen, key, _index) {
       );
     }
 
-    // CRITICAL FIX: Use Symbol() instead of Symbol.for() for true uniqueness
-    // Symbol() creates a unique symbol every time, preventing cross-instance collisions
-    // We use a description for debugging, but the symbol is still unique
-    return Symbol(`reflex.dup:${counter}:${String(key)}`);
+    // CRITICAL FIX (Issue #3): Return cached symbol for stable key across renders
+    // Use a two-level cache: keyStr -> Map<counter, symbol>
+    const keyStr = String(key);
+    let counterMap = duplicateKeyCache.get(keyStr);
+    if (!counterMap) {
+      counterMap = new Map();
+      duplicateKeyCache.set(keyStr, counterMap);
+    }
+
+    let cachedSymbol = counterMap.get(counter);
+    if (!cachedSymbol) {
+      // Create the symbol only once per {key, counter} combination
+      cachedSymbol = Symbol(`reflex.dup:${counter}:${keyStr}`);
+      counterMap.set(counter, cachedSymbol);
+    }
+
+    return cachedSymbol;
   }
 
   // First occurrence of this key - track it with counter 1

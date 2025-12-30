@@ -586,25 +586,47 @@ export const SchedulerMixin = {
       const meta = current[META] || this._mf.get(current);
       if (meta) this.trackDependency(meta, Symbol.for('rx.iterate'));
 
-      // Add children to stack with incremented depth
+      // CRITICAL FIX (Issue #10): Check remaining capacity BEFORE pushing to stack
+      // Previously, ALL children were pushed unconditionally, causing a memory spike.
+      // For a 50k array, the stack would grow to 50k items before MAX_NODES was checked.
+      //
+      // Fix: Only push children while we have remaining capacity.
+      // This limits the stack size to MAX_NODES, preventing memory spikes.
+      const remainingCapacity = MAX_NODES - nodesVisited - stack.length;
+      if (remainingCapacity <= 0) {
+        // Already at or over capacity - don't push any more children
+        continue;
+      }
+
+      // Add children to stack with incremented depth (limited by remaining capacity)
       const nextDepth = depth + 1;
+      let childrenAdded = 0;
+
       if (Array.isArray(current)) {
         for (const item of current) {
-          if (item !== null && typeof item === 'object') {
+          if (childrenAdded >= remainingCapacity) break;
+          if (item !== null && typeof item === 'object' && !s.has(item)) {
             stack.push({ obj: item, depth: nextDepth });
+            childrenAdded++;
           }
         }
       } else if (current instanceof Map || current instanceof Set) {
-        current.forEach(item => {
-          if (item !== null && typeof item === 'object') {
-            stack.push({ obj: item, depth: nextDepth });
+        for (const item of current) {
+          if (childrenAdded >= remainingCapacity) break;
+          // For Map, item is [key, value]; for Set, item is the value
+          const value = current instanceof Map ? item[1] : item;
+          if (value !== null && typeof value === 'object' && !s.has(value)) {
+            stack.push({ obj: value, depth: nextDepth });
+            childrenAdded++;
           }
-        });
+        }
       } else {
         for (const k in current) {
+          if (childrenAdded >= remainingCapacity) break;
           const child = current[k];
-          if (child !== null && typeof child === 'object') {
+          if (child !== null && typeof child === 'object' && !s.has(child)) {
             stack.push({ obj: child, depth: nextDepth });
+            childrenAdded++;
           }
         }
       }

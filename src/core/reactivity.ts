@@ -237,12 +237,21 @@ export const ArrayHandler: ProxyHandler<any[]> = {
     throw new Error('Reflex: Cannot set prototype (prototype pollution prevention)');
   },
 
-  // CRITICAL SECURITY FIX: Hide prototype chain to prevent constructor access
-  // Without this, Object.getPrototypeOf(proxy) exposes Array.prototype with constructor
+  // CRITICAL FIX (Issue #2): Restore prototype for instanceof checks
+  // Previously returned null to prevent prototype pollution, but this breaks:
+  //   state.items instanceof Array → false (should be true)
+  //   state.date instanceof Date → false (should be true)
+  //
+  // Security is maintained through multiple layers:
+  // 1. The 'get' trap blocks access to 'constructor', '__proto__', 'prototype', etc.
+  // 2. The 'set' trap blocks setting these dangerous properties
+  // 3. The 'defineProperty' trap blocks defining these properties
+  // 4. The 'setPrototypeOf' trap prevents prototype chain manipulation
+  //
+  // By returning the real prototype, instanceof works correctly while security
+  // is enforced by the other traps that block dangerous property access.
   getPrototypeOf(o) {
-    // Return null to hide the prototype chain from inspection
-    // This prevents: Object.getPrototypeOf(proxy).constructor.constructor('code')
-    return null;
+    return Object.getPrototypeOf(o);
   },
 
   // CRITICAL SECURITY FIX #8: Inconsistent Sandbox Visibility
@@ -373,12 +382,20 @@ export const ObjectHandler: ProxyHandler<ReactiveTarget> = {
     throw new Error('Reflex: Cannot set prototype (prototype pollution prevention)');
   },
 
-  // CRITICAL SECURITY FIX: Hide prototype chain to prevent constructor access
-  // Without this, Object.getPrototypeOf(proxy) exposes Object.prototype with constructor
+  // CRITICAL FIX (Issue #2): Restore prototype for instanceof checks
+  // Previously returned null to prevent prototype pollution, but this breaks:
+  //   state.obj instanceof SomeClass → false (should be true)
+  //
+  // Security is maintained through multiple layers:
+  // 1. The 'get' trap blocks access to 'constructor', '__proto__', 'prototype', etc.
+  // 2. The 'set' trap blocks setting these dangerous properties
+  // 3. The 'defineProperty' trap blocks defining these properties
+  // 4. The 'setPrototypeOf' trap prevents prototype chain manipulation
+  //
+  // By returning the real prototype, instanceof works correctly while security
+  // is enforced by the other traps that block dangerous property access.
   getPrototypeOf(o) {
-    // Return null to hide the prototype chain from inspection
-    // This prevents: Object.getPrototypeOf(proxy).constructor.constructor('code')
-    return null;
+    return Object.getPrototypeOf(o);
   },
 
   // CRITICAL SECURITY FIX #8: Inconsistent Sandbox Visibility
@@ -494,6 +511,27 @@ export const ReactivityMixin = {
     if (typeof File !== 'undefined' && t instanceof File) return t;
     if (typeof Blob !== 'undefined' && t instanceof Blob) return t;
     if (typeof FileList !== 'undefined' && t instanceof FileList) return t;
+
+    // CRITICAL FIX (Issue #1): Native Object Crash Prevention
+    // Native objects like Date, RegExp, WeakMap, WeakSet, and Promise rely on internal slots
+    // (e.g., [[DateValue]], [[RegExpMatcher]], [[WeakMapData]]) that are tied to the original object.
+    // When wrapped in a Proxy, methods like date.getTime() throw:
+    //   "TypeError: this is not a Date object"
+    // because the Proxy doesn't have these internal slots.
+    //
+    // Solution: Skip proxying these native objects entirely. Users can still store them in
+    // reactive state, but the objects themselves won't be reactive (which is fine since
+    // their internal state is typically immutable or accessed via methods).
+    //
+    // Note: Date methods are immutable (getTime() reads internal slot, setTime() creates new Date),
+    // so there's no benefit to proxying them anyway.
+    if (t instanceof Date) return t;
+    if (t instanceof RegExp) return t;
+    if (typeof WeakMap !== 'undefined' && t instanceof WeakMap) return t;
+    if (typeof WeakSet !== 'undefined' && t instanceof WeakSet) return t;
+    if (typeof Promise !== 'undefined' && t instanceof Promise) return t;
+    // Also skip Error objects - their stack traces and messages are internal
+    if (t instanceof Error) return t;
 
     // Check for OWN META property to avoid inheriting from prototype chain
     const existing = Object.prototype.hasOwnProperty.call(t, META)
@@ -773,6 +811,12 @@ export const ReactivityMixin = {
         // CRITICAL FIX: Array Mutation Index Blindness
         // For reorder methods, trigger updates for specific indices that have watchers.
         // This ensures {{ list[0] }} updates when array is sorted, reversed, etc.
+        //
+        // CRITICAL FIX (Issue #9): O(D) not O(N) for shift/unshift
+        // We iterate over meta.d (dependencies) not over all array indices.
+        // This means shift/unshift on a 100k array only triggers watchers for
+        // indices that are actually being observed (e.g., {{ list[0] }}).
+        // If only 5 indices are watched, we trigger exactly 5 updates, not 100k.
         if (REORDER_METHODS[m]) {
           // Determine which indices may have changed based on the method
           let startIdx = 0;
