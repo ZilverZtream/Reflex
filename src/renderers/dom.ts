@@ -37,8 +37,8 @@ export class SafeHTML {
   /** The sanitized HTML content */
   private readonly _html: string;
 
-  /** Brand symbol for type checking */
-  private static readonly _brand = Symbol('SafeHTML');
+  /** Brand symbol for type checking - uses global symbol registry for cross-bundle compatibility */
+  private static readonly _brand = Symbol.for('reflex.SafeHTML');
 
   /** Configured sanitizer (DOMPurify or compatible) */
   private static _sanitizer: { sanitize: (html: string) => string } | null = null;
@@ -46,7 +46,7 @@ export class SafeHTML {
   /** Private constructor - only create via static methods */
   private constructor(html: string) {
     this._html = html;
-    // Add brand for instanceof-like checking
+    // Add global brand symbol for cross-bundle type checking
     (this as any)[SafeHTML._brand] = true;
   }
 
