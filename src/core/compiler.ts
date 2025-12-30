@@ -647,16 +647,25 @@ export const CompilerMixin = {
           //   - Each element gets pushed to the array
           //   - Cleanup removes the element from the array
 
-          // Check if this ref should be an array (for m-for usage)
-          const isArrayRef = v in this.s && Array.isArray(this.s[v]);
+          // TASK 8.4: Check if this ref should be an array (for m-for usage)
+          // Auto-detect array mode by checking:
+          // 1. If state[refName] is already an array (user pre-initialized)
+          // 2. If _refs[refName] is already an array (second+ item in loop)
+          // 3. If scope is a loop scope (has loop variables like item, index)
+          const isArrayRef = (v in this.s && Array.isArray(this.s[v])) ||
+                             Array.isArray(this._refs[v]) ||
+                             (o && isFlatScope(o) && Object.keys(o._ids).length > 0);
 
           if (isArrayRef) {
             // Array mode: push element to array
-            this.s[v].push(n);
-            // Also add to $refs as array
+            // TASK 8.4: Initialize arrays if they don't exist
             if (!Array.isArray(this._refs[v])) {
               this._refs[v] = [];
             }
+            if (!(v in this.s) || !Array.isArray(this.s[v])) {
+              this.s[v] = [];
+            }
+            this.s[v].push(n);
             this._refs[v].push(n);
 
             // CRITICAL FIX: Preserve DOM order for ref arrays
