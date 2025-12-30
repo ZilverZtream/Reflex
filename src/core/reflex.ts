@@ -282,8 +282,25 @@ export class Reflex {
       }
     }
 
+    // TASK 10: Handle legacy { el, state } API
+    // Support both:
+    //   new Reflex({ count: 0 }) - direct state
+    //   new Reflex({ el: container, state: { count: 0 } }) - nested state with mount target
+    let stateObject = init;
+    let mountTarget: Element | null = null;
+
+    if (init && typeof init === 'object' && 'state' in init) {
+      // Legacy API: { el, state } pattern
+      stateObject = init.state || {};
+      if ('el' in init && init.el) {
+        mountTarget = init.el as Element;
+        // Disable auto-mount since we have an explicit target
+        this.cfg.autoMount = false;
+      }
+    }
+
     // Initialize reactive state
-    this.s = this._r(init);
+    this.s = this._r(stateObject);
 
     // CRITICAL FIX #2: Conditional auto-mount to prevent async initialization race conditions
     // Auto-mount on DOM ready (browser only), but only if autoMount is enabled
@@ -296,6 +313,15 @@ export class Reflex {
         document.addEventListener('DOMContentLoaded', () => this.mount(), { once: true });
       } else {
         queueMicrotask(() => this.mount());
+      }
+    } else if (mountTarget) {
+      // TASK 10: If explicit mount target was provided, mount immediately (synchronously)
+      // This ensures the app is ready before any test code runs
+      if (typeof document !== 'undefined' && document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => this.mount(mountTarget!), { once: true });
+      } else {
+        // Mount synchronously to avoid race conditions in tests
+        this.mount(mountTarget!);
       }
     }
   }
