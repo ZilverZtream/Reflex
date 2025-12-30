@@ -264,34 +264,32 @@ describe('Events', () => {
   });
 
   describe('Throttle Modifier', () => {
-    beforeEach(() => {
-      vi.useFakeTimers();
-    });
-
-    afterEach(() => {
-      vi.useRealTimers();
-    });
-
     it('should throttle event handler', async () => {
+      // NOTE: Throttle uses performance.now() which is not affected by fake timers
+      // Testing with real timers to verify throttle behavior
       document.body.innerHTML = '<div @scroll.throttle.100ms="count++"></div>';
       const app = new Reflex({ count: 0 });
 
-      await vi.runAllTimersAsync();
+      // Wait for mount to complete
+      await new Promise(resolve => setTimeout(resolve, 10));
 
       const div = document.querySelector('div');
 
       // First event should fire immediately
       div.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await new Promise(resolve => setTimeout(resolve, 5)); // Small delay for reactivity
       expect(app.s.count).toBe(1);
 
       // Events within throttle window should be ignored
       div.dispatchEvent(new Event('scroll', { bubbles: true }));
       div.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await new Promise(resolve => setTimeout(resolve, 5));
       expect(app.s.count).toBe(1);
 
       // After throttle window, events should fire again
-      await vi.advanceTimersByTimeAsync(100);
+      await new Promise(resolve => setTimeout(resolve, 105)); // Wait for throttle to reset
       div.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await new Promise(resolve => setTimeout(resolve, 5));
       expect(app.s.count).toBe(2);
     });
   });
