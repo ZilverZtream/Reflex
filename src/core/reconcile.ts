@@ -148,12 +148,22 @@ export function reconcileKeyedList({
         newNodes[i] = null;
         oldIndices[i] = -1;
         oldRows.delete(key);
+        // CRITICAL FIX: Clean up the scope created at line 138
+        // The scope's IDs would otherwise leak since no node is created
+        if (config.destroyScope) {
+          config.destroyScope(scope);
+        }
       } else {
         // Reuse existing node, update scope
         updateNode(existing.node, item, i);
         newNodes[i] = existing.node;
         oldIndices[i] = keyToOldIdx.get(key) ?? -1;
         oldRows.delete(key);
+        // CRITICAL FIX: Clean up the scope created at line 138
+        // updateNode retrieves the scope from _scopeMap, so this scope is unused
+        if (config.destroyScope) {
+          config.destroyScope(scope);
+        }
       }
     } else {
       // Create new node
@@ -166,6 +176,13 @@ export function reconcileKeyedList({
       } else {
         newNodes[i] = node;
         oldIndices[i] = -1; // New node
+      }
+      // CRITICAL FIX: Clean up the scope created at line 138
+      // createNode creates its OWN scope internally, so the scope from line 138
+      // is never used and must be destroyed to prevent memory leaks.
+      // This applies whether createNode returns null or a valid node.
+      if (config.destroyScope) {
+        config.destroyScope(scope);
       }
     }
   }

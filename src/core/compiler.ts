@@ -1081,6 +1081,20 @@ export const CompilerMixin = {
           return scope;
         },
 
+        // CRITICAL FIX: Destroy scope IDs when node creation fails
+        // Called by reconciler when createNode returns null or shouldKeep returns false
+        // This prevents memory leaks from orphaned scope IDs
+        destroyScope: (scope) => {
+          if (scope && isFlatScope(scope)) {
+            for (const varName in scope._ids) {
+              const id = scope._ids[varName];
+              if (id) {
+                this._scopeRegistry.delete(id);
+              }
+            }
+          }
+        },
+
         createNode: (item, index) => {
           const scope = config.createScope(item, index);
 
@@ -1505,12 +1519,53 @@ export const CompilerMixin = {
         // - Watchers on the array reference don't fire unnecessarily
         // - Custom properties on the array object are preserved
         // - Aligns with Vue/React ref behavior
+        //
+        // CRITICAL FIX: For nested m-for, only reorder THIS m-for's refs
+        // without clobbering refs from sibling m-for loops
         const targetArray = this._refs[refName];
         if (Array.isArray(targetArray)) {
-          // Clear array without breaking reference
-          targetArray.length = 0;
-          // Push new ordered nodes
-          targetArray.push(...orderedNodes);
+          if (orderedNodes.length === 0) return;
+
+          // Find positions of our nodes in the target array
+          const indices = orderedNodes.map(n => targetArray.indexOf(n));
+          const validIndices = indices.filter(i => i !== -1);
+
+          if (validIndices.length === 0) {
+            // None of our nodes are in targetArray yet - they're new
+            // Don't modify (the m-ref binding already pushed them)
+            return;
+          }
+
+          if (validIndices.length !== orderedNodes.length) {
+            // Some nodes are missing - partial state, skip sync
+            return;
+          }
+
+          const minIdx = Math.min(...validIndices);
+          const maxIdx = Math.max(...validIndices);
+
+          // Check if nodes are in a contiguous block and in correct order
+          const isContiguous = maxIdx - minIdx + 1 === orderedNodes.length;
+          let needsUpdate = !isContiguous;
+
+          if (isContiguous && !needsUpdate) {
+            for (let i = 0; i < orderedNodes.length; i++) {
+              if (targetArray[minIdx + i] !== orderedNodes[i]) {
+                needsUpdate = true;
+                break;
+              }
+            }
+          }
+
+          if (needsUpdate) {
+            // Remove our nodes from their current positions (iterate backwards)
+            const sortedIndices = [...validIndices].sort((a, b) => b - a);
+            for (const idx of sortedIndices) {
+              targetArray.splice(idx, 1);
+            }
+            // Insert orderedNodes at the minIdx position
+            targetArray.splice(minIdx, 0, ...orderedNodes);
+          }
         } else {
           // First time: create the array
           this._refs[refName] = orderedNodes;
@@ -1522,10 +1577,66 @@ export const CompilerMixin = {
         // Use property access instead of 'in' operator for better proxy compatibility
         const stateArray = this.s[refName];
         if (stateArray && Array.isArray(stateArray)) {
-          // Use splice on the proxy to trigger reactivity automatically
-          // splice(0, length, ...items) clears and replaces in one operation
-          // This preserves the array reference and triggers watchers
-          stateArray.splice(0, stateArray.length, ...orderedNodes);
+          // CRITICAL FIX: For nested m-for, handle refs carefully to avoid clobbering
+          // refs from sibling m-for loops.
+          //
+          // Example: allItems = [A1, B1, B2, A2] where A1,A2 are from Group A's inner m-for
+          // and B1, B2 are from Group B's inner m-for. When Group A syncs, we need to
+          // move [A1, A2] to be contiguous at the earliest position, resulting in
+          // [A1, A2, B1, B2].
+
+          if (orderedNodes.length === 0) return;
+
+          // Find positions of our nodes in the state array
+          const indices = orderedNodes.map(n => stateArray.indexOf(n));
+          const validIndices = indices.filter(i => i !== -1);
+
+          if (validIndices.length === 0) {
+            // None of our nodes are in stateArray yet - they're new
+            // Don't sync (the m-ref binding already pushed them)
+            return;
+          }
+
+          if (validIndices.length !== orderedNodes.length) {
+            // Some nodes are missing - partial state, skip sync
+            return;
+          }
+
+          const minIdx = Math.min(...validIndices);
+          const maxIdx = Math.max(...validIndices);
+
+          // Check if nodes are in a contiguous block and in correct order
+          const isContiguous = maxIdx - minIdx + 1 === orderedNodes.length;
+          let needsUpdate = !isContiguous;
+
+          if (isContiguous && !needsUpdate) {
+            // Check if the contiguous block is in correct order
+            for (let i = 0; i < orderedNodes.length; i++) {
+              if (stateArray[minIdx + i] !== orderedNodes[i]) {
+                needsUpdate = true;
+                break;
+              }
+            }
+          }
+
+          if (needsUpdate) {
+            // Get the raw array to avoid triggering reactivity during manipulation
+            const raw = this.toRaw(stateArray);
+
+            // Remove all our nodes from their current positions (iterate backwards)
+            const sortedIndices = [...validIndices].sort((a, b) => b - a);
+            for (const idx of sortedIndices) {
+              raw.splice(idx, 1);
+            }
+
+            // Insert orderedNodes at the minIdx position (where the first one was)
+            // This preserves refs from other m-for loops
+            raw.splice(minIdx, 0, ...orderedNodes);
+
+            // Now sync the proxy array with the raw array
+            // Use splice to trigger reactivity in one operation
+            stateArray.splice(0, stateArray.length, ...raw);
+          }
         }
       });
     });
