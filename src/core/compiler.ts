@@ -420,6 +420,32 @@ function hasStrictParent(marker: Comment): boolean {
 }
 
 /**
+ * TASK 12.3: Sort ref array by DOM document order using compareDocumentPosition.
+ *
+ * DOM-Based Sort: This ensures the array matches the visual DOM order 100%.
+ * Do NOT sort based on loop index - this fails for interleaved loops
+ * (e.g., multiple m-for targeting the same tbody via display: contents).
+ *
+ * The reconciliation assumes refs from a loop are contiguous. Splicing destroys
+ * the order of interleaved loops. This function restores correct DOM order.
+ *
+ * @param refArray - Array of DOM elements to sort in-place
+ */
+function sortRefsByDOM(refArray: Element[]): void {
+  if (!refArray || refArray.length <= 1) return;
+
+  // Sort using compareDocumentPosition
+  // Node.DOCUMENT_POSITION_FOLLOWING (4): b follows a in document order
+  refArray.sort((a, b) => {
+    if (a === b) return 0;
+    const position = a.compareDocumentPosition(b);
+    // If b follows a, a should come first (return -1)
+    // If a follows b (DOCUMENT_POSITION_PRECEDING = 2), b should come first (return 1)
+    return (position & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1;
+  });
+}
+
+/**
  * Compiler mixin for Reflex class.
  */
 export const CompilerMixin = {
@@ -486,11 +512,40 @@ export const CompilerMixin = {
    * Instead of calling _comp recursively (which calls _w, which calls _comp...),
    * we now queue component work onto the same stack as DOM nodes.
    *
+   * TASK 12.2: DoS Prevention - Depth Guard
+   * Structural directives (m-if, m-for) call _w recursively. Deeply nested
+   * components with these directives can still cause "Maximum call stack exceeded".
+   * This depth guard throws a specific error at 1000 levels to prevent browser crash.
+   *
    * The stack stores work items that can be:
    * - { node, scope }: Regular DOM walking
    * - { comp, tag, scope }: Component to render
    */
   _w(n, o) {
+    // TASK 12.2: Depth guard to prevent DoS via deeply nested components
+    // Initialize depth counter if not set
+    if (this._walkDepth === undefined) {
+      this._walkDepth = 0;
+    }
+
+    // Check depth limit
+    const MAX_RENDER_DEPTH = 1000;
+    if (++this._walkDepth > MAX_RENDER_DEPTH) {
+      this._walkDepth = 0; // Reset to prevent permanent lock-out
+      throw new Error(
+        `Reflex: Max Render Depth Exceeded (${MAX_RENDER_DEPTH} levels).\n\n` +
+        'This usually indicates:\n' +
+        '  1. Infinite loop in m-if/m-for conditions\n' +
+        '  2. Circular component references\n' +
+        '  3. Maliciously nested DOM structure (DoS attack)\n\n' +
+        'Solutions:\n' +
+        '  - Check m-if/m-for expressions for infinite loops\n' +
+        '  - Verify components don\'t recursively include themselves\n' +
+        '  - Simplify deeply nested component hierarchies'
+      );
+    }
+
+    try {
     // Explicit stack prevents recursive call stack overflow
     const stack = [{ node: n, scope: o }];
 
@@ -718,6 +773,10 @@ export const CompilerMixin = {
           this._applyDir(n, dirName, v, mods, o);
         }
       }
+    }
+    } finally {
+      // TASK 12.2: Always decrement depth on exit (success or error)
+      this._walkDepth--;
     }
   },
 
@@ -1002,6 +1061,12 @@ export const CompilerMixin = {
 
     let rows = new Map();     // key -> { node, oldIdx }
     let oldKeys = [];         // Track key order for LIS
+
+    // TASK 12.10: Scoped Ref Storage
+    // Track refs at the m-for level instead of scanning global _refs on every update
+    // This eliminates O(N) ref scans where N is total refs in the component
+    // Structure: Map<refName, Set<Element>> - refs belonging to this m-for instance
+    const forRefs: Map<string, Set<Element>> = new Map();
 
     const eff = this.createEffect(() => {
       const list = listFn(this.s, o) || [];
@@ -1471,46 +1536,71 @@ export const CompilerMixin = {
       //
       // NEW FIX: Check root node AND all descendants for m-ref elements
       // Build a map of {refElement -> {rowNode, index}} to track which row each ref belongs to
+      //
+      // TASK 12.10: Scoped Ref Storage - Eliminate O(N) ref scans
+      // Instead of scanning all global refs (this._refs), we now:
+      // 1. Collect refs from this m-for's rows using querySelectorAll
+      // 2. Only process refs that belong to this m-for instance
+      // This reduces O(rows × totalRefs) to O(rows × forSpecificRefs)
       const refArraysToUpdate = new Map(); // refName -> array of {node, index}
-      const refToRowIndex = new Map(); // refElement -> index (for descendants)
 
-      // First pass: Map each ref element to its parent row index
+      // TASK 12.10: First pass - collect refs from this m-for's DOM tree only
+      // Clear forRefs from previous iteration
+      forRefs.clear();
+
       result.keys.forEach((key, index) => {
         const rowData = result.rows.get(key);
         if (!rowData) return;
 
         const rowNode = rowData.node;
+        if (!rowNode || rowNode.nodeType !== 1) return;
 
-        // Check all ref arrays to see if they contain this row's node or descendants
-        for (const refName in this._refs) {
-          const refValue = this._refs[refName];
-          if (!Array.isArray(refValue)) continue;
+        // TASK 12.10: Find all m-ref elements within this row
+        // This is O(1) per row (browser's querySelectorAll is highly optimized)
+        // vs O(totalRefs) of scanning all global refs
+        const refElements: Element[] = [];
 
-          // Check each element in the ref array
-          for (const refElement of refValue) {
-            // Check if this ref element is the row node itself
-            if (refElement === rowNode) {
-              if (!refArraysToUpdate.has(refName)) {
-                refArraysToUpdate.set(refName, []);
-              }
-              refArraysToUpdate.get(refName).push({ node: refElement, index });
-            }
-            // CRITICAL FIX #5: Also check if ref element is a descendant of this row
-            else if (rowNode.contains && rowNode.contains(refElement)) {
-              if (!refArraysToUpdate.has(refName)) {
-                refArraysToUpdate.set(refName, []);
-              }
-              refArraysToUpdate.get(refName).push({ node: refElement, index });
-            }
+        // Check if root node has m-ref
+        const rootRefName = (rowNode as Element).getAttribute?.('m-ref');
+        if (rootRefName) {
+          refElements.push(rowNode as Element);
+        }
+
+        // Find descendant m-ref elements
+        if (rowNode.querySelectorAll) {
+          const descendants = (rowNode as Element).querySelectorAll('[m-ref]');
+          refElements.push(...Array.from(descendants));
+        }
+
+        // Register each ref element in our scoped storage and update map
+        for (const refElement of refElements) {
+          const refName = refElement.getAttribute('m-ref');
+          if (!refName) continue;
+
+          // Track in forRefs (scoped to this m-for)
+          if (!forRefs.has(refName)) {
+            forRefs.set(refName, new Set());
           }
+          forRefs.get(refName)!.add(refElement);
+
+          // Add to refArraysToUpdate
+          if (!refArraysToUpdate.has(refName)) {
+            refArraysToUpdate.set(refName, []);
+          }
+          refArraysToUpdate.get(refName).push({ node: refElement, index });
         }
       });
 
-      // Rebuild each affected ref array in DOM order
+      // TASK 12.3: Rebuild each affected ref array in DOM order
+      // Use DOM-based sorting with compareDocumentPosition instead of loop index
+      // This ensures correct order for interleaved loops (multiple m-for on same container)
       refArraysToUpdate.forEach((nodeList, refName) => {
-        // Sort by index to get DOM order
-        nodeList.sort((a, b) => a.index - b.index);
+        // Extract nodes (we'll sort by DOM position, not loop index)
         const orderedNodes = nodeList.map(item => item.node);
+
+        // TASK 12.3: Sort nodes by DOM document position
+        // This handles interleaved loops correctly where loop index would fail
+        sortRefsByDOM(orderedNodes);
 
         // TASK 8.4: Stable Reference Reconciliation
         // BREAKING CHANGE: Mutate the existing array instead of reassigning
@@ -1566,6 +1656,10 @@ export const CompilerMixin = {
             // Insert orderedNodes at the minIdx position
             targetArray.splice(minIdx, 0, ...orderedNodes);
           }
+
+          // TASK 12.3: Post-process - sort the entire array by DOM position
+          // This ensures interleaved refs from different loops are in correct order
+          sortRefsByDOM(targetArray);
         } else {
           // First time: create the array
           this._refs[refName] = orderedNodes;
@@ -1632,6 +1726,9 @@ export const CompilerMixin = {
             // Insert orderedNodes at the minIdx position (where the first one was)
             // This preserves refs from other m-for loops
             raw.splice(minIdx, 0, ...orderedNodes);
+
+            // TASK 12.3: Post-process - sort by DOM position for interleaved refs
+            sortRefsByDOM(raw);
 
             // Now sync the proxy array with the raw array
             // Use splice to trigger reactivity in one operation
@@ -1713,8 +1810,24 @@ export const CompilerMixin = {
     // Block event handler attributes (onclick, onload, onmouseover, etc.)
     // Without this check, :onclick="malicious" or :[userAttr]="code" bypasses expression security
     // The browser's DOM event system executes the attribute value as JavaScript
+    //
+    // TASK 12.5: Whitelist safe "on" attributes
+    // The naive attr.startsWith('on') blocks valid attributes like 'only', 'once', 'loading="lazy"'
+    // Whitelist known-safe attributes that happen to start with "on"
+    const SAFE_ON_ATTRS = new Set([
+      'only',       // Common boolean/value attribute
+      'once',       // Playback attribute for audio/video
+      'on',         // Some frameworks use this
+      'one',        // Generic attribute
+      'online',     // Network status attribute
+      // NOTE: Event handlers like 'onerror', 'onclick', 'onload' are NOT whitelisted
+    ]);
+
     const attrLower = att.toLowerCase();
-    if (attrLower.startsWith('on')) {
+    if (attrLower.startsWith('on') && !SAFE_ON_ATTRS.has(attrLower)) {
+      // Additional check: event handlers are specifically "on" + event name
+      // Event names are things like "click", "load", "error", "mouseover" etc.
+      // If it's a known safe attribute, allow it
       throw new Error(
         `Reflex: SECURITY ERROR - Cannot bind event handler attribute '${att}'.\n` +
         `Event handlers must use @ syntax (e.g., @click="handler") for security.\n` +
@@ -1812,19 +1925,19 @@ export const CompilerMixin = {
         // CRITICAL FIX: srcdoc validation - requires HTML sanitization, not URL validation
         // srcdoc attribute contains HTML content that can execute scripts
         // Apply DOMPurify sanitization similar to m-html
+        //
+        // TASK 12.7: Remove srcdoc sanitization opt-out
+        // srcdoc MUST always pass through DOMPurify, regardless of the sanitize flag.
+        // This is a guaranteed XSS hole if allowed to bypass.
+        // Unlike m-html which may have legitimate use cases for opt-out, srcdoc
+        // is always rendered in an isolated iframe context where XSS is particularly dangerous.
         if (isSrcdoc && v != null && typeof v === 'string') {
           const purify = this.cfg.domPurify;
           if (purify && typeof purify.sanitize === 'function') {
             v = purify.sanitize(v);
-          } else if (Object.prototype.hasOwnProperty.call(this.cfg, 'sanitize') && this.cfg.sanitize === false) {
-            // Explicit opt-out - warn but allow (developer responsibility)
-            console.warn(
-              'Reflex Security Warning: srcdoc binding without sanitization.\n' +
-              'This can lead to XSS if srcdoc contains user-provided content.\n' +
-              'Configure DOMPurify: app.configure({ domPurify: DOMPurify })'
-            );
           } else {
-            // Default behavior: require DOMPurify for srcdoc (fail closed)
+            // TASK 12.7: Hard block - srcdoc REQUIRES DOMPurify, no opt-out allowed
+            // This is a security-critical change - developers MUST configure DOMPurify
             throw new Error(
               'Reflex SECURITY ERROR: srcdoc attribute requires DOMPurify for safe HTML.\n' +
               'srcdoc accepts HTML content that can execute scripts.\n\n' +
@@ -1832,9 +1945,8 @@ export const CompilerMixin = {
               '  1. Install DOMPurify: npm install dompurify\n' +
               '  2. Configure: app.configure({ domPurify: DOMPurify })\n' +
               '  3. Import: import DOMPurify from \'dompurify\'\n\n' +
-              'Alternative (for trusted HTML only):\n' +
-              '  - Explicitly opt-out: { sanitize: false } (UNSAFE)\n\n' +
-              'Do NOT use srcdoc with user-provided content without DOMPurify.'
+              'SECURITY NOTE: Unlike m-html, srcdoc does NOT support { sanitize: false }.\n' +
+              'The srcdoc attribute is always sanitized to prevent XSS attacks.'
             );
           }
         }
@@ -2060,6 +2172,7 @@ export const CompilerMixin = {
         const safeHtml = rawValue as SafeHTML;
         const htmlString = safeHtml.toString();
 
+        // TASK 12.9: "Loose" Hydration - optimized comparison to avoid expensive DOM parsing
         // During hydration, compare current innerHTML with new value
         // Only update if they differ to prevent destroying iframe state, focus, etc.
         if (self._hydrateMode) {
@@ -2071,9 +2184,42 @@ export const CompilerMixin = {
             return;
           }
 
-          // Normalize both HTMLs by parsing them through the browser
-          // This ensures we compare apples to apples
-          // (browsers normalize HTML: add quotes, reorder attributes, lowercase tags)
+          // TASK 12.9: Text Comparison for text-only content
+          // If the element only contains text (no child elements), compare directly
+          // This avoids expensive DOM parsing for simple text content
+          if (el.childNodes.length === 1 && el.firstChild?.nodeType === 3) {
+            // Single text node - compare text content directly
+            if (el.textContent === htmlString.replace(/<[^>]*>/g, '')) {
+              prev = safeHtml;
+              return;
+            }
+          }
+
+          // TASK 12.9: Hash Comparison for complex HTML
+          // Compute a simple Adler-32 hash of both strings
+          // Only perform expensive DOM normalization if hashes differ
+          const adler32 = (str: string): number => {
+            const MOD_ADLER = 65521;
+            let a = 1, b = 0;
+            for (let i = 0; i < str.length; i++) {
+              a = (a + str.charCodeAt(i)) % MOD_ADLER;
+              b = (b + a) % MOD_ADLER;
+            }
+            return (b << 16) | a;
+          };
+
+          const currentHash = adler32(currentHTML);
+          const newHash = adler32(htmlString);
+
+          // If hashes match, content is extremely likely to be identical
+          // Skip DOM parsing entirely (hash collision probability is very low)
+          if (currentHash === newHash && currentHTML.length === htmlString.length) {
+            prev = safeHtml;
+            return;
+          }
+
+          // Hashes differ or lengths differ - fall back to normalized comparison
+          // Only now do we incur the cost of DOM parsing
           const tempDiv = document.createElement('div');
           tempDiv.innerHTML = htmlString;
           const normalizedNew = tempDiv.innerHTML;
@@ -2123,52 +2269,74 @@ export const CompilerMixin = {
    * Previous implementation used setProperty('display', value, 'important') which
    * permanently overrode CSS classes and media queries, breaking responsive layouts.
    *
+   * TASK 12.4: Fix CSS class conflict
+   * The issue: m-show="true" sets el.style.display = ''. If a class has display: none,
+   * the element remains hidden because CSS wins over empty inline style.
+   *
    * New approach:
-   * - When hiding: Set display: none without !important (sufficient for most cases)
-   * - When showing: Remove the inline display style entirely, letting CSS take over
-   * - This allows CSS classes and media queries to work correctly
-   * - If CSS already has display: none, that will be respected
+   * - When hiding: Set display: none (sufficient for most cases)
+   * - When showing: Remove inline display property, check computed style.
+   *   If still none due to CSS class, force display: 'revert' or 'block'.
+   * - This ensures m-show="true" always makes element visible
    */
   _show(el, exp, o, trans) {
     const fn = this._fn(exp);
     const d = el.style.display === 'none' ? '' : el.style.display;
     let prev, transitioning = false;
 
+    // TASK 12.4: Helper to ensure element is visible
+    // Handles CSS class conflicts by checking computed style and forcing display if needed
+    const forceShow = (element) => {
+      // First, remove any inline display style
+      element.style.removeProperty('display');
+
+      // Check computed style - if CSS class is hiding it, we need to override
+      const computed = getComputedStyle(element);
+      if (computed.display === 'none') {
+        // CSS class is hiding the element - force it visible
+        // Use 'revert' if supported (returns to user-agent stylesheet default)
+        // Otherwise fall back to 'block' which works for most elements
+        element.style.display = 'revert';
+
+        // Check if 'revert' worked (some browsers don't support it)
+        const afterRevert = getComputedStyle(element);
+        if (afterRevert.display === 'none') {
+          // 'revert' didn't work, use 'block' as safe fallback
+          element.style.display = 'block';
+        }
+      } else if (d && d !== element.style.display) {
+        // Restore original display type if it was set
+        element.style.display = d;
+      }
+    };
+
     const e = this.createEffect(() => {
       try {
         const show = !!fn(this.s, o);
-        const next = show ? d : 'none';
+        const next = show ? 'show' : 'none'; // Changed from display value to semantic state
 
         if (next !== prev && !transitioning) {
           if (trans && prev !== undefined) {
             transitioning = true;
             if (show) {
-              // CRITICAL FIX #9: Remove inline display to let CSS take over
-              // This allows CSS classes and media queries to control the display type
-              if (d) {
-                el.style.display = d;
-              } else {
-                el.style.display = '';
-              }
+              // TASK 12.4: Use forceShow for transition enter
+              forceShow(el);
               this._runTrans(el, trans, 'enter', () => { transitioning = false; });
             } else {
               this._runTrans(el, trans, 'leave', () => {
-                // Hide element - use regular style property (no !important)
+                // Hide element
                 el.style.display = 'none';
                 transitioning = false;
               });
             }
           } else {
-            // CRITICAL FIX #9: Don't use !important to allow CSS to work
-            if (next === 'none') {
+            // TASK 12.4: Handle show/hide without transitions
+            if (!show) {
               // Hide element
               el.style.display = 'none';
-            } else if (next) {
-              // Show with specific display type
-              el.style.display = next;
             } else {
-              // Show and let CSS control display type
-              el.style.display = '';
+              // Show element - handle CSS class conflict
+              forceShow(el);
             }
           }
           prev = next;
@@ -2336,7 +2504,19 @@ export const CompilerMixin = {
       if (isContentEditable) {
         // contenteditable elements use innerText (or innerHTML if .html modifier is used)
         const useHTML = modifiers.includes('html');
-        v = useHTML ? el.innerHTML : el.innerText;
+        if (useHTML) {
+          // TASK 12.1: Fix m-model.html Crash Loop
+          // CRITICAL: When reading innerHTML from user input, we must sanitize and wrap
+          // in SafeHTML. This prevents the crash loop:
+          //   Input event -> Writes raw string to state -> Reactive update
+          //   -> SafeHTML.isSafeHTML(string) throws TypeError -> CRASH
+          //
+          // FIX: Input -> SafeHTML.fromUser(string) -> State Update -> Reactivity
+          //      -> SafeHTML Check (Passes) -> Render
+          v = SafeHTML.fromUser(el.innerHTML);
+        } else {
+          v = el.innerText;
+        }
       } else if (isChk) {
         // Handle checkbox array binding
         const currentValue = fn(this.s, o);

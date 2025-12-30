@@ -415,6 +415,10 @@ function isDangerousPropertyPattern(prop: string): boolean {
   // Previous bug: Used [^a-z] which treated underscores as word boundaries
   // This caused false positives for legitimate properties like constructor_id, proto_config
   //
+  // TASK 12.6: Enforce Unicode-aware identifiers
+  // Use Unicode Property Escapes \p{ID_Continue} to properly identify identifier characters
+  // This ensures international variable names (e.g., varÀ, 変数, μεταβλητή) are treated correctly
+  //
   // Examples that SHOULD match (dangerous):
   //   - constructor (exact match)
   //   - _constructor (non-alphanumeric before)
@@ -426,11 +430,14 @@ function isDangerousPropertyPattern(prop: string): boolean {
   //   - proto_config (underscore is part of identifier)
   //   - important (dangerous word is substring)
   //   - evaluation (dangerous word is substring)
+  //   - constructorÀ (À is part of identifier - Unicode continuation char)
+  //   - constructorFoo (Foo continues the identifier)
   for (const dangerous of dangerousWords) {
-    // Create a regex that matches the dangerous word with proper word boundaries
-    // Use [^a-zA-Z0-9_] to treat underscore as a word character (part of identifier)
+    // TASK 12.6: Create a regex that matches the dangerous word with Unicode-aware word boundaries
+    // Use [^\p{ID_Continue}$] to match non-identifier characters (Unicode-aware)
+    // This ensures characters like À, 日, μ are treated as part of the identifier
     // Match if: start of string OR non-identifier-char before, dangerous word, end of string OR non-identifier-char after
-    const pattern = new RegExp(`(^|[^a-zA-Z0-9_])${dangerous}([^a-zA-Z0-9_]|$)`, 'i');
+    const pattern = new RegExp(`(^|[^\\p{ID_Continue}$])${dangerous}([^\\p{ID_Continue}$]|$)`, 'iu');
     if (pattern.test(lowerProp)) return true;
   }
 
