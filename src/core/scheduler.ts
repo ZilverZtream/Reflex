@@ -233,6 +233,12 @@ export const SchedulerMixin = {
    * Handle errors from scheduled jobs.
    */
   _handleError(err, scope) {
+    // CRITICAL SECURITY: Rethrow security violations instead of swallowing them
+    // Security errors (SafeHTML, ScopeContainer, etc.) must crash the app
+    if (err instanceof TypeError && err.message && err.message.includes('Reflex Security:')) {
+      throw err;
+    }
+
     let cur = scope;
     while (cur) {
       const handler = cur.catchError;

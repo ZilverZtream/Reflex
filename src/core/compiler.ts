@@ -1401,7 +1401,7 @@ export const CompilerMixin = {
           // Check the DECODED URL against our allowlist
           const isSafe = RELATIVE_URL_RE.test(decodedUrl) || SAFE_URL_RE.test(decodedUrl);
           if (!isSafe) {
-            console.warn('Reflex: Blocked unsafe URL protocol in', att + ':', v, '(decoded:', decodedUrl + ')');
+            console.warn('Reflex: Blocked unsafe URL protocol in', att + ':', v, `(decoded: ${decodedUrl})`);
             v = 'about:blank';
           }
         }

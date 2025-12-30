@@ -522,6 +522,11 @@ export class SafeExprParser {
       try {
         return this._evaluate(ast, state, context, $event, $el, reflex);
       } catch (err) {
+        // CRITICAL SECURITY: Rethrow security violations instead of swallowing them
+        // Security errors must crash the app to prevent attacks
+        if (err instanceof TypeError && err.message && err.message.includes('Reflex Security:')) {
+          throw err;
+        }
         console.warn('Reflex: Expression evaluation error:', exp, err);
         return undefined;
       }
@@ -1129,7 +1134,7 @@ export class SafeExprParser {
             // SOLUTION: Throw error consistently for unsafe property checks
             // This stops the attack trace and prevents information disclosure
             if (UNSAFE_PROPS[prop] || isDangerousPropertyPattern(prop)) {
-              throw new Error(
+              throw new TypeError(
                 `Reflex Security: Cannot check unsafe property '${prop}' with 'in' operator.\n` +
                 'This property is restricted to prevent sandbox escape.'
               );

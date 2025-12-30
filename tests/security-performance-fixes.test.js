@@ -17,6 +17,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { Reflex } from '../src/index.js';
 import { runTransition } from '../src/renderers/dom.js';
+import { SafeExprParser } from '../src/csp/SafeExprParser.ts';
 
 describe('Security & Performance Fixes - Regression Tests', () => {
 
@@ -271,7 +272,8 @@ describe('Security & Performance Fixes - Regression Tests', () => {
   // Test #10: Blacklist Probing
   describe('Fix #10: SafeExprParser Blacklist Probing', () => {
     it('throws error on unsafe property check', () => {
-      const app = new Reflex({});
+      const app = new Reflex({}, { cspSafe: true });
+      app.configure({ parser: new SafeExprParser() });
       const div = document.createElement('div');
       div.innerHTML = '<div>{{ "constructor" in {} }}</div>';
       document.body.appendChild(div);

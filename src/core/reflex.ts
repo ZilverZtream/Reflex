@@ -185,7 +185,7 @@ export class Reflex {
     //   2. Explicitly opt-out (NOT recommended): app.configure({ sanitize: false })
     this.cfg = {
       sanitize: true,         // Sanitize HTML content (secure by default)
-      cspSafe: false,         // CSP-safe mode (no new Function)
+      cspSafe: options.cspSafe || false,  // CSP-safe mode (apply from options)
       cacheSize: 1000,        // Expression cache size
       onError: null,          // Global error handler
       // Try to use globalThis.DOMPurify if available (for test environments)
@@ -195,6 +195,7 @@ export class Reflex {
 
     // === AUTO-CSP DETECTION ===
     // Try to detect CSP restrictions and automatically enable safe mode
+    // Only run auto-detection if cspSafe wasn't explicitly set in options
     if (!this.cfg.cspSafe) {
       try {
         // Attempt to create a function - this will fail in strict CSP environments
@@ -494,16 +495,42 @@ export class Reflex {
     ]);
 
     if (svgElements.has(rootTag)) {
-      // Wrap in <svg> for correct parsing, then extract the element
-      t.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg">${template}</svg>`;
-      const svgContainer = t.content.firstElementChild;
-      const actualElement = svgContainer?.firstElementChild;
-      this._cp.set(name, {
-        _t: actualElement,
-        p: def.props || [],
-        s: def.setup
-      });
-    } else {
+      // CRITICAL FIX: Parse SVG elements with proper namespace
+      // Create an actual SVG element, use its innerHTML to parse content with proper namespace
+      const svgContainer = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      // Temporarily add to document to ensure proper parsing context
+      const tempDiv = document.createElement('div');
+      tempDiv.style.display = 'none';
+      document.body.appendChild(tempDiv);
+      tempDiv.appendChild(svgContainer);
+
+      try {
+        svgContainer.innerHTML = template;
+        const actualElement = svgContainer.firstElementChild;
+
+        if (actualElement) {
+          // Clone to break connection with temporary container
+          const cloned = actualElement.cloneNode(true);
+          t.content.appendChild(cloned);
+          this._cp.set(name, {
+            _t: cloned,
+            p: def.props || [],
+            s: def.setup
+          });
+        } else {
+          // Fallback
+          t.innerHTML = template;
+          this._cp.set(name, {
+            _t: t.content.firstElementChild,
+            p: def.props || [],
+            s: def.setup
+          });
+        }
+      } finally {
+        // Clean up temporary container
+        tempDiv.remove();
+      }
+    } else{
       t.innerHTML = template;
 
       // CRITICAL FIX #7: Component Fragment Support (Multi-root components)
@@ -1122,15 +1149,36 @@ export class Reflex {
       ]);
 
       if (svgElements.has(rootTag)) {
-        // Wrap in <svg> for correct parsing, then extract the element
-        t.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg">${template}</svg>`;
-        const svgContainer = t.content.firstElementChild;
-        const actualElement = svgContainer?.firstElementChild;
-        self._cp.set(tag, {
-          _t: actualElement,
-          p: def.props || [],
-          s: def.setup
-        });
+        // CRITICAL FIX: Parse SVG elements with proper namespace (same as sync components)
+        const svgContainer = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        const tempDiv = document.createElement('div');
+        tempDiv.style.display = 'none';
+        document.body.appendChild(tempDiv);
+        tempDiv.appendChild(svgContainer);
+
+        try {
+          svgContainer.innerHTML = template;
+          const actualElement = svgContainer.firstElementChild;
+
+          if (actualElement) {
+            const cloned = actualElement.cloneNode(true);
+            t.content.appendChild(cloned);
+            self._cp.set(tag, {
+              _t: cloned,
+              p: def.props || [],
+              s: def.setup
+            });
+          } else {
+            t.innerHTML = template;
+            self._cp.set(tag, {
+              _t: t.content.firstElementChild,
+              p: def.props || [],
+              s: def.setup
+            });
+          }
+        } finally {
+          tempDiv.remove();
+        }
       } else {
         t.innerHTML = template;
         self._cp.set(tag, {
