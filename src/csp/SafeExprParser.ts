@@ -692,6 +692,14 @@ export class SafeExprParser {
       this.pos++;
       return { type: 'unary', op: '-', arg: this.parseUnary() };
     }
+    // CRITICAL FIX: Missing Unary Plus Operator
+    // The unary plus (+value) is the standard, idiomatic way to coerce strings to numbers
+    // in JavaScript templates. Without this, templates using +inputValue throw a syntax error
+    // in Safe Mode, forcing developers to use verbose Number() calls.
+    if (this.peek() === '+' && !this.isDigit(this.expr[this.pos + 1])) {
+      this.pos++;
+      return { type: 'unary', op: '+', arg: this.parseUnary() };
+    }
     if (this.matchStr('typeof ')) {
       return { type: 'unary', op: 'typeof', arg: this.parseUnary() };
     }
@@ -1158,6 +1166,7 @@ export class SafeExprParser {
         switch (node.op) {
           case '!': return !arg;
           case '-': return -arg;
+          case '+': return +arg; // CRITICAL FIX: Support unary plus for string-to-number coercion
           case 'typeof': return typeof arg;
           default: return undefined;
         }

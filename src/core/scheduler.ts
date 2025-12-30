@@ -141,15 +141,24 @@ export const SchedulerMixin = {
    * Yields to browser after YIELD_THRESHOLD to prevent UI freezes
    *
    * CRITICAL FIX: nextTick Deadlock Prevention
-   * Returns true if flush completed successfully, false if there was an error.
-   * This allows nextTick to reject its promise if the scheduler crashed.
+   * Returns an object { success: boolean, errors?: Error[] }
+   * - success: true if flush completed without fatal errors (circular dependencies)
+   * - errors: array of non-fatal errors that occurred during effect execution
+   *
+   * CRITICAL FIX: nextTick Swallows Update Errors
+   * Previously, errors in scheduled effects were caught by _handleError and swallowed,
+   * so nextTick() resolved successfully even if DOM updates failed.
+   * Now we track errors and return them so callers can handle corrupted state.
    */
-  flushQueue(): boolean {
+  flushQueue(): { success: boolean; errors?: Error[] } {
     const start = performance.now();
     // CRITICAL FIX: Use class property instead of local variable
     // Local variable resets to 0 on every resume, allowing slow circular dependencies
     // to bypass the MAX_FLUSH_ITERATIONS safety check.
     if (!this._flushIterations) this._flushIterations = 0;
+
+    // Track errors for reporting to nextTick callers
+    const errors: Error[] = [];
 
     // Process queue, checking for circular dependencies
     while (true) {
@@ -175,7 +184,7 @@ export const SchedulerMixin = {
         this._handleError(error, null);
         this._p = false;
         this._flushIterations = 0; // Reset counter after error
-        return false; // Signal error to callers
+        return { success: false, errors: [error] }; // Signal fatal error to callers
       }
 
       // Process jobs one by one with time slicing
@@ -201,6 +210,12 @@ export const SchedulerMixin = {
           // NOT on yield. This allows legitimate heavy work to complete while
           // still catching infinite loops that span multiple yield cycles.
 
+          // Store partial errors for continuation
+          if (errors.length > 0) {
+            this._pendingErrors = this._pendingErrors || [];
+            this._pendingErrors.push(...errors);
+          }
+
           // Use Scheduler API if available (better priority control), otherwise setTimeout
           if (typeof globalThis !== 'undefined' && globalThis.scheduler?.postTask) {
             globalThis.scheduler.postTask(() => this.flushQueue());
@@ -208,14 +223,22 @@ export const SchedulerMixin = {
             setTimeout(() => this.flushQueue(), 0);
           }
 
-          // Return true - we're deferring completion, not erroring
+          // Return success (we're deferring, not erroring) with errors collected so far
           // The _p flag remains true to indicate work is pending
-          return true;
+          return { success: true, errors: errors.length > 0 ? errors : undefined };
         }
 
         const j = q[i];
         j.f &= ~QUEUED; // Clear queued flag before running
-        try { j(); } catch (err) { this._handleError(err, j.o); }
+        try {
+          j();
+        } catch (err) {
+          // CRITICAL FIX: Track errors for nextTick callers
+          // The error is still handled by _handleError for logging/error boundaries
+          // but we also collect it for reporting
+          errors.push(err instanceof Error ? err : new Error(String(err)));
+          this._handleError(err, j.o);
+        }
         processedCount++;
       }
 
@@ -223,10 +246,16 @@ export const SchedulerMixin = {
       q.length = 0;
     }
 
-    // All jobs processed successfully
+    // All jobs processed - collect any errors from previous yields
+    if (this._pendingErrors && this._pendingErrors.length > 0) {
+      errors.push(...this._pendingErrors);
+      this._pendingErrors = [];
+    }
+
+    // All jobs processed
     this._p = false;
     this._flushIterations = 0; // Reset counter after successful flush
-    return true; // Signal success to callers
+    return { success: true, errors: errors.length > 0 ? errors : undefined };
   },
 
   /**
@@ -399,12 +428,19 @@ export const SchedulerMixin = {
    *
    * CRITICAL FIX: nextTick Deadlock Risk
    * flushQueue catches errors internally to keep the app alive, so it doesn't throw.
-   * Instead, it returns false if there was an error. We check this return value
-   * and reject the promise if the scheduler crashed, preventing code from running
-   * on a dirty/corrupt DOM state.
+   * Instead, it returns { success: false } if there was a fatal error.
+   * We check this return value and reject the promise if the scheduler crashed,
+   * preventing code from running on a dirty/corrupt DOM state.
+   *
+   * CRITICAL FIX: nextTick Swallows Update Errors
+   * Previously, errors in scheduled effects were silently swallowed.
+   * Now flushQueue returns { success: boolean, errors?: Error[] }, and we:
+   * - Reject if success is false (fatal scheduler error)
+   * - Resolve but include errors in optional callback for non-fatal errors
+   * - This allows callers to handle DOM state that may be partially corrupted
    *
    * CRITICAL FIX #1: nextTick Race Condition
-   * flushQueue() returns true when it yields to the browser (time-slicing after 5ms),
+   * flushQueue() returns when it yields to the browser (time-slicing after 5ms),
    * NOT when all work is done. The previous implementation would resolve immediately
    * on the first yield, causing await nextTick() to resume before DOM updates complete.
    *
@@ -412,14 +448,27 @@ export const SchedulerMixin = {
    * If pending, schedule another check instead of resolving immediately.
    * This ensures nextTick only resolves when ALL queued work is truly complete.
    */
-  nextTick(fn?: () => void) {
+  nextTick(fn?: (errors?: Error[]) => void) {
     return new Promise<void>((resolve, reject) => {
+      // Collect errors across multiple flush cycles (when yielding)
+      const allErrors: Error[] = [];
+
       const checkComplete = () => {
         try {
-          const success = this.flushQueue();
-          if (!success) {
-            // Scheduler crashed - reject the promise to prevent running on dirty DOM
-            reject(new Error('Scheduler flush failed - circular dependency or error detected'));
+          const result = this.flushQueue();
+
+          // Collect any errors from this flush cycle
+          if (result.errors) {
+            allErrors.push(...result.errors);
+          }
+
+          if (!result.success) {
+            // Scheduler crashed (circular dependency) - reject the promise
+            const error = new Error(
+              'Scheduler flush failed - circular dependency or fatal error detected.\n' +
+              (allErrors.length > 0 ? `Errors:\n${allErrors.map(e => e.message).join('\n')}` : '')
+            );
+            reject(error);
             return;
           }
 
@@ -437,8 +486,9 @@ export const SchedulerMixin = {
             return;
           }
 
-          // All work complete - resolve the promise
-          fn?.();
+          // All work complete - call callback with any errors that occurred
+          // This allows callers to detect partial failures
+          fn?.(allErrors.length > 0 ? allErrors : undefined);
           resolve();
         } catch (err) {
           // CRITICAL: Always resolve/reject to prevent deadlock
