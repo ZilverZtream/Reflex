@@ -465,9 +465,11 @@ export const CompilerMixin = {
         target = node._anchor;
       }
 
-      // TASK 8.2: Now we register ALL nodes, including virtual containers (via their anchors)
+      // TASK 8.2 & 9.1: Now we register ALL nodes, including virtual containers (via their anchors)
       // The old code skipped virtual containers, which caused memory leaks for tables
-      if (target && target.nodeType === 1) {
+      // TASK 9.1: Accept both element nodes (nodeType === 1) and comment nodes (nodeType === 8)
+      // Comment nodes are used as placeholder anchors for empty virtual containers
+      if (target && (target.nodeType === 1 || target.nodeType === 8)) {
         // Register the target (real DOM node) with GC
         // When the node is collected, the callback will delete these IDs from registry
         this._gcRegistry.register(target, scopeIds);
@@ -1093,6 +1095,17 @@ export const CompilerMixin = {
               // Create a virtual container object to track all nodes
               const nodes = contentNodes.map(node => this._cloneNode(node, true));
 
+              // TASK 9.1: Ghost Row Memory Leak Fix
+              // If the virtual container is empty (0 nodes), insert a placeholder comment
+              // This ensures we always have a physical DOM anchor for GC registration
+              // Without this, empty containers (e.g., m-if="false" on all items) leak memory
+              let anchor = nodes[0];
+              if (!anchor) {
+                // Create a placeholder comment that will serve as the GC anchor
+                anchor = this._ren.createComment('empty-container');
+                nodes.push(anchor);
+              }
+
               // TASK 8.2: GC Anchor Strategy
               // Assign the first child DOM node as the "Anchor" for GC registration
               // When the browser garbage collects the anchor (first <tr>, <option>, etc.),
@@ -1100,7 +1113,7 @@ export const CompilerMixin = {
               const container = {
                 _isVirtualContainer: true,
                 _nodes: nodes,
-                _anchor: nodes[0], // TASK 8.2: First child is the GC anchor
+                _anchor: anchor, // TASK 9.1: Guaranteed to exist (either first child or placeholder)
                 parentNode: null, // Will be set on insertion
                 remove: function() {
                   // Remove all tracked nodes
@@ -1367,12 +1380,16 @@ export const CompilerMixin = {
           this._refs[refName] = orderedNodes;
         }
 
-        // REMOVED: Automatic state array clobbering
-        // if (refName in this.s && Array.isArray(this.s[refName])) {
-        //   const raw = this.toRaw(this.s[refName]);
-        //   raw.length = 0;
-        //   raw.push(...orderedNodes);
-        // }
+        // TASK 9.2: Synchronize Reactive m-ref State
+        // After DOM reconciliation, state.refs must match the new order
+        // Without this, state.refs[0] points to the wrong element after sorting
+        if (refName in this.s && Array.isArray(this.s[refName])) {
+          // Use splice on the proxy to trigger reactivity automatically
+          // splice(0, length, ...items) clears and replaces in one operation
+          // This preserves the array reference and triggers watchers
+          const stateArray = this.s[refName];
+          stateArray.splice(0, stateArray.length, ...orderedNodes);
+        }
       });
     });
 
