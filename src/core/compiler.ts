@@ -1974,9 +1974,6 @@ export const CompilerMixin = {
       }
       return; // Skip m-model binding for file inputs
     }
-    // CRITICAL FIX: Unsupported contenteditable
-    // Elements with contenteditable="true" use innerText/innerHTML, not value
-    const isContentEditable = el.contentEditable === 'true';
 
     const e = this.createEffect(() => {
       try {
@@ -1992,6 +1989,12 @@ export const CompilerMixin = {
         }
 
         const v = fn(this.s, o);
+
+        // TASK 8.3: Check contenteditable inside the effect
+        // Elements with contenteditable="true" use innerText/innerHTML, not value
+        // Check both property and attribute for compatibility with different DOM implementations
+        const isContentEditable = el.contentEditable === 'true' ||
+                                   el.getAttribute('contenteditable') === 'true';
         if (isContentEditable) {
           // contenteditable elements use innerText (or innerHTML if .html modifier is used)
           const useHTML = modifiers.includes('html');
@@ -2087,6 +2090,10 @@ export const CompilerMixin = {
       if (isComposing) return;
 
       let v;
+      // TASK 8.3: Check contenteditable dynamically
+      // Check both property and attribute for compatibility
+      const isContentEditable = el.contentEditable === 'true' ||
+                                 el.getAttribute('contenteditable') === 'true';
       if (isContentEditable) {
         // contenteditable elements use innerText (or innerHTML if .html modifier is used)
         const useHTML = modifiers.includes('html');
