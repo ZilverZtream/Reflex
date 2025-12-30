@@ -379,6 +379,46 @@ function hasStrictParent(marker: Comment): boolean {
  */
 export const CompilerMixin = {
   /**
+   * Register a node with the GC-driven cleanup system (TASK 5).
+   *
+   * BREAKING CHANGE: Automatic memory management via FinalizationRegistry
+   *
+   * When a DOM node with a FlatScope is garbage collected, the GC registry
+   * automatically cleans up the scope's IDs from the ScopeRegistry.
+   *
+   * This method:
+   * 1. Stores the scope in _scopeMap (WeakMap - doesn't prevent GC)
+   * 2. Registers the node with _gcRegistry for automatic cleanup
+   * 3. Extracts scope IDs from the FlatScope for cleanup
+   *
+   * Why this works:
+   * - _scopeMap is a WeakMap, so it doesn't prevent the node from being GC'd
+   * - When the node is GC'd, FinalizationRegistry fires and deletes the IDs
+   * - Even document.body.innerHTML = '' will eventually self-clean via GC
+   *
+   * @param node - The DOM node (or virtual container) to register
+   * @param scope - The FlatScope associated with this node
+   */
+  _registerScopeWithGC(node, scope) {
+    // Store the scope in WeakMap (doesn't prevent GC)
+    this._scopeMap.set(node, scope);
+
+    // Register with GC for automatic cleanup (only for FlatScope)
+    if (isFlatScope(scope)) {
+      // Extract all scope IDs that need cleanup when node is GC'd
+      const scopeIds = Object.values(scope._ids);
+
+      // CRITICAL: Only register real DOM nodes, not virtual containers
+      // Virtual containers are plain objects and won't trigger GC callbacks properly
+      if (!node._isVirtualContainer) {
+        // Register the node with GC
+        // When the node is collected, the callback will delete these IDs from registry
+        this._gcRegistry.register(node, scopeIds);
+      }
+    }
+  },
+
+  /**
    * Walk the DOM tree and process nodes.
    * Uses iterative walking with explicit stack to prevent stack overflow.
    * This approach handles deeply nested DOM structures (10,000+ levels) safely.
@@ -981,7 +1021,8 @@ export const CompilerMixin = {
               // Single root element - ALWAYS use it directly without wrapper
               // This works for both strict and non-strict parents
               const singleRoot = this._cloneNode(elementNodes[0], true) as Element;
-              this._scopeMap.set(singleRoot, scope);
+              // TASK 5: Register with GC for automatic cleanup
+              this._registerScopeWithGC(singleRoot, scope);
               this._bnd(singleRoot, scope);
               // CRITICAL FIX: Defer _w call to prevent stack overflow
               nodesToWalk.push({ node: singleRoot, scope });
@@ -1006,7 +1047,9 @@ export const CompilerMixin = {
                 }
               } as any;
 
-              this._scopeMap.set(container, scope);
+              // TASK 5: Register with GC for automatic cleanup
+              // Note: Virtual containers are skipped by _registerScopeWithGC (not real DOM nodes)
+              this._registerScopeWithGC(container, scope);
 
               // Process bindings and defer walk to prevent stack overflow
               nodes.forEach(child => {
@@ -1032,7 +1075,8 @@ export const CompilerMixin = {
                 wrapper.appendChild(this._cloneNode(childNode, true));
               });
 
-              this._scopeMap.set(wrapper, scope);
+              // TASK 5: Register with GC for automatic cleanup
+              this._registerScopeWithGC(wrapper, scope);
 
               // Process bindings and defer walk to prevent stack overflow
               const children = Array.from(wrapper.childNodes);
@@ -1061,7 +1105,8 @@ export const CompilerMixin = {
               this._ren.insertAfter(cm, tempMarker);
               tempMarker.after(node);
               const inst = this._comp(node, tag.toLowerCase(), scope);
-              this._scopeMap.set(inst, scope);
+              // TASK 5: Register with GC for automatic cleanup
+              this._registerScopeWithGC(inst, scope);
               tempMarker.remove();
               return inst;
             } else if (isAsyncComp) {
@@ -1072,11 +1117,13 @@ export const CompilerMixin = {
               this._asyncComp(node, tag.toLowerCase(), scope);
               // For async, we track the marker's next sibling (fallback or loaded component)
               const tracked = tempMarker.nextSibling || node;
-              this._scopeMap.set(tracked, scope);
+              // TASK 5: Register with GC for automatic cleanup
+              this._registerScopeWithGC(tracked, scope);
               tempMarker.remove();
               return tracked;
             } else {
-              this._scopeMap.set(node, scope);
+              // TASK 5: Register with GC for automatic cleanup
+              this._registerScopeWithGC(node, scope);
               this._bnd(node, scope);
               // CRITICAL FIX: Defer _w call to prevent stack overflow
               nodesToWalk.push({ node, scope });
@@ -1114,7 +1161,18 @@ export const CompilerMixin = {
         },
 
         removeNode: (node) => {
-          // Clean up flat scope registry entries
+          // TASK 5: Manual cleanup with GC safety net
+          //
+          // This function still performs immediate cleanup for optimal performance,
+          // but the GC-driven engine provides a safety net:
+          //
+          // - If removeNode is called: Immediate cleanup (best case)
+          // - If removeNode is NOT called: GC cleanup when node is collected (fallback)
+          //
+          // Result: Even if this function is never called (e.g., innerHTML = ''),
+          // the FinalizationRegistry will eventually clean up scope IDs automatically.
+
+          // Clean up flat scope registry entries (immediate cleanup)
           const scope = this._scopeMap.get(node);
           if (scope && isFlatScope(scope)) {
             // Delete all IDs registered in this scope from the registry
@@ -1124,6 +1182,11 @@ export const CompilerMixin = {
                 this._scopeRegistry.delete(id);
               }
             }
+
+            // Note: We don't unregister from _gcRegistry because:
+            // 1. It requires an unregister token which we didn't provide
+            // 2. The GC callback is idempotent (delete on non-existent ID is safe)
+            // 3. It's fine to let GC cleanup run even after manual cleanup
           }
 
           // CRITICAL FIX: Handle virtual containers (for strict parents like <table>)
