@@ -356,9 +356,48 @@ export function createMembrane(target: any): any {
         }
       }
 
-      // RECURSION: If the value is an object/function, wrap it in the membrane
+      // CRITICAL FIX: Safe Mode Breaks Native Objects (Date, Map, Set, WeakMap)
+      // Native methods rely on internal slots (e.g., [[DateValue]], [[MapData]])
+      // that are tied to the original object, not the Proxy.
+      //
+      // When we return an unbound function from a membrane-wrapped object,
+      // calling it sets `this` to the Proxy, which throws:
+      // "TypeError: this is not a Date object" (or Map, Set, etc.)
+      //
+      // FIX: For native objects with internal slots, bind methods to the original target.
+      // This preserves functionality while still wrapping the return values.
+      const isNativeWithInternalSlots = (
+        obj instanceof Date ||
+        obj instanceof Map ||
+        obj instanceof Set ||
+        obj instanceof WeakMap ||
+        obj instanceof WeakSet ||
+        obj instanceof RegExp ||
+        obj instanceof ArrayBuffer ||
+        obj instanceof DataView ||
+        (typeof SharedArrayBuffer !== 'undefined' && obj instanceof SharedArrayBuffer) ||
+        ArrayBuffer.isView(obj) // TypedArrays (Uint8Array, Int32Array, etc.)
+      );
+
+      if (typeof value === 'function') {
+        if (isNativeWithInternalSlots) {
+          // Bind method to original target and wrap return values
+          return function(...args: any[]) {
+            const result = value.apply(obj, args);
+            // Recursively wrap object/function return values
+            if (result != null && (typeof result === 'object' || typeof result === 'function')) {
+              return createMembrane(result);
+            }
+            return result;
+          };
+        }
+        // For non-native objects, wrap the function in the membrane
+        return createMembrane(value);
+      }
+
+      // RECURSION: If the value is an object, wrap it in the membrane
       // This is critical to prevent chained property access attacks
-      if (value != null && (typeof value === 'object' || typeof value === 'function')) {
+      if (value != null && typeof value === 'object') {
         return createMembrane(value);
       }
 

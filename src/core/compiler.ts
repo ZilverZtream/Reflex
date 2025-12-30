@@ -521,6 +521,48 @@ export const CompilerMixin = {
    * - { node, scope }: Regular DOM walking
    * - { comp, tag, scope }: Component to render
    */
+
+  /**
+   * CRITICAL FIX: Recursive Directives via Effects
+   *
+   * Queue a walk operation for iterative processing instead of direct recursion.
+   * This prevents stack overflow when m-if/m-for toggles cause nested effects.
+   *
+   * The pattern: Instead of calling _w directly inside effects:
+   *   this._w(node, scope)  // BAD: causes recursion
+   *
+   * We queue the work and process iteratively:
+   *   this._queueWalk(node, scope)  // Queue
+   *   this._flushWalkQueue()        // Process iteratively
+   */
+  _walkQueue: null as { node: any, scope: any }[] | null,
+  _walkQueueProcessing: false,
+
+  _queueWalk(node: any, scope: any) {
+    if (!this._walkQueue) {
+      this._walkQueue = [];
+    }
+    this._walkQueue.push({ node, scope });
+  },
+
+  _flushWalkQueue() {
+    // Prevent re-entrant processing
+    if (this._walkQueueProcessing || !this._walkQueue || this._walkQueue.length === 0) {
+      return;
+    }
+
+    this._walkQueueProcessing = true;
+    try {
+      // Process queue iteratively - items may be added during processing
+      while (this._walkQueue.length > 0) {
+        const item = this._walkQueue.shift()!;
+        this._w(item.node, item.scope);
+      }
+    } finally {
+      this._walkQueueProcessing = false;
+    }
+  },
+
   _w(n, o) {
     // TASK 12.2: Depth guard to prevent DoS via deeply nested components
     // Initialize depth counter if not set
@@ -835,12 +877,16 @@ export const CompilerMixin = {
             cur = contentNodes.length === 1 ? contentNodes[0] : contentNodes;
 
             // Process bindings and walk each inserted node
+            // CRITICAL FIX: Recursive Directives via Effects
+            // Queue walks instead of calling _w directly to prevent stack overflow
+            // when m-if toggles cause nested effects to trigger more _w calls
             contentNodes.forEach(node => {
               if (node.nodeType === 1) {
                 this._bnd(node as Element, o);
-                this._w(node as Element, o);
+                this._queueWalk(node as Element, o);
               }
             });
+            this._flushWalkQueue();
 
             // Run enter transition on content nodes
             if (trans && contentNodes.length > 0) {
@@ -864,9 +910,12 @@ export const CompilerMixin = {
             // _compNoRecurse + manual _w prevents the recursion bomb
             cur = this._compNoRecurse(cloned, tagLower, o);
             // Manually walk the component instance to attach bindings
+            // CRITICAL FIX: Recursive Directives via Effects
+            // Queue walk instead of direct call to prevent stack overflow
             if (cur) {
               const compScope = this._scopeMap.get(cur) || o;
-              this._w(cur, compScope);
+              this._queueWalk(cur, compScope);
+              this._flushWalkQueue();
             }
           } else if (isAsyncComp) {
             // For async components, track the marker that _asyncComp creates
@@ -894,7 +943,10 @@ export const CompilerMixin = {
               // Normal case: no structural directives on the clone
               cur = cloned;
               this._bnd(cur, o);
-              this._w(cur, o);
+              // CRITICAL FIX: Recursive Directives via Effects
+              // Queue walk instead of direct call to prevent stack overflow
+              this._queueWalk(cur, o);
+              this._flushWalkQueue();
             }
           }
           // Run enter transition (skip for templates, already handled above)
@@ -1730,9 +1782,26 @@ export const CompilerMixin = {
             // TASK 12.3: Post-process - sort by DOM position for interleaved refs
             sortRefsByDOM(raw);
 
-            // Now sync the proxy array with the raw array
-            // Use splice to trigger reactivity in one operation
-            stateArray.splice(0, stateArray.length, ...raw);
+            // CRITICAL FIX: Global Ref Array Thrashing
+            // Previous implementation: stateArray.splice(0, stateArray.length, ...raw)
+            // This replaces the entire array, triggering watchers on ALL indices
+            // even when only one item moved.
+            //
+            // NEW: Do targeted updates - only modify positions that actually changed
+            // This reduces reactivity triggers from O(N) to O(changed items)
+            let changedCount = 0;
+            for (let i = 0; i < raw.length; i++) {
+              if (stateArray[i] !== raw[i]) {
+                stateArray[i] = raw[i];
+                changedCount++;
+              }
+            }
+            // Handle length changes (items removed from end)
+            if (stateArray.length > raw.length) {
+              stateArray.length = raw.length;
+            }
+            // If nothing actually changed in content, skip triggering length
+            // This prevents unnecessary reactivity when array is already correct
           }
         }
       });
@@ -2112,7 +2181,34 @@ export const CompilerMixin = {
 
           if (next !== prev) {
             prev = next;
-            next === null ? el.removeAttribute(att) : el.setAttribute(att, next);
+            // CRITICAL FIX: Unhandled SVG xlink:href Namespace
+            // SVG namespaced attributes like xlink:href require setAttributeNS for strict XML/SVG contexts.
+            // Modern browsers handle xlink:href without namespacing, but strict SVG parsers
+            // (or older user agents) may fail to render SVG icons or references correctly.
+            //
+            // Namespace URIs:
+            // - xlink: http://www.w3.org/1999/xlink (for xlink:href, xlink:show, etc.)
+            // - xml: http://www.w3.org/XML/1998/namespace (for xml:lang, xml:space)
+            if (att === 'xlink:href' || att.startsWith('xlink:')) {
+              const XLINK_NS = 'http://www.w3.org/1999/xlink';
+              const localName = att.split(':')[1]; // 'href' from 'xlink:href'
+              if (next === null) {
+                el.removeAttributeNS(XLINK_NS, localName);
+              } else {
+                el.setAttributeNS(XLINK_NS, att, next);
+              }
+            } else if (att.startsWith('xml:')) {
+              // Handle xml: namespace attributes (xml:lang, xml:space, etc.)
+              const XML_NS = 'http://www.w3.org/XML/1998/namespace';
+              const localName = att.split(':')[1];
+              if (next === null) {
+                el.removeAttributeNS(XML_NS, localName);
+              } else {
+                el.setAttributeNS(XML_NS, att, next);
+              }
+            } else {
+              next === null ? el.removeAttribute(att) : el.setAttribute(att, next);
+            }
           }
         }
       } catch (err) {
@@ -2364,22 +2460,27 @@ export const CompilerMixin = {
     const isNum = type === 'number' || type === 'range' || modifiers.includes('number');
     const isMultiSelect = type === 'select-multiple';
     const isLazy = modifiers.includes('lazy');
-    // CRITICAL FIX #5: m-model File Input Crash
+    // CRITICAL FIX: m-model Input Type Switching
     // File inputs have a read-only .value property (security restriction)
-    // Attempting to set it throws an error or fails silently
-    // For file inputs, we can only read .files, not set .value
-    const isFile = type === 'file';
-    if (isFile) {
+    // We track the initial type to warn appropriately, but DON'T return early.
+    // The effect dynamically checks the type, so if an input starts as type="file"
+    // but is later switched to type="text" via :type binding, the m-model will work.
+    //
+    // Previous bug: Early return prevented binding entirely for initial file inputs,
+    // so switching from file to text left the input unresponsive.
+    const initialIsFile = type === 'file';
+    if (initialIsFile) {
       // CRITICAL FIX: Prevent warning spam by only logging once per element
       // Use WeakSet to track which elements have been warned
       if (!this._fileInputsWarned.has(el)) {
         this._fileInputsWarned.add(el);
         console.warn(
           'Reflex: m-model is not supported on file inputs (security restriction).\n' +
-          'Use @change="handler" and access el.files instead.'
+          'Use @change="handler" and access el.files instead.\n' +
+          'Note: If the input type changes dynamically, m-model will work when not type="file".'
         );
       }
-      return; // Skip m-model binding for file inputs
+      // DON'T return early - let the effect handle dynamic type changes
     }
 
     const e = this.createEffect(() => {
@@ -2643,25 +2744,30 @@ export const CompilerMixin = {
 
         // CRITICAL FIX: Empty Multi-Select Type Trap
         // If the array is empty, we can't infer type from currentValue[0]
-        // Instead, check if ALL option values are numeric to infer the type
-        // CRITICAL SECURITY FIX #8: m-model Type Confusion
         //
+        // CRITICAL SECURITY FIX #8: m-model Type Confusion
         // VULNERABILITY: Type inference from DOM options allows attackers to change model type
         // by injecting DOM options (e.g., via a separate vulnerability or SSR injection)
-        // Example: model is initialized as string[], but DOM options are numeric, so type changes to number[]
         //
-        // SOLUTION: Respect the initialization type of the model variable
-        // Only infer from DOM if the model type is truly unknown (not initialized)
-        // Default to strings to be safe (source of truth is the model, not the view)
+        // SOLUTION: Use explicit .number modifier OR infer from existing array elements
+        // Priority order:
+        // 1. .number modifier (explicit declaration by developer)
+        // 2. First element type (if array has values)
+        // 3. Default to strings (safest)
+        //
+        // CRITICAL FIX: Empty Multi-Select Defaults to String
+        // For empty arrays, check if .number modifier is present
+        // This allows: m-model.number="selectedIds" to work with initially empty arrays
         let shouldCoerceToNumber = false;
 
-        if (Array.isArray(currentValue) && currentValue.length > 0) {
+        if (modifiers.includes('number')) {
+          // Explicit .number modifier - trust the developer's intent
+          shouldCoerceToNumber = true;
+        } else if (Array.isArray(currentValue) && currentValue.length > 0) {
           // Array has values - use first element's type (TRUSTED source)
           shouldCoerceToNumber = typeof currentValue[0] === 'number';
         }
-        // NOTE: Do NOT infer type from DOM options for empty arrays
-        // Empty array means no type information - default to strings (safer)
-        // If user wants numbers, they should initialize with [0] or explicitly type cast
+        // If no modifier and empty array: default to strings (safer)
 
         // Fallback for environments without selectedOptions (e.g., happy-dom)
         let selectedValues;

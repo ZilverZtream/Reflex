@@ -718,6 +718,15 @@ export const ReactivityMixin = {
    * - All methods in ARRAY_MUTATORS: push, pop, shift, unshift, splice, sort, reverse, fill, copyWithin
    * - These are the only methods that can mutate arrays
    * - Read-only methods (map, filter, etc.) don't need wrapping
+   *
+   * CRITICAL FIX: Array Mutation Index Blindness
+   * Methods like unshift, sort, reverse, and splice shift or reorder elements at specific indices.
+   * The get trap tracks dependencies on specific keys (e.g., arr[0] tracks "0"), but previously
+   * wrapArrayMethod only fired ITERATE and length. This caused computed properties or template
+   * bindings that rely on specific indices (e.g., {{ list[0] }}) to show stale data.
+   *
+   * FIX: For reorder methods (splice, sort, reverse, shift, unshift, fill, copyWithin),
+   * trigger updates for all indices that have active watchers in meta.d.
    */
   wrapArrayMethod(t: any[], m: string, meta: ReactiveMeta) {
     const self = this;
@@ -739,6 +748,9 @@ export const ReactivityMixin = {
         // Get the raw (unwrapped) target array
         const rawTarget = self.toRaw(t);
 
+        // Capture array state before mutation for reorder detection
+        const oldLength = rawTarget.length;
+
         // Map args through toRaw to prevent nested proxy issues
         const rawArgs = args.map(arg => self.toRaw(arg));
 
@@ -757,6 +769,44 @@ export const ReactivityMixin = {
         if (!ks) self.pendingTriggers.set(meta, ks = new Set());
         ks.add(ITERATE);
         ks.add('length');
+
+        // CRITICAL FIX: Array Mutation Index Blindness
+        // For reorder methods, trigger updates for specific indices that have watchers.
+        // This ensures {{ list[0] }} updates when array is sorted, reversed, etc.
+        if (REORDER_METHODS[m]) {
+          // Determine which indices may have changed based on the method
+          let startIdx = 0;
+          let endIdx = rawTarget.length;
+
+          if (m === 'splice') {
+            // splice(start, deleteCount, ...items) - only indices from 'start' onwards change
+            startIdx = Number(rawArgs[0]) || 0;
+            if (startIdx < 0) startIdx = Math.max(0, oldLength + startIdx);
+            // All indices from startIdx to end of array may have shifted
+          } else if (m === 'fill') {
+            // fill(value, start, end) - only specified range changes
+            startIdx = rawArgs[1] !== undefined ? Number(rawArgs[1]) || 0 : 0;
+            endIdx = rawArgs[2] !== undefined ? Number(rawArgs[2]) || rawTarget.length : rawTarget.length;
+            if (startIdx < 0) startIdx = Math.max(0, rawTarget.length + startIdx);
+            if (endIdx < 0) endIdx = Math.max(0, rawTarget.length + endIdx);
+          } else if (m === 'copyWithin') {
+            // copyWithin(target, start, end) - indices from target onwards change
+            startIdx = Number(rawArgs[0]) || 0;
+            if (startIdx < 0) startIdx = Math.max(0, rawTarget.length + startIdx);
+          }
+          // For sort, reverse, shift, unshift: all indices may change (startIdx=0, endIdx=length)
+
+          // Trigger updates ONLY for indices that have active watchers (O(D) where D = tracked deps)
+          // This avoids O(N) iteration over the entire array
+          for (const [key, depSet] of meta.d) {
+            if (typeof key !== 'string') continue;
+            const idx = Number(key);
+            // Check if this is a numeric array index within the affected range
+            if (Number.isInteger(idx) && idx >= startIdx && idx < endIdx && depSet.size > 0) {
+              ks.add(key);
+            }
+          }
+        }
 
       } finally {
         if (--self._b === 0) {
@@ -792,19 +842,32 @@ export const ReactivityMixin = {
         // SOLUTION: Create a new array for each iteration to ensure distinct references
         // While this has a performance cost for very large Maps (100k+ items), correctness is critical
         // Users can use Map.get() in a loop for performance-critical large Map iterations
+        //
+        // OPTIMIZATION: Map/Set Iteration Garbage Generation
+        // To reduce GC pressure while maintaining correctness:
+        // 1. Reuse the iterator result object { done, value } by mutating it
+        // 2. For single-value methods (keys/values), minimize allocations
+        // 3. Entry arrays [k, v] must still be newly allocated for correctness
+
+        // Reusable result object - mutate instead of creating new objects
+        // This reduces garbage from O(2n) to O(n) for entries, O(1) for keys/values
+        const result = { done: false, value: undefined as any };
+        const doneResult = { done: true, value: undefined };
 
         return {
           [Symbol.iterator]() { return this; },
           next() {
             const n = it.next();
-            if (n.done) return n;
+            if (n.done) return doneResult;
+
             // CRITICAL FIX #6: Iteration Allocation Storm
             // Only wrap values that need wrapping (objects). Primitives pass through.
             // This eliminates wrapper allocation overhead for primitive-heavy collections
             if (isMap) {
               if (m === 'keys' || m === 'values') {
                 const val = n.value;
-                return { done: false, value: (val !== null && typeof val === 'object') ? self._wrap(val) : val };
+                result.value = (val !== null && typeof val === 'object') ? self._wrap(val) : val;
+                return result;
               }
               // For entries/default iteration, create a NEW array for each iteration
               // This is critical for correctness with spread operator and Array.from()
@@ -812,10 +875,13 @@ export const ReactivityMixin = {
               const wrappedK = (k !== null && typeof k === 'object') ? self._wrap(k) : k;
               const wrappedV = (v !== null && typeof v === 'object') ? self._wrap(v) : v;
               // Create a new array instance for each iteration (fixes data corruption)
-              return { done: false, value: [wrappedK, wrappedV] };
+              // This is necessary - we can't pool these without risking correctness
+              result.value = [wrappedK, wrappedV];
+              return result;
             }
             const val = n.value;
-            return { done: false, value: (val !== null && typeof val === 'object') ? self._wrap(val) : val };
+            result.value = (val !== null && typeof val === 'object') ? self._wrap(val) : val;
+            return result;
           },
           return(v) { return it.return ? it.return(v) : { done: true, value: v }; }
         };
