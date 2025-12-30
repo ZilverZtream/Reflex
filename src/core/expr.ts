@@ -73,6 +73,12 @@ export const ExprMixin = {
    * @returns {Function} Evaluator (state, context, $event, $el) => result
    */
   _fn(exp, isH = false) {
+    // TASK 9.2: Trim whitespace to ensure fast paths work correctly
+    // Without this, expressions like " item " (with spaces from {{ item }})
+    // don't match fast path regexes and fall through to slow path without
+    // proper dependency tracking for FlatScopes
+    exp = exp.trim();
+
     const k = (isH ? 'H:' : '') + exp;
     const cached = this._ec.get(k);
     if (cached) return cached;

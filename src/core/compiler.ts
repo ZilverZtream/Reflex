@@ -1052,6 +1052,16 @@ export const CompilerMixin = {
           // Create the FlatScope object
           const scope = createFlatScope(this._scopeRegistry, ids, parentIds);
 
+          // TASK 9.2: Register FlatScope for reactive dependency tracking
+          // This allows text effects ({{ item }}) to properly track dependencies
+          // and re-run when scope values change via updateNode
+          this._mf.set(scope, {
+            r: scope as any,
+            v: 0,
+            d: new Map(),
+            engine: this as any
+          });
+
           // Return the FlatScope (it's frozen and immutable)
           return scope;
         },
@@ -1232,12 +1242,23 @@ export const CompilerMixin = {
             // Update values directly in the registry using the pre-allocated IDs
             setFlatScopeValue(scope, alias, processedItem);
 
+            // TASK 9.2: Trigger effects that depend on this scope variable
+            // This ensures text bindings ({{ item }}) re-run when the item changes
+            const meta = this._mf.get(scope);
+            if (meta) {
+              this.triggerEffects(meta, alias);
+            }
+
             // CRITICAL FIX: Ensure index updates trigger reactivity
             // When list order changes, child text nodes using {{ index }} must update
             if (idxAlias) {
               const currentIndex = getFlatScopeValue(scope, idxAlias);
               if (!currentIndex.found || currentIndex.value !== index) {
                 setFlatScopeValue(scope, idxAlias, index);
+                // TASK 9.2: Also trigger effects for index changes
+                if (meta) {
+                  this.triggerEffects(meta, idxAlias);
+                }
               }
             }
 
