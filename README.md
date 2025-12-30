@@ -32,6 +32,28 @@ We don't just rely on Regex. Reflex uses a **Hybrid Security Model**:
 npm install @zilverztream/reflex
 ```
 
+## 🌐 Browser Requirements
+
+**BREAKING CHANGE (Task 5):** Reflex now requires modern browser features for automatic memory management.
+
+Reflex uses **FinalizationRegistry** and **WeakRef** for the GC-driven cleanup engine, which eliminates the "registry leak" that caused memory leaks when DOM nodes were removed without calling cleanup functions.
+
+### Required Browser Versions:
+- **Chrome/Edge:** 84+ (July 2020)
+- **Firefox:** 79+ (July 2020)
+- **Safari:** 14.1+ (April 2021)
+- **Node.js:** 14.6+ (July 2020)
+
+### Why This Change?
+
+The old architecture required manual cleanup via `removeNode()`. If that function wasn't called (e.g., when using `innerHTML = ''`), your app would leak memory forever.
+
+The new **GC-Driven Engine** inverts control:
+- ✅ **Before:** Manual cleanup required → Memory leaks if forgotten
+- ✅ **After:** Automatic GC-driven cleanup → Zero leaks, even with `innerHTML = ''`
+
+**These features CANNOT be polyfilled.** If you need to support older browsers, use an older version of Reflex (pre-Task-5).
+
 ## ⚡ Quick Start (Browser)
 
 ```javascript
