@@ -725,24 +725,34 @@ export const ReactivityMixin = {
       self._b++;
       let res;
       try {
-        // BREAKING CHANGE: Call on PROXY, not raw target
-        // This ensures all set traps fire for security-first design
-        const proxy = meta.p;
+        // TASK 12.8: Optimized "Batch" Reactivity
+        // CRITICAL PERFORMANCE FIX: Call on RAW target, not proxy
+        //
+        // Previous issue: push(1,2,3) triggered the Proxy trap 4 times (3 indices + length)
+        // This defeated the purpose of batching because each set trap fired synchronously.
+        //
+        // Solution: Use Reflect.apply on the RAW target to mutate directly, then
+        // manually fire one dependency change event for 'length' and ITERATE.
+        //
+        // Result: arr.push(1, ...1000 items) triggers subscribers ONCE, not 1001 times.
+
+        // Get the raw (unwrapped) target array
+        const rawTarget = self.toRaw(t);
 
         // Map args through toRaw to prevent nested proxy issues
-        // But the method itself is called on the proxy
         const rawArgs = args.map(arg => self.toRaw(arg));
 
-        // Call Array.prototype method with proxy as `this`
-        // This bypasses the get trap (avoiding infinite recursion)
-        // but when the method mutates (e.g., this[i] = value),
-        // it goes through the proxy's set trap for each index
-        res = Array.prototype[m].call(proxy, ...rawArgs);
+        // TASK 12.8: Call Array.prototype method on the RAW target
+        // This bypasses BOTH get and set traps entirely - no per-element reactivity
+        // We'll manually trigger one 'length' update after the operation
+        res = Reflect.apply(Array.prototype[m], rawTarget, rawArgs);
 
         // Increment version after batch operation completes
         meta.v++;
 
+        // TASK 12.8: Single trigger after mutation completes
         // Queue ITERATE and length triggers for structural changes
+        // This fires ONCE after the entire push/splice/etc completes
         let ks = self.pendingTriggers.get(meta);
         if (!ks) self.pendingTriggers.set(meta, ks = new Set());
         ks.add(ITERATE);

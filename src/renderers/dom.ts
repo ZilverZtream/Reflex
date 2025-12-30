@@ -138,6 +138,39 @@ export class SafeHTML {
   }
 
   /**
+   * Create SafeHTML from user-provided HTML input (e.g., contenteditable elements).
+   *
+   * TASK 12.1: This method is specifically for m-model.html two-way binding.
+   * When a user types in a contenteditable element, we need to:
+   * 1. Read the raw innerHTML (string)
+   * 2. Sanitize it through DOMPurify
+   * 3. Return a SafeHTML instance that passes isSafeHTML() check
+   *
+   * This breaks the crash loop:
+   * Input -> SafeHTML.fromUser(string) -> State Update -> Reactivity -> SafeHTML Check (Passes) -> Render
+   *
+   * @param html - Raw HTML string from user input (e.g., el.innerHTML)
+   * @returns SafeHTML instance containing sanitized content
+   *
+   * @throws TypeError if sanitizer not configured
+   */
+  static fromUser(html: string): SafeHTML {
+    if (!SafeHTML._sanitizer) {
+      throw new TypeError(
+        'Reflex Security: SafeHTML.fromUser() requires a sanitizer to be configured.\n\n' +
+        'REQUIRED for m-model.html binding to work safely.\n\n' +
+        'Setup:\n' +
+        '  1. Install: npm install dompurify @types/dompurify\n' +
+        '  2. Configure: SafeHTML.configureSanitizer(DOMPurify);\n\n' +
+        'This ensures user input in contenteditable elements is sanitized.'
+      );
+    }
+
+    const sanitized = SafeHTML._sanitizer.sanitize(String(html ?? ''));
+    return new SafeHTML(sanitized);
+  }
+
+  /**
    * Check if a value is a SafeHTML instance
    *
    * @param value - Value to check
