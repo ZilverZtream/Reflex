@@ -985,6 +985,21 @@ export const CompilerMixin = {
     const isSyncComp = this._cp.has(tag.toLowerCase());
     const isAsyncComp = this._acp.has(tag.toLowerCase());
 
+    // TASK 11 FIX: Capture content element's m-if for single-root templates
+    // This is needed for shouldKeep to re-evaluate visibility on updates
+    let contentIfFn: any = null;
+    if (isTemplate) {
+      const tplContent = (tpl as HTMLTemplateElement).content;
+      const elementChildren = Array.from(tplContent.childNodes).filter(n => n.nodeType === 1);
+      if (elementChildren.length === 1) {
+        const contentEl = elementChildren[0] as Element;
+        const contentMIfExpr = contentEl.getAttribute('m-if');
+        if (contentMIfExpr) {
+          contentIfFn = this._fn(contentMIfExpr);
+        }
+      }
+    }
+
     let rows = new Map();     // key -> { node, oldIdx }
     let oldKeys = [];         // Track key order for LIS
 
@@ -1069,6 +1084,20 @@ export const CompilerMixin = {
         createNode: (item, index) => {
           const scope = config.createScope(item, index);
 
+          // TASK 11 FIX: Helper to clean up scope when item is skipped
+          // When createNode returns null, we must clean up the scope's registry entries
+          // to prevent memory leaks
+          const cleanupScope = () => {
+            if (scope && isFlatScope(scope)) {
+              for (const varName in scope._ids) {
+                const id = scope._ids[varName];
+                if (id) {
+                  this._scopeRegistry.delete(id);
+                }
+              }
+            }
+          };
+
           // CRITICAL: Handle m-if on the same element as m-for
           // Evaluate m-if in the loop item's scope and skip if false
           if (ifFn) {
@@ -1079,7 +1108,8 @@ export const CompilerMixin = {
               this._handleError(err, scope);
             }
             if (!shouldRender) {
-              // Return null to indicate this item should not be rendered
+              // Clean up scope entries before returning null
+              cleanupScope();
               return null;
             }
           }
@@ -1104,6 +1134,26 @@ export const CompilerMixin = {
               // Single root element - ALWAYS use it directly without wrapper
               // This works for both strict and non-strict parents
               const singleRoot = this._cloneNode(elementNodes[0], true) as Element;
+
+              // TASK 11 FIX: Use pre-captured contentIfFn to check m-if
+              // The walker (_w) only processes children, not the node itself.
+              // So m-if on the root element would never be evaluated.
+              // We use the pre-captured contentIfFn and remove the attribute.
+              if (contentIfFn) {
+                // Remove m-if so _w doesn't try to process it again
+                singleRoot.removeAttribute('m-if');
+                try {
+                  if (!contentIfFn(this.s, scope)) {
+                    cleanupScope(); // Clean up before returning null
+                    return null; // m-if is false, skip this item
+                  }
+                } catch (err) {
+                  this._handleError(err, scope);
+                  cleanupScope(); // Clean up before returning null
+                  return null;
+                }
+              }
+
               // TASK 5: Register with GC for automatic cleanup
               this._registerScopeWithGC(singleRoot, scope);
               this._bnd(singleRoot, scope);
@@ -1114,7 +1164,33 @@ export const CompilerMixin = {
               // CRITICAL FIX: For strict parents, NEVER use wrapper elements
               // Instead, use comment-based anchors and manage nodes in a flat array
               // Create a virtual container object to track all nodes
-              const nodes = contentNodes.map(node => this._cloneNode(node, true));
+
+              // TASK 11 FIX: Filter content nodes by evaluating m-if on each element
+              // The walker only processes children, not nodes themselves.
+              // For multi-root strict parents, we must evaluate m-if on each content node.
+              const nodes: any[] = [];
+              for (const contentNode of contentNodes) {
+                const cloned = this._cloneNode(contentNode, true);
+                if (cloned.nodeType === 1) {
+                  const el = cloned as Element;
+                  const nodeIfExpr = el.getAttribute('m-if');
+                  if (nodeIfExpr) {
+                    // Remove m-if so _w doesn't try to process it again
+                    el.removeAttribute('m-if');
+                    const nodeIfFn = this._fn(nodeIfExpr);
+                    try {
+                      if (!nodeIfFn(this.s, scope)) {
+                        // m-if is false, skip this node
+                        continue;
+                      }
+                    } catch (err) {
+                      this._handleError(err, scope);
+                      continue;
+                    }
+                  }
+                }
+                nodes.push(cloned);
+              }
 
               // TASK 9.1: Ghost Row Memory Leak Fix
               // If the virtual container is empty (0 nodes), insert a placeholder comment
@@ -1168,10 +1244,29 @@ export const CompilerMixin = {
               const wrapper = this._ren.createElement('rfx-tpl', cm.parentElement);
               wrapper.style.display = 'contents'; // Make wrapper invisible in layout
 
-              // Clone and append all content nodes
-              contentNodes.forEach(childNode => {
-                wrapper.appendChild(this._cloneNode(childNode, true));
-              });
+              // TASK 11 FIX: Clone content nodes and evaluate m-if before appending
+              for (const childNode of contentNodes) {
+                const cloned = this._cloneNode(childNode, true);
+                if (cloned.nodeType === 1) {
+                  const el = cloned as Element;
+                  const nodeIfExpr = el.getAttribute('m-if');
+                  if (nodeIfExpr) {
+                    // Remove m-if so _w doesn't try to process it again
+                    el.removeAttribute('m-if');
+                    const nodeIfFn = this._fn(nodeIfExpr);
+                    try {
+                      if (!nodeIfFn(this.s, scope)) {
+                        // m-if is false, skip this node
+                        continue;
+                      }
+                    } catch (err) {
+                      this._handleError(err, scope);
+                      continue;
+                    }
+                  }
+                }
+                wrapper.appendChild(cloned);
+              }
 
               // TASK 5: Register with GC for automatic cleanup
               this._registerScopeWithGC(wrapper, scope);
@@ -1312,9 +1407,18 @@ export const CompilerMixin = {
         },
 
         // Optional: Check if item should be kept (for m-if filtering)
-        shouldKeep: ifFn ? (item, index, scope) => {
+        // TASK 11 FIX: Check both template m-if (ifFn) AND content element m-if (contentIfFn)
+        shouldKeep: (ifFn || contentIfFn) ? (item, index, scope) => {
           try {
-            return !!ifFn(this.s, scope);
+            // Check template-level m-if first
+            if (ifFn && !ifFn(this.s, scope)) {
+              return false;
+            }
+            // Then check content element's m-if
+            if (contentIfFn && !contentIfFn(this.s, scope)) {
+              return false;
+            }
+            return true;
           } catch (err) {
             this._handleError(err, scope);
             return false;
@@ -2264,7 +2368,7 @@ export const CompilerMixin = {
           // Array has values - use first element's type (TRUSTED source)
           shouldCoerceToNumber = typeof currentValue[0] === 'number';
         }
-        // REMOVED: Do NOT infer type from DOM options for empty arrays
+        // NOTE: Do NOT infer type from DOM options for empty arrays
         // Empty array means no type information - default to strings (safer)
         // If user wants numbers, they should initialize with [0] or explicitly type cast
 
