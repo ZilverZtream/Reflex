@@ -116,20 +116,42 @@ export function cloneNodeWithProps(node: any, deep = true, nodeState?: WeakMap<E
 }
 
 /**
- * Parse a property path that may contain both dot notation and bracket notation.
+ * TASK 8.1: Path Segment AST for Dynamic Resolution
+ *
+ * Represents a single segment in a property access path.
+ * Distinguishes between static properties and dynamic expressions.
+ *
  * Examples:
- *   'foo.bar' -> ['foo', 'bar']
- *   'foo[0]' -> ['foo', '0']
- *   'list[0].name' -> ['list', '0', 'name']
- *   'grid[1][2]' -> ['grid', '1', '2']
- *   'data[0].items[5]' -> ['data', '0', 'items', '5']
+ *   user.name → [{ key: 'user', type: 'prop' }, { key: 'name', type: 'prop' }]
+ *   users[id] → [{ key: 'users', type: 'prop' }, { key: 'id', type: 'dynamic' }]
+ *   users['admin'] → [{ key: 'users', type: 'prop' }, { key: 'admin', type: 'prop' }]
+ */
+interface PathSegment {
+  key: string;
+  type: 'prop' | 'dynamic';
+}
+
+/**
+ * Parse a property path that may contain both dot notation and bracket notation.
+ *
+ * TASK 8.1: Dynamic Path Resolution
+ * This parser now returns typed segments that distinguish between:
+ * - Static properties: user.name or users['admin'] (quotes indicate literal)
+ * - Dynamic expressions: users[id] or data[currentIndex] (no quotes = evaluate)
+ *
+ * Examples:
+ *   'foo.bar' → [{ key: 'foo', type: 'prop' }, { key: 'bar', type: 'prop' }]
+ *   'foo[0]' → [{ key: 'foo', type: 'prop' }, { key: '0', type: 'prop' }]
+ *   'list[index]' → [{ key: 'list', type: 'prop' }, { key: 'index', type: 'dynamic' }]
+ *   'users[id].name' → [{ key: 'users', type: 'prop' }, { key: 'id', type: 'dynamic' }, { key: 'name', type: 'prop' }]
+ *   "data['key']" → [{ key: 'data', type: 'prop' }, { key: 'key', type: 'prop' }]
  *
  * CRITICAL FIX #3: m-model Bracket Notation Support
  * Previous implementation used simple exp.split('.') which failed on array indices
  * This parser handles both dot notation and bracket notation correctly
  */
-function parsePath(exp: string): string[] {
-  const paths: string[] = [];
+function parsePath(exp: string): PathSegment[] {
+  const paths: PathSegment[] = [];
   let current = '';
   let i = 0;
 
@@ -139,14 +161,14 @@ function parsePath(exp: string): string[] {
     if (char === '.') {
       // Dot notation - push current segment and reset
       if (current) {
-        paths.push(current);
+        paths.push({ key: current, type: 'prop' });
         current = '';
       }
       i++;
     } else if (char === '[') {
       // Bracket notation - push current segment if any
       if (current) {
-        paths.push(current);
+        paths.push({ key: current, type: 'prop' });
         current = '';
       }
 
@@ -158,13 +180,24 @@ function parsePath(exp: string): string[] {
         i++;
       }
 
-      // Remove quotes if present (for string indices like ["key"])
+      // TASK 8.1: Determine if bracket content is literal (quoted) or dynamic
+      // Quoted strings like ["key"] or ['key'] are treated as literal properties
+      // Unquoted expressions like [id] or [currentIndex] are dynamic (must be evaluated)
+      let segmentType: 'prop' | 'dynamic' = 'dynamic'; // Default to dynamic
+      let segmentKey = bracketContent;
+
       if ((bracketContent.startsWith('"') && bracketContent.endsWith('"')) ||
           (bracketContent.startsWith("'") && bracketContent.endsWith("'"))) {
-        bracketContent = bracketContent.slice(1, -1);
+        // Quoted string - treat as literal property access
+        segmentKey = bracketContent.slice(1, -1);
+        segmentType = 'prop';
+      } else if (/^\d+$/.test(bracketContent)) {
+        // Pure numeric index like [0] or [123] - treat as literal property (array index)
+        segmentType = 'prop';
       }
+      // Otherwise: unquoted variable name like [id] or [currentKey] - dynamic
 
-      paths.push(bracketContent);
+      paths.push({ key: segmentKey, type: segmentType });
       i++; // Skip closing bracket
     } else {
       // Regular character - add to current segment
@@ -175,7 +208,7 @@ function parsePath(exp: string): string[] {
 
   // Push final segment if any
   if (current) {
-    paths.push(current);
+    paths.push({ key: current, type: 'prop' });
   }
 
   return paths;
@@ -392,6 +425,7 @@ function hasStrictParent(marker: Comment): boolean {
 export const CompilerMixin = {
   /**
    * Register a node with the GC-driven cleanup system (TASK 5).
+   * TASK 8.2: GC Anchor Strategy for Virtual Containers
    *
    * BREAKING CHANGE: Automatic memory management via FinalizationRegistry
    *
@@ -402,11 +436,13 @@ export const CompilerMixin = {
    * 1. Stores the scope in _scopeMap (WeakMap - doesn't prevent GC)
    * 2. Registers the node with _gcRegistry for automatic cleanup
    * 3. Extracts scope IDs from the FlatScope for cleanup
+   * 4. TASK 8.2: For virtual containers, uses the anchor (first child) for GC tracking
    *
    * Why this works:
    * - _scopeMap is a WeakMap, so it doesn't prevent the node from being GC'd
    * - When the node is GC'd, FinalizationRegistry fires and deletes the IDs
    * - Even document.body.innerHTML = '' will eventually self-clean via GC
+   * - TASK 8.2: Virtual containers use their first child as an anchor for GC tracking
    *
    * @param node - The DOM node (or virtual container) to register
    * @param scope - The FlatScope associated with this node
@@ -420,12 +456,21 @@ export const CompilerMixin = {
       // Extract all scope IDs that need cleanup when node is GC'd
       const scopeIds = Object.values(scope._ids);
 
-      // CRITICAL: Only register real DOM nodes, not virtual containers
-      // Virtual containers are plain objects and won't trigger GC callbacks properly
-      if (!node._isVirtualContainer) {
-        // Register the node with GC
+      // TASK 8.2: GC Anchor Strategy
+      // For virtual containers, use the anchor node (first child) instead of the container itself
+      // The anchor is a real DOM node that the browser can track for garbage collection
+      let target = node;
+      if (node._isVirtualContainer && node._anchor) {
+        // Use the anchor node. When the first <tr> or <option> dies, the virtual container is dead.
+        target = node._anchor;
+      }
+
+      // TASK 8.2: Now we register ALL nodes, including virtual containers (via their anchors)
+      // The old code skipped virtual containers, which caused memory leaks for tables
+      if (target && target.nodeType === 1) {
+        // Register the target (real DOM node) with GC
         // When the node is collected, the callback will delete these IDs from registry
-        this._gcRegistry.register(node, scopeIds);
+        this._gcRegistry.register(target, scopeIds);
       }
     }
   },
@@ -1048,11 +1093,14 @@ export const CompilerMixin = {
               // Create a virtual container object to track all nodes
               const nodes = contentNodes.map(node => this._cloneNode(node, true));
 
-              // Create a container object that acts as a virtual node for reconciliation
-              // This object stores all nodes but isn't inserted into the DOM
+              // TASK 8.2: GC Anchor Strategy
+              // Assign the first child DOM node as the "Anchor" for GC registration
+              // When the browser garbage collects the anchor (first <tr>, <option>, etc.),
+              // FinalizationRegistry will trigger cleanup for the entire virtual container
               const container = {
                 _isVirtualContainer: true,
                 _nodes: nodes,
+                _anchor: nodes[0], // TASK 8.2: First child is the GC anchor
                 parentNode: null, // Will be set on insertion
                 remove: function() {
                   // Remove all tracked nodes
@@ -1062,8 +1110,9 @@ export const CompilerMixin = {
                 }
               } as any;
 
-              // TASK 5: Register with GC for automatic cleanup
-              // Note: Virtual containers are skipped by _registerScopeWithGC (not real DOM nodes)
+              // TASK 8.2: Register with GC using the anchor node
+              // The anchor (first child) is a real DOM node that the browser can track
+              // When it's collected, our GC callback will clean up the scope
               this._registerScopeWithGC(container, scope);
 
               // Process bindings and defer walk to prevent stack overflow
@@ -1300,12 +1349,23 @@ export const CompilerMixin = {
         nodeList.sort((a, b) => a.index - b.index);
         const orderedNodes = nodeList.map(item => item.node);
 
-        // CRITICAL FIX: Do NOT clobber user state arrays
-        // Only update this._refs (internal reference storage)
-        // Modifying this.s[refName] destroys custom properties and causes data loss
-        // Example: app.s.myRefs.customProp = 'meta' would be lost
-        // Users should manage reactive state explicitly if needed
-        this._refs[refName] = orderedNodes;
+        // TASK 8.4: Stable Reference Reconciliation
+        // BREAKING CHANGE: Mutate the existing array instead of reassigning
+        // This preserves object identity (===) across re-renders
+        // Benefits:
+        // - Watchers on the array reference don't fire unnecessarily
+        // - Custom properties on the array object are preserved
+        // - Aligns with Vue/React ref behavior
+        const targetArray = this._refs[refName];
+        if (Array.isArray(targetArray)) {
+          // Clear array without breaking reference
+          targetArray.length = 0;
+          // Push new ordered nodes
+          targetArray.push(...orderedNodes);
+        } else {
+          // First time: create the array
+          this._refs[refName] = orderedNodes;
+        }
 
         // REMOVED: Automatic state array clobbering
         // if (refName in this.s && Array.isArray(this.s[refName])) {
@@ -1909,34 +1969,30 @@ export const CompilerMixin = {
         if (isContentEditable) {
           // contenteditable elements use innerText (or innerHTML if .html modifier is used)
           const useHTML = modifiers.includes('html');
-          let next = v == null ? '' : String(v);
           if (useHTML) {
-            // CRITICAL SECURITY FIX #1: Require DOMPurify for m-model.html (fail closed)
-            // Regex-based sanitization has been removed as it's fundamentally insecure
-            const purify = this.cfg.domPurify;
-            if (purify && typeof purify.sanitize === 'function') {
-              next = purify.sanitize(next);
-              if (el.innerHTML !== next) el.innerHTML = next;
-            } else if (Object.prototype.hasOwnProperty.call(this.cfg, 'sanitize') && this.cfg.sanitize === false) {
-              // CRITICAL SECURITY FIX: Prototype Pollution Prevention
-              // Use hasOwnProperty to ensure 'sanitize' is a direct property of cfg, not inherited
-              // This prevents bypass via: Object.prototype.sanitize = false
-              // Explicit opt-out - NEVER use with user content
-              console.error(
-                'Reflex SECURITY ERROR: m-model.html used without sanitization.\n' +
-                'This is extremely dangerous with user-provided content.'
-              );
-              if (el.innerHTML !== next) el.innerHTML = next;
-            } else {
-              // Default behavior: require DOMPurify (fail closed)
-              throw new Error(
-                'Reflex: SECURITY ERROR - m-model.html requires DOMPurify.\n' +
-                'Configure it with: app.configure({ domPurify: DOMPurify })\n' +
-                'Install: npm install dompurify\n' +
-                'Or disable sanitization (UNSAFE): app.configure({ sanitize: false })'
+            // TASK 8.3: Unified Security Type System
+            // BREAKING CHANGE: m-model.html ONLY accepts SafeHTML instances
+            // This eliminates ad-hoc sanitization and enforces a single security model
+            if (!SafeHTML.isSafeHTML(v)) {
+              throw new TypeError(
+                'Reflex Security: m-model.html requires a SafeHTML value.\n\n' +
+                'BREAKING CHANGE: Raw strings are no longer accepted.\n\n' +
+                'Migration:\n' +
+                '  1. Import SafeHTML: import { SafeHTML } from \'reflex\';\n' +
+                '  2. Configure sanitizer (once): SafeHTML.configureSanitizer(DOMPurify);\n' +
+                '  3. Sanitize user content: const safe = SafeHTML.sanitize(userInput);\n' +
+                '  4. For static HTML: const trusted = SafeHTML.unsafe(staticHtml);\n\n' +
+                'Example:\n' +
+                '  // In your model:\n' +
+                '  this.s.content = SafeHTML.sanitize(userInput);\n\n' +
+                'Security: This ensures ALL HTML in Reflex goes through SafeHTML,\n' +
+                'making it impossible to accidentally render unsanitized content.'
               );
             }
+            const next = v.toString();
+            if (el.innerHTML !== next) el.innerHTML = next;
           } else {
+            const next = v == null ? '' : String(v);
             if (el.innerText !== next) el.innerText = next;
           }
         } else if (isChk) {
@@ -2182,15 +2238,21 @@ export const CompilerMixin = {
         }
       } else v = el.value;
 
-      // CRITICAL FIX #3: Parse path with bracket notation support
-      // Previous: exp.split('.') failed on paths like "list[0]" or "grid[1][2]"
-      // Now: parsePath() handles both dot notation and bracket notation correctly
-      const paths = parsePath(exp);
-      const end = paths.pop();
+      // TASK 8.1: Parse path with dynamic segment support
+      // parsePath() now returns PathSegment[] with type information
+      // Dynamic segments (e.g., users[id]) must be evaluated in the current scope
+      const pathSegments = parsePath(exp);
+      const endSegment = pathSegments.pop();
+
+      // Safety check
+      if (!endSegment) {
+        console.warn('Reflex: Invalid m-model expression:', exp);
+        return;
+      }
 
       // Security: prevent prototype pollution
-      if (UNSAFE_PROPS[end]) {
-        console.warn('Reflex: Blocked attempt to set unsafe property:', end);
+      if (UNSAFE_PROPS[endSegment.key]) {
+        console.warn('Reflex: Blocked attempt to set unsafe property:', endSegment.key);
         return;
       }
 
@@ -2201,47 +2263,76 @@ export const CompilerMixin = {
 
       // Check if first path segment exists in scope
       let hasInScope = false;
-      if (scopeIsFlatScope) {
-        hasInScope = getFlatScopeValue(o, paths[0]).found;
-      } else if (scopeIsScopeContainer) {
-        hasInScope = o.has(paths[0]);
+      if (scopeIsFlatScope && pathSegments.length > 0) {
+        hasInScope = getFlatScopeValue(o, pathSegments[0].key).found;
+      } else if (scopeIsScopeContainer && pathSegments.length > 0) {
+        hasInScope = o.has(pathSegments[0].key);
       }
 
       let t = hasInScope ? o : this.s;
       let isFirstPath = true;
-      for (const p of paths) {
-        if (UNSAFE_PROPS[p]) {
-          console.warn('Reflex: Blocked attempt to traverse unsafe property:', p);
+
+      // TASK 8.1: Traverse path with dynamic segment evaluation
+      for (const segment of pathSegments) {
+        // Evaluate dynamic segments in the current scope
+        let key = segment.key;
+        if (segment.type === 'dynamic') {
+          // CRITICAL: Evaluate the dynamic key in the current scope
+          // Example: users[id] where id=5 → key becomes '5'
+          try {
+            const keyFn = this._fn(segment.key);
+            key = String(keyFn(this.s, o));
+          } catch (err) {
+            console.warn('Reflex: Failed to evaluate dynamic key:', segment.key, err);
+            return;
+          }
+        }
+
+        if (UNSAFE_PROPS[key]) {
+          console.warn('Reflex: Blocked attempt to traverse unsafe property:', key);
           return;
         }
+
         // Handle FlatScope lookup for first path segment
         if (isFirstPath && isFlatScope(t)) {
-          const result = getFlatScopeValue(t, p);
+          const result = getFlatScopeValue(t, key);
           t = result.value;
           isFirstPath = false;
           if (t == null) {
-            console.warn('Reflex: Cannot traverse null/undefined in path:', p);
+            console.warn('Reflex: Cannot traverse null/undefined in path:', key);
             return;
           }
           continue;
         }
         // Handle ScopeContainer lookup for first path segment
         if (isFirstPath && ScopeContainer.isScopeContainer(t)) {
-          t = t.get(p);
+          t = t.get(key);
           isFirstPath = false;
           if (t == null) {
-            console.warn('Reflex: Cannot traverse null/undefined in path:', p);
+            console.warn('Reflex: Cannot traverse null/undefined in path:', key);
             return;
           }
           continue;
         }
         isFirstPath = false;
-        if (t[p] == null) t[p] = {};
-        else if (typeof t[p] !== 'object') {
-          console.warn('Reflex: Cannot set nested property on non-object value at path:', p);
+        if (t[key] == null) t[key] = {};
+        else if (typeof t[key] !== 'object') {
+          console.warn('Reflex: Cannot set nested property on non-object value at path:', key);
           return;
         }
-        t = t[p];
+        t = t[key];
+      }
+
+      // TASK 8.1: Evaluate final segment if dynamic
+      let finalKey = endSegment.key;
+      if (endSegment.type === 'dynamic') {
+        try {
+          const keyFn = this._fn(endSegment.key);
+          finalKey = String(keyFn(this.s, o));
+        } catch (err) {
+          console.warn('Reflex: Failed to evaluate dynamic key:', endSegment.key, err);
+          return;
+        }
       }
 
       // CRITICAL FIX #4: Scope Shadowing in m-model
@@ -2249,7 +2340,7 @@ export const CompilerMixin = {
       // Scopes store their own data in a Map, so shadowing is inherently prevented.
       // For regular objects, we still need to walk the prototype chain.
       let owner = t;
-      while (owner && !Object.prototype.hasOwnProperty.call(owner, end)) {
+      while (owner && !Object.prototype.hasOwnProperty.call(owner, finalKey)) {
         const proto = Object.getPrototypeOf(owner);
         // Stop if we've reached the top of the chain or hit null/non-object
         if (!proto || typeof proto !== 'object') break;
@@ -2257,10 +2348,10 @@ export const CompilerMixin = {
       }
       // If we found an owner in the prototype chain that has this property, update it there
       // Otherwise, create the property on the current object (t)
-      if (owner && Object.prototype.hasOwnProperty.call(owner, end)) {
-        owner[end] = v;
+      if (owner && Object.prototype.hasOwnProperty.call(owner, finalKey)) {
+        owner[finalKey] = v;
       } else {
-        t[end] = v;
+        t[finalKey] = v;
       }
     };
 
