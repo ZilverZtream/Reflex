@@ -652,7 +652,8 @@ export const CompilerMixin = {
           // 1. If state[refName] is already an array (user pre-initialized)
           // 2. If _refs[refName] is already an array (second+ item in loop)
           // 3. If scope is a loop scope (has loop variables like item, index)
-          const isArrayRef = (v in this.s && Array.isArray(this.s[v])) ||
+          // Use property access instead of 'in' operator for proxy compatibility
+          const isArrayRef = (this.s[v] && Array.isArray(this.s[v])) ||
                              Array.isArray(this._refs[v]) ||
                              (o && isFlatScope(o) && Object.keys(o._ids).length > 0);
 
@@ -662,7 +663,8 @@ export const CompilerMixin = {
             if (!Array.isArray(this._refs[v])) {
               this._refs[v] = [];
             }
-            if (!(v in this.s) || !Array.isArray(this.s[v])) {
+            // TASK 9.2: Ensure state array exists for synchronization
+            if (!this.s[v] || !Array.isArray(this.s[v])) {
               this.s[v] = [];
             }
             this.s[v].push(n);
@@ -1392,11 +1394,12 @@ export const CompilerMixin = {
         // TASK 9.2: Synchronize Reactive m-ref State
         // After DOM reconciliation, state.refs must match the new order
         // Without this, state.refs[0] points to the wrong element after sorting
-        if (refName in this.s && Array.isArray(this.s[refName])) {
+        // Use property access instead of 'in' operator for better proxy compatibility
+        const stateArray = this.s[refName];
+        if (stateArray && Array.isArray(stateArray)) {
           // Use splice on the proxy to trigger reactivity automatically
           // splice(0, length, ...items) clears and replaces in one operation
           // This preserves the array reference and triggers watchers
-          const stateArray = this.s[refName];
           stateArray.splice(0, stateArray.length, ...orderedNodes);
         }
       });
