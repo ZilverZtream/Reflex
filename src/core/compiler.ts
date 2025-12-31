@@ -2122,42 +2122,24 @@ export const CompilerMixin = {
 
         // SECURITY FIX: Validate URL protocols using allowlist instead of blocklist
         // Only allow known-safe protocols (http, https, mailto, tel, etc.) and relative URLs
-        // CRITICAL: Decode HTML entities BEFORE checking regex to prevent bypass attacks
-        // Attack: :href="'j&#97;vascript:alert(1)'"
-        //   - Regex sees: j&#97;vascript: (passes as unrecognized protocol)
-        //   - Browser sees: javascript:alert(1) (executes!)
+        // CRITICAL: Decode HTML entities AND strip control characters BEFORE validation
+        // Attack vectors:
+        //   1. Entity encoding: :href="'j&#97;vascript:alert(1)'"
+        //      - Regex sees: j&#97;vascript: (passes)
+        //      - Browser sees: javascript:alert(1) (executes!)
+        //   2. Control characters: :href="'java\tscript:alert(1)'"
+        //      - Regex sees: java\tscript: (passes if not stripped)
+        //      - Browser sees: javascript:alert(1) (executes!)
         if (isUrlAttr && v != null && typeof v === 'string') {
-          // SECURITY FIX: DOM XSS via Attribute Validation
-          // Previous code used decoder.innerHTML = v which is vulnerable to DOM XSS
-          // Attack: v = '</textarea><img src=x onerror=alert(1)>'
-          //   - Setting innerHTML would close the textarea and execute the onerror handler
-          // Fix: Use safe manual decoding instead of innerHTML
-          //
-          // Manual decoding of HTML entities to match browser behavior
-          // This catches ALL entity forms: &#97; &#x61; &amp; etc.
-          // CRITICAL: Make semicolon optional (;?) to match browser lenient parsing
-          // Browsers decode &#106avascript: as javascript: even without semicolon
-          const decodedUrl = v
-            .replace(/&#x([0-9a-fA-F]+);?/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-            .replace(/&#(\d+);?/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
-            .replace(/&amp;/g, '&')
-            .replace(/&lt;/g, '<')
-            .replace(/&gt;/g, '>')
-            .replace(/&quot;/g, '"')
-            .replace(/&#39;/g, "'")
-            .replace(/&apos;/g, "'")
-            .replace(/&nbsp;/g, '\u00A0')
-            // Decode more named entities to match browser behavior
-            .replace(/&colon;/g, ':')
-            .replace(/&sol;/g, '/')
-            .replace(/&quest;/g, '?')
-            .replace(/&equals;/g, '=')
-            .replace(/&num;/g, '#');
+          // CRITICAL FIX: Use centralized sanitization helper
+          // This decodes ALL entities (including &Tab;, &NewLine;, etc.)
+          // and strips ALL control characters (0x00-0x1F, 0x7F-0x9F)
+          const sanitizedUrl = this._decodeAndSanitizeUrl(v);
 
-          // Check the DECODED URL against our allowlist
-          const isSafe = RELATIVE_URL_RE.test(decodedUrl) || SAFE_URL_RE.test(decodedUrl);
+          // Check the sanitized URL against our allowlist
+          const isSafe = RELATIVE_URL_RE.test(sanitizedUrl) || SAFE_URL_RE.test(sanitizedUrl);
           if (!isSafe) {
-            console.warn('Reflex: Blocked unsafe URL protocol in', att + ':', v, `(decoded: ${decodedUrl})`);
+            console.warn('Reflex: Blocked unsafe URL protocol in', att + ':', v, `(sanitized: ${sanitizedUrl})`);
             v = 'about:blank';
           }
         }
@@ -3674,6 +3656,66 @@ export const CompilerMixin = {
   },
 
   /**
+   * Comprehensive URL decoding and sanitization
+   * CRITICAL SECURITY FIX: Decode ALL HTML entities and strip control characters
+   *
+   * Browsers ignore control characters (tabs, newlines, etc.) in protocol schemes:
+   * - "java\tscript:alert(1)" is executed as "javascript:alert(1)"
+   * - "java\nscript:alert(1)" is executed as "javascript:alert(1)"
+   *
+   * This helper:
+   * 1. Decodes ALL HTML entities (numeric, hex, and named including &Tab;, &NewLine;, etc.)
+   * 2. Strips ALL control characters (0x00-0x1F, 0x7F-0x9F)
+   * 3. Returns the sanitized URL ready for regex validation
+   */
+  _decodeAndSanitizeUrl(url) {
+    if (!url || typeof url !== 'string') return '';
+
+    // Step 1: Decode ALL HTML entities
+    const decoded = url
+      // Decode numeric hex entities: &#x61; &#x61 (semicolon optional)
+      .replace(/&#x([0-9a-fA-F]+);?/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+      // Decode numeric decimal entities: &#97; &#97 (semicolon optional)
+      .replace(/&#(\d+);?/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+      // Decode common named entities
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&apos;/g, "'")
+      .replace(/&nbsp;/g, '\u00A0')
+      // Decode URL-relevant named entities
+      .replace(/&colon;/g, ':')
+      .replace(/&sol;/g, '/')
+      .replace(/&quest;/g, '?')
+      .replace(/&equals;/g, '=')
+      .replace(/&num;/g, '#')
+      .replace(/&percnt;/g, '%')
+      .replace(/&commat;/g, '@')
+      // CRITICAL FIX: Decode control character entities that were previously missing
+      .replace(/&Tab;/g, '\t')
+      .replace(/&NewLine;/g, '\n')
+      .replace(/&excl;/g, '!')
+      .replace(/&dollar;/g, '$')
+      .replace(/&lpar;/g, '(')
+      .replace(/&rpar;/g, ')')
+      .replace(/&ast;/g, '*')
+      .replace(/&plus;/g, '+')
+      .replace(/&comma;/g, ',')
+      .replace(/&period;/g, '.')
+      .replace(/&semi;/g, ';');
+
+    // Step 2: Strip ALL control characters
+    // Control characters: 0x00-0x1F (includes \0, \t, \n, \r, etc.) and 0x7F-0x9F
+    // Browsers ignore these in protocol schemes, so we must remove them before validation
+    // This prevents attacks like "java\tscript:alert(1)" bypassing the regex
+    const sanitized = decoded.replace(/[\x00-\x1F\x7F-\x9F]/g, '');
+
+    return sanitized;
+  },
+
+  /**
    * Sanitize CSS string to prevent javascript: URL injection
    * CRITICAL SECURITY FIX #4: CSS Injection via String Interpolation
    *
@@ -3729,22 +3771,47 @@ export const CompilerMixin = {
     }
 
     // Validate url() functions
-    // Match url() with proper handling of quotes and escapes
-    const urlMatches = Array.from(normalized.matchAll(/url\s*\(\s*(['"]?)([^'")\s]+)\1\s*\)/gi));
+    // CRITICAL FIX: Previous regex [^'")\s]+ failed to match URLs with whitespace inside quotes
+    // Attack: url("java\tscript:alert(1)") would not match, bypassing validation
+    // Fix: Use separate patterns for quoted vs unquoted URLs
+    //   - Single-quoted: url('...')  - allows any chars except single quote
+    //   - Double-quoted: url("...")  - allows any chars except double quote
+    //   - Unquoted: url(...)         - allows only non-whitespace, non-quote chars
+    const singleQuotedPattern = /url\s*\(\s*'([^']*)'\s*\)/gi;
+    const doubleQuotedPattern = /url\s*\(\s*"([^"]*)"\s*\)/gi;
+    const unquotedPattern = /url\s*\(\s*([^'"\s)]+)\s*\)/gi;
 
     let sanitized = cssText;
-    for (const match of urlMatches) {
-      const url = match[2];
-      // Validate the URL using the same logic as href/src attributes
-      const isSafe = RELATIVE_URL_RE.test(url) || SAFE_URL_RE.test(url);
-      if (!isSafe) {
-        console.error(
-          `Reflex Security: BLOCKED unsafe URL in style binding: ${url}\n` +
-          'Only http://, https://, mailto:, tel:, sms:, and relative URLs are allowed.\n' +
-          'CSS injection attempt prevented.'
-        );
-        // Replace the entire url() with 'none'
-        sanitized = sanitized.replace(match[0], 'none');
+
+    // Process all three URL patterns
+    const patterns = [
+      { regex: singleQuotedPattern, name: 'single-quoted' },
+      { regex: doubleQuotedPattern, name: 'double-quoted' },
+      { regex: unquotedPattern, name: 'unquoted' }
+    ];
+
+    for (const { regex, name } of patterns) {
+      const matches = Array.from(normalized.matchAll(regex));
+      for (const match of matches) {
+        const url = match[1];
+
+        // CRITICAL FIX: Apply same sanitization as attribute URLs
+        // Decode HTML entities and strip control characters before validation
+        // This catches attacks like url("j&#97;va\tscript:alert(1)")
+        const sanitizedUrl = this._decodeAndSanitizeUrl(url);
+
+        // Validate the sanitized URL using the same logic as href/src attributes
+        const isSafe = RELATIVE_URL_RE.test(sanitizedUrl) || SAFE_URL_RE.test(sanitizedUrl);
+        if (!isSafe) {
+          console.error(
+            `Reflex Security: BLOCKED unsafe ${name} URL in style binding: ${url}\n` +
+            `Sanitized form: ${sanitizedUrl}\n` +
+            'Only http://, https://, mailto:, tel:, sms:, and relative URLs are allowed.\n' +
+            'CSS injection attempt prevented.'
+          );
+          // Replace the entire url() with 'none'
+          sanitized = sanitized.replace(match[0], 'none');
+        }
       }
     }
 
