@@ -99,6 +99,7 @@ export class Reflex {
   declare _scopeRegistry: ScopeRegistry;  // Flat scope storage (replaces prototype chains)
   declare _gcRegistry: FinalizationRegistry<string[]>;  // GC-driven cleanup for scope IDs (TASK 5)
   declare _hydrateMode?: boolean;
+  declare _queuedJobs?: WeakSet<any>;  // Per-instance tracking of queued jobs (Task 14 Issue #5)
   declare hydrate?: (el?: Element | null) => this;
   declare _hydrateWalk?: (node: Node, scope: any) => void;
   declare _hydrateNode?: (node: Element, scope: any) => void;

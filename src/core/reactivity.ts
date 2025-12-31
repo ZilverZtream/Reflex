@@ -946,13 +946,32 @@ export const ReactivityMixin = {
               // For entries/default iteration, create a NEW array for each iteration
               // This is critical for correctness with spread operator and Array.from()
               //
-              // PERFORMANCE NOTE: This creates O(n) array allocations for n entries.
-              // This is unavoidable for correctness - reusing arrays causes data corruption
-              // when users do [...map.entries()] or Array.from(map).
+              // CRITICAL FIX (Task 14 Issue #6): Performance Documentation
+              // This creates O(n) array allocations for n entries, which can cause:
+              // - Frame drops in 60fps rendering with large datasets (>1000 items)
+              // - Major GC pauses in long-running dashboards
+              // - Memory pressure in data visualizations
               //
-              // For performance-critical large Map iterations (100k+ items):
-              // - Use map.forEach((v, k) => ...) which has O(1) allocation overhead
-              // - Or use map.get(key) in a loop with known keys
+              // WHY THIS IS UNAVOIDABLE FOR CORRECTNESS:
+              // If we reused arrays, [...map.entries()] would return an array where
+              // all entries point to the SAME [k, v] array containing the last value.
+              //
+              // PERFORMANCE WORKAROUNDS (choose based on use case):
+              //
+              // 1. Use forEach for callback-based iteration (O(1) allocation):
+              //    map.forEach((value, key) => { /* process */ });
+              //
+              // 2. Use get() with known keys (O(k) for k keys):
+              //    for (const key of knownKeys) { const value = map.get(key); }
+              //
+              // 3. Use raw Map from toRaw() for read-only bulk operations:
+              //    const rawMap = app.toRaw(state.myMap);
+              //    for (const [k, v] of rawMap) { /* read-only processing */ }
+              //    // WARNING: Changes won't trigger reactivity!
+              //
+              // 4. Use Arrays instead of Maps for large reactive datasets:
+              //    Arrays have lower iteration overhead per element
+              //
               const [k, v] = n.value;
               const wrappedK = (k !== null && typeof k === 'object') ? self._wrap(k) : k;
               const wrappedV = (v !== null && typeof v === 'object') ? self._wrap(v) : v;
