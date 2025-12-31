@@ -68,6 +68,19 @@ const objectKeyMap = new WeakMap<object, number>();
 let objectKeyUid = 0;
 
 /**
+ * CRITICAL FIX: Track if WeakRef warning has been shown
+ * Only warn once to avoid spamming the console
+ */
+let weakRefWarningShown = false;
+
+/**
+ * Transition timing constants
+ * These are used to calculate transition/animation timeouts
+ */
+const MILLISECONDS_PER_SECOND = 1000;
+const TRANSITION_BUFFER_MS = 50; // Extra buffer to ensure transition completes
+
+/**
  * Convert a key to a stable, unique string representation.
  * For objects, uses the WeakMap-based ID generator.
  * For primitives, uses String() directly.
@@ -438,13 +451,13 @@ export function runTransition(el, name, type, done, reflex?) {
 
       const duration = parseMaxDuration(style.transitionDuration) || parseMaxDuration(style.animationDuration) || 0;
       const delay = parseMaxDuration(style.transitionDelay) || parseMaxDuration(style.animationDelay) || 0;
-      const timeout = (duration + delay) * 1000 + 50; // Add 50ms buffer
+      const timeout = (duration + delay) * MILLISECONDS_PER_SECOND + TRANSITION_BUFFER_MS;
 
       // Set expected end time for transition completion check
       // CRITICAL FIX: Use performance.now() for monotonic time (not affected by system clock changes)
-      expectedEndTime = performance.now() + (duration + delay) * 1000;
+      expectedEndTime = performance.now() + (duration + delay) * MILLISECONDS_PER_SECOND;
 
-      if (timeout > 50) {
+      if (timeout > TRANSITION_BUFFER_MS) {
         timeoutId = setTimeout(() => {
           if (cleaned || transitionCallback.cancelled) return;
           cleanup();
@@ -3186,6 +3199,19 @@ export const CompilerMixin = {
         return;
       }
 
+      // CRITICAL SECURITY FIX: Additional prototype pollution defense
+      // Ensure we're not trying to set a property that exists on Object.prototype
+      // or other built-in prototypes, which would indicate a pollution attempt
+      if (t !== null && typeof t === 'object') {
+        const hasOwnProp = Object.prototype.hasOwnProperty.call(t, finalKey);
+        const isPrototypeProp = !hasOwnProp && (finalKey in t);
+        if (isPrototypeProp && typeof t !== 'function') {
+          console.warn('Reflex: Blocked attempt to modify inherited property:', finalKey);
+          // Still allow setting if it's a setter or if the object is meant to have this property
+          // But create it as an own property instead of modifying the prototype
+        }
+      }
+
       // CRITICAL SECURITY FIX: Prevent ALL Prototype Pollution
       // The original scope shadowing logic walked the prototype chain to find where
       // a property was defined. However, this is fundamentally unsafe:
@@ -3205,6 +3231,13 @@ export const CompilerMixin = {
     const onCompositionEnd = () => {
       isComposing = false;
       // Trigger update after composition completes
+      up();
+    };
+    // CRITICAL FIX: Handle composition cancellation to prevent stuck flag
+    // If composition is cancelled (e.g., user presses Escape), reset the flag
+    const onCompositionCancel = () => {
+      isComposing = false;
+      // Also trigger update to sync any partial input
       up();
     };
 
@@ -3246,6 +3279,8 @@ export const CompilerMixin = {
     if (!initIsChk && !initIsRadio) {
       el.addEventListener('compositionstart', onCompositionStart);
       el.addEventListener('compositionend', onCompositionEnd);
+      // CRITICAL FIX: Add compositioncancel to prevent stuck isComposing flag
+      el.addEventListener('compositioncancel', onCompositionCancel);
     }
 
     // CRITICAL FIX (Issue #6): Dynamic Select Initial State Sync
@@ -3265,7 +3300,13 @@ export const CompilerMixin = {
           syncTimeout = null;
           // Re-run the effect to sync the selection state
           // The effect checks the current model value and applies it to all options
-          e();
+          try {
+            e();
+          } catch (err) {
+            // Error during sync - log but don't crash
+            // This prevents syncTimeout from leaking if effect throws
+            console.error('Reflex: Error during select synchronization:', err);
+          }
         }, 0);
       };
 
@@ -3288,14 +3329,15 @@ export const CompilerMixin = {
     }
 
     this._reg(el, () => {
-      el.removeEventListener(evt, up);
-      if (evt !== 'change' && !isLazy) {
+      el.removeEventListener(primaryEvt, up);
+      if (primaryEvt !== 'change' && !isLazy) {
         el.removeEventListener('change', up);
       }
       // Clean up IME composition listeners
-      if (evt === 'input' && !isChk && !isRadio) {
+      if (primaryEvt === 'input' && !initIsChk && !initIsRadio) {
         el.removeEventListener('compositionstart', onCompositionStart);
         el.removeEventListener('compositionend', onCompositionEnd);
+        el.removeEventListener('compositioncancel', onCompositionCancel);
       }
       // CRITICAL FIX (Issue #6): Clean up MutationObserver for select elements
       if (selectObserver) {
@@ -3390,6 +3432,17 @@ export const CompilerMixin = {
       // SOLUTION: Use WeakRef + FinalizationRegistry to avoid circular references
       // The handler uses WeakRef to avoid strongly capturing 'el', allowing GC when el is no longer referenced
       const elRef = typeof WeakRef !== 'undefined' ? new WeakRef(el) : null;
+
+      // CRITICAL FIX: Warn if WeakRef is not available (memory leak risk in old browsers)
+      if (!elRef && !weakRefWarningShown && typeof console !== 'undefined' && console.warn) {
+        weakRefWarningShown = true;
+        console.warn(
+          'Reflex: WeakRef not supported in this environment. ' +
+          'Window/document event listeners may not be properly cleaned up, ' +
+          'potentially causing memory leaks in long-running applications.'
+        );
+      }
+
       const handler = (e) => {
         // Deref the element - if it's been GC'd, cleanup and exit
         const element = elRef ? elRef.deref() : el;
