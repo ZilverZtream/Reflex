@@ -390,4 +390,126 @@ describe('New Critical Fixes - Regression Tests', () => {
       app.unmount();
     });
   });
+
+  describe('Prototype Pollution in m-model', () => {
+    it('should prevent prototype pollution via m-model directive', async () => {
+      const { Reflex } = await import('../src/index.js');
+
+      // Store original Object.prototype methods
+      const originalToString = Object.prototype.toString;
+      const originalValueOf = Object.prototype.valueOf;
+      const originalHasOwnProperty = Object.prototype.hasOwnProperty;
+
+      document.body.innerHTML = `
+        <input type="text" m-model="toString">
+        <input type="text" m-model="valueOf">
+        <input type="text" m-model="hasOwnProperty">
+      `;
+
+      const app = new Reflex({});
+      await app.nextTick();
+
+      // Try to trigger prototype pollution by setting values on inputs
+      const inputs = document.querySelectorAll('input') as NodeListOf<HTMLInputElement>;
+
+      inputs[0].value = 'POLLUTED_toString';
+      inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
+      await app.nextTick();
+
+      inputs[1].value = 'POLLUTED_valueOf';
+      inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
+      await app.nextTick();
+
+      inputs[2].value = 'POLLUTED_hasOwnProperty';
+      inputs[2].dispatchEvent(new Event('input', { bubbles: true }));
+      await app.nextTick();
+
+      // Verify that Object.prototype methods are NOT polluted
+      expect(Object.prototype.toString).toBe(originalToString);
+      expect(Object.prototype.valueOf).toBe(originalValueOf);
+      expect(Object.prototype.hasOwnProperty).toBe(originalHasOwnProperty);
+
+      // Verify that values were set on the state object, not on prototypes
+      expect(app.s.toString).toBe('POLLUTED_toString');
+      expect(app.s.valueOf).toBe('POLLUTED_valueOf');
+      expect(app.s.hasOwnProperty).toBe('POLLUTED_hasOwnProperty');
+
+      // Verify that a new empty object doesn't have these polluted values
+      const testObj: any = {};
+      expect(typeof testObj.toString).toBe('function');
+      expect(typeof testObj.valueOf).toBe('function');
+      expect(typeof testObj.hasOwnProperty).toBe('function');
+
+      // Clean up
+      app.unmount();
+    });
+
+    it('should prevent pollution of Array.prototype via m-model', async () => {
+      const { Reflex } = await import('../src/index.js');
+
+      const originalMap = Array.prototype.map;
+      const originalFilter = Array.prototype.filter;
+
+      document.body.innerHTML = `
+        <input type="text" m-model="map">
+        <input type="text" m-model="filter">
+      `;
+
+      const app = new Reflex({});
+      await app.nextTick();
+
+      const inputs = document.querySelectorAll('input') as NodeListOf<HTMLInputElement>;
+
+      inputs[0].value = 'POLLUTED_map';
+      inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
+      await app.nextTick();
+
+      inputs[1].value = 'POLLUTED_filter';
+      inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
+      await app.nextTick();
+
+      // Verify Array.prototype is not polluted
+      expect(Array.prototype.map).toBe(originalMap);
+      expect(Array.prototype.filter).toBe(originalFilter);
+
+      // Verify values were set on state object
+      expect(app.s.map).toBe('POLLUTED_map');
+      expect(app.s.filter).toBe('POLLUTED_filter');
+
+      // Clean up
+      app.unmount();
+    });
+
+    it('should still support scope shadowing for regular objects', async () => {
+      const { Reflex } = await import('../src/index.js');
+
+      // Create an object with a custom property on its prototype
+      const proto = { customProp: 'prototype-value' };
+      const obj = Object.create(proto);
+
+      document.body.innerHTML = `
+        <input type="text" m-model="customProp">
+      `;
+
+      const app = new Reflex(obj);
+      await app.nextTick();
+
+      const input = document.querySelector('input')! as HTMLInputElement;
+
+      // Set a value via m-model
+      input.value = 'new-value';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      await app.nextTick();
+
+      // The property should be set on the object itself (shadowing the prototype)
+      expect(obj.customProp).toBe('new-value');
+      expect(obj.hasOwnProperty('customProp')).toBe(true);
+
+      // The prototype should still have the original value
+      expect(proto.customProp).toBe('prototype-value');
+
+      // Clean up
+      app.unmount();
+    });
+  });
 });

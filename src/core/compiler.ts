@@ -3191,24 +3191,18 @@ export const CompilerMixin = {
         }
       }
 
-      // CRITICAL FIX #4: Scope Shadowing in m-model
-      // With ScopeContainer, we no longer use prototype chains for scope inheritance.
-      // Scopes store their own data in a Map, so shadowing is inherently prevented.
-      // For regular objects, we still need to walk the prototype chain.
-      let owner = t;
-      while (owner && !Object.prototype.hasOwnProperty.call(owner, finalKey)) {
-        const proto = Object.getPrototypeOf(owner);
-        // Stop if we've reached the top of the chain or hit null/non-object
-        if (!proto || typeof proto !== 'object') break;
-        owner = proto;
-      }
-      // If we found an owner in the prototype chain that has this property, update it there
-      // Otherwise, create the property on the current object (t)
-      if (owner && Object.prototype.hasOwnProperty.call(owner, finalKey)) {
-        owner[finalKey] = v;
-      } else {
-        t[finalKey] = v;
-      }
+      // CRITICAL SECURITY FIX: Prevent ALL Prototype Pollution
+      // The original scope shadowing logic walked the prototype chain to find where
+      // a property was defined. However, this is fundamentally unsafe:
+      // 1. If the property is on Object.prototype, it pollutes ALL objects
+      // 2. If the property is on a custom prototype, it pollutes ALL objects sharing that prototype
+      // 3. Only updating OWN properties is safe, but then we don't need the chain walk
+      //
+      // SECURE APPROACH: Only update the target object (t), never any prototype.
+      // This prevents prototype pollution while still supporting property assignment.
+      // For ScopeContainer, shadowing is handled by the Map-based storage.
+      // For regular objects, we simply set the property on the object itself.
+      t[finalKey] = v;
     };
 
     // IME composition event handlers
