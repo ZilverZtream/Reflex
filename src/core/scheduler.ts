@@ -11,34 +11,56 @@
 
 import { ACTIVE, RUNNING, QUEUED, META } from './symbols.js';
 
-// CRITICAL FIX #11 + #8 + Task 15: queueMicrotask polyfill (SINGLE LOCATION)
-// This is the ONLY location where the polyfill is defined. Previously it was
-// duplicated in reflex.ts, causing potential double-initialization and making
-// it harder to maintain.
+// CRITICAL FIX (Issue #6): Lazy queueMicrotask polyfill
 //
-// Why here: The scheduler module uses queueMicrotask for job scheduling.
-// This file is imported early via the mixin chain, ensuring the polyfill
-// is applied before any code attempts to use queueMicrotask.
+// PROBLEM: The previous implementation modified globalThis immediately on import:
+//   if (typeof globalThis.queueMicrotask === 'undefined') {
+//     globalThis.queueMicrotask = ...;
+//   }
+// This is a side-effect that can conflict with:
+// - Other polyfills loaded before Reflex
+// - Testing frameworks (like Jest) that mock timers
+// - Micro-frontend architectures where multiple versions might fight over the polyfill
 //
-// Missing in iOS < 13, older Node.js, and legacy browsers
-// Fallback to Promise.resolve().then() which has equivalent semantics
-// Only polyfills if not already defined to prevent namespace pollution
-if (typeof globalThis !== 'undefined' && typeof globalThis.queueMicrotask === 'undefined') {
-  (globalThis as any).queueMicrotask = (callback: () => void) => {
-    Promise.resolve().then(callback).catch(err => {
-      // CRITICAL FIX: Better error reporting for polyfill
-      // Use reportError if available (modern browsers), fallback to console.error
-      // This preserves the error context better than setTimeout(() => throw)
-      if (typeof globalThis.reportError === 'function') {
-        globalThis.reportError(err);
-      } else {
-        // Fallback for older browsers: log and rethrow async
-        console.error('Uncaught error in queueMicrotask:', err);
-        setTimeout(() => { throw err; }, 0);
-      }
-    });
-  };
-}
+// SOLUTION: Use a lazy, module-scoped fallback function instead of modifying globalThis.
+// The actual queueMicrotask call is wrapped in a function that:
+// 1. Uses native queueMicrotask if available (no side-effect)
+// 2. Falls back to Promise.resolve().then() if not (no global modification)
+//
+// This approach:
+// - Avoids modifying the global environment
+// - Works correctly in all environments
+// - Doesn't conflict with other polyfills or testing frameworks
+// - Is evaluated lazily (only when actually called)
+//
+// TRADE-OFF: Very slightly slower (~1 function call) than the global polyfill,
+// but the added safety and compatibility is worth it for a library.
+
+/**
+ * Internal queueMicrotask wrapper that doesn't pollute globalThis.
+ * Uses native queueMicrotask if available, falls back to Promise-based equivalent.
+ */
+const queueMicrotaskSafe = (callback: () => void): void => {
+  // Check for native queueMicrotask (most modern browsers and Node.js 12+)
+  if (typeof queueMicrotask === 'function') {
+    queueMicrotask(callback);
+    return;
+  }
+
+  // Fallback for older environments (iOS < 13, older Node.js, legacy browsers)
+  // Promise.resolve().then() has equivalent microtask semantics
+  Promise.resolve().then(callback).catch(err => {
+    // Error handling: surface errors properly
+    // Use reportError if available (modern browsers), fallback to console.error
+    if (typeof globalThis !== 'undefined' && typeof globalThis.reportError === 'function') {
+      globalThis.reportError(err);
+    } else {
+      // Fallback for older browsers: log and rethrow async
+      console.error('Uncaught error in queueMicrotask:', err);
+      setTimeout(() => { throw err; }, 0);
+    }
+  });
+};
 
 // Maximum number of flush iterations before throwing an error
 // This prevents infinite loops from circular dependencies
@@ -161,7 +183,7 @@ export const SchedulerMixin = {
 
     // Push to the active queue (double-buffering for GC reduction)
     (this._qf ? this._qb : this._q).push(j);
-    if (!this._p) { this._p = true; queueMicrotask(() => this.flushQueue()); }
+    if (!this._p) { this._p = true; queueMicrotaskSafe(() => this.flushQueue()); }
   },
 
   /**
@@ -520,8 +542,36 @@ export const SchedulerMixin = {
             return;
           }
 
-          // All work complete - call callback with any errors that occurred
-          // This allows callers to detect partial failures
+          // CRITICAL FIX (Issue #4): Don't swallow non-fatal errors when using await
+          //
+          // PROBLEM: Previously, errors in scheduled effects were collected but the
+          // promise always resolved. Developers using `await nextTick()` (without a
+          // callback) had no way to know if DOM updates failed. They would proceed
+          // with execution assuming the DOM is in a valid state, leading to
+          // unpredictable cascading failures that are hard to debug.
+          //
+          // SOLUTION: If errors occurred AND no callback was provided, reject the
+          // promise with a combined error. This surfaces errors to `await` callers.
+          //
+          // If a callback was provided, the caller explicitly opted into handling
+          // errors via the callback, so we still resolve (maintaining backwards compat).
+          //
+          // TRADE-OFF: This is a breaking change for code that uses `await nextTick()`
+          // and doesn't wrap it in try/catch. However, this is the correct behavior
+          // since errors were being silently swallowed before.
+          if (allErrors.length > 0 && !fn) {
+            // No callback provided - reject so await callers see the errors
+            const combinedError = new Error(
+              `Reflex: DOM update errors occurred during nextTick:\n` +
+              allErrors.map((e, i) => `  ${i + 1}. ${e.message}`).join('\n')
+            );
+            // Attach the original errors for detailed inspection
+            (combinedError as any).errors = allErrors;
+            reject(combinedError);
+            return;
+          }
+
+          // Callback was provided - call it with errors (if any) and resolve
           fn?.(allErrors.length > 0 ? allErrors : undefined);
           resolve();
         } catch (err) {
@@ -531,7 +581,7 @@ export const SchedulerMixin = {
         }
       };
 
-      queueMicrotask(() => checkComplete());
+      queueMicrotaskSafe(() => checkComplete());
     });
   },
 
@@ -823,3 +873,7 @@ export const SchedulerMixin = {
     return seen.get(this.toRaw(v));
   }
 };
+
+// Export the safe queueMicrotask wrapper for use in other modules (e.g., compiler.ts)
+// This avoids having each module implement its own fallback
+export { queueMicrotaskSafe };
