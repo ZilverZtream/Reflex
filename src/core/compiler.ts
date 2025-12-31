@@ -3381,11 +3381,28 @@ export const CompilerMixin = {
         target = this._ren.getRoot();
       }
       const self = this;
+
+      // CRITICAL LIFECYCLE FIX #9: Event Listener Leak (Window/Document)
+      //
+      // VULNERABILITY: If element is removed by external code (jQuery, D3, innerHTML=''),
+      // the Reflex cleanup mechanism (_kill) is never triggered, leaking window/document listeners
+      //
+      // SOLUTION: Use WeakRef + FinalizationRegistry to avoid circular references
+      // The handler uses WeakRef to avoid strongly capturing 'el', allowing GC when el is no longer referenced
+      const elRef = typeof WeakRef !== 'undefined' ? new WeakRef(el) : null;
       const handler = (e) => {
+        // Deref the element - if it's been GC'd, cleanup and exit
+        const element = elRef ? elRef.deref() : el;
+        if (!element) {
+          // Element has been garbage collected, remove this listener
+          target.removeEventListener(nm, handler, opts);
+          return;
+        }
+
         if (mod.includes('prevent')) e.preventDefault();
         if (mod.includes('stop')) e.stopPropagation();
         try {
-          fn(self.s, o, e, el);
+          fn(self.s, o, e, element);
         } catch (err) {
           self._handleError(err, o);
         }
@@ -3393,25 +3410,24 @@ export const CompilerMixin = {
       const opts: AddEventListenerOptions | undefined = mod.includes('once') ? { once: true } : undefined;
       target.addEventListener(nm, handler, opts);
 
-      // CRITICAL LIFECYCLE FIX #9: Event Listener Leak (Window/Document)
-      //
-      // VULNERABILITY: If element is removed by external code (jQuery, D3, innerHTML=''),
-      // the Reflex cleanup mechanism (_kill) is never triggered, leaking window/document listeners
-      //
-      // SOLUTION: Use FinalizationRegistry (modern browsers) to detect when element is GC'd
-      // This ensures cleanup even if _kill is never called
+      // Register cleanup with Reflex lifecycle
       const cleanup = () => target.removeEventListener(nm, handler, opts);
       this._reg(el, cleanup);
 
-      // Modern browsers: Use FinalizationRegistry for automatic cleanup
+      // Modern browsers: Use FinalizationRegistry for automatic cleanup when element is GC'd
+      // IMPORTANT: We pass cleanup data (not a closure) to avoid circular references
+      // The held value must NOT reference 'el' directly or indirectly
       if (typeof FinalizationRegistry !== 'undefined') {
         if (!this._globalListenerRegistry) {
-          this._globalListenerRegistry = new FinalizationRegistry((cleanupFn) => {
-            cleanupFn();
+          this._globalListenerRegistry = new FinalizationRegistry((cleanupData) => {
+            // cleanupData contains: { target, eventName, handler, options }
+            // This callback runs when the element is GC'd
+            cleanupData.target.removeEventListener(cleanupData.eventName, cleanupData.handler, cleanupData.options);
           });
         }
         // Register the element for cleanup when it's garbage collected
-        this._globalListenerRegistry.register(el, cleanup);
+        // Pass cleanup data (not a function) to avoid capturing 'el' in the held value
+        this._globalListenerRegistry.register(el, { target, eventName: nm, handler, options: opts });
       }
 
       return;
