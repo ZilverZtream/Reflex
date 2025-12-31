@@ -12,13 +12,12 @@
 
 import type { IRendererAdapter, TransitionConfig, VNode } from './types.js';
 
-// CRITICAL FIX (Issue #5): Re-export SafeHTML from the dedicated core module
-// This maintains backwards compatibility for code that imports from renderers/dom.js
-// while allowing the core compiler to import from the browser-independent module.
-//
-// BEFORE: SafeHTML was defined here, creating a coupling between core and DOM renderer
-// AFTER: SafeHTML is defined in core/safe-html.ts and re-exported here
-export { SafeHTML } from '../core/safe-html.js';
+// CRITICAL FIX (Issue #5): Import SafeHTML from the dedicated core module
+// Import for local use AND re-export for backwards compatibility
+import { SafeHTML } from '../core/safe-html.js';
+
+// Re-export for backwards compatibility with code that imports from renderers/dom.js
+export { SafeHTML };
 
 /**
  * CSS Transition helper for enter/leave animations.
