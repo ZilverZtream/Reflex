@@ -14,28 +14,13 @@
  * extensions like hydration, SSR, and custom features.
  */
 
-// CRITICAL FIX #11 + #8: queueMicrotask polyfill with pollution prevention
-// Missing in iOS < 13, older Node.js, and legacy browsers
-// Fallback to Promise.resolve().then() which has equivalent semantics
-// CRITICAL FIX #8: Only polyfill if not already defined to prevent namespace pollution
-// If multiple libraries polyfill queueMicrotask, each overwrites the other's implementation
-// This can break libraries that expect native behavior or have custom polyfills
-if (typeof globalThis !== 'undefined' && typeof globalThis.queueMicrotask === 'undefined') {
-  (globalThis as any).queueMicrotask = (callback: () => void) => {
-    Promise.resolve().then(callback).catch(err => {
-      // CRITICAL FIX: Better error reporting for polyfill
-      // Use reportError if available (modern browsers), fallback to console.error
-      // This preserves the error context better than setTimeout(() => throw)
-      if (typeof globalThis.reportError === 'function') {
-        globalThis.reportError(err);
-      } else {
-        // Fallback for older browsers: log and rethrow async
-        console.error('Uncaught error in queueMicrotask:', err);
-        setTimeout(() => { throw err; }, 0);
-      }
-    });
-  };
-}
+// NOTE: queueMicrotask polyfill is now consolidated in scheduler.ts
+// It's applied automatically when the scheduler module is imported.
+// This prevents global namespace pollution from happening twice and
+// ensures the polyfill is only applied once per application.
+//
+// The SchedulerMixin uses queueMicrotask for job scheduling, so the
+// polyfill is applied before it's needed.
 
 // Symbols are used by mixins, and META is used for DevTools
 import { META } from './symbols.js';
