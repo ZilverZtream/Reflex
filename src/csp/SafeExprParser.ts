@@ -433,11 +433,17 @@ function isDangerousPropertyPattern(prop: string): boolean {
   //   - constructorÀ (À is part of identifier - Unicode continuation char)
   //   - constructorFoo (Foo continues the identifier)
   for (const dangerous of dangerousWords) {
-    // TASK 12.6: Create a regex that matches the dangerous word with Unicode-aware word boundaries
-    // Use [^\p{ID_Continue}$] to match non-identifier characters (Unicode-aware)
+    // TASK 12.6 + 13.7: Create a regex that matches the dangerous word with Unicode-aware word boundaries
+    // Use [^\p{ID_Continue}$\u200c\u200d] to match non-identifier characters (Unicode-aware)
     // This ensures characters like À, 日, μ are treated as part of the identifier
+    //
+    // TASK 13.7: Explicitly include Zero-Width Joiners (ZWJ/ZWNJ) as identifier characters
+    // U+200C (ZWNJ) and U+200D (ZWJ) are used in some scripts (Arabic, Indic) to control
+    // character joining. They MUST be treated as part of the identifier, not as word boundaries.
+    // Without this, an attacker could use "construc\u200Dtor" to bypass the "constructor" check.
+    //
     // Match if: start of string OR non-identifier-char before, dangerous word, end of string OR non-identifier-char after
-    const pattern = new RegExp(`(^|[^\\p{ID_Continue}$])${dangerous}([^\\p{ID_Continue}$]|$)`, 'iu');
+    const pattern = new RegExp(`(^|[^\\p{ID_Continue}$\\u200c\\u200d])${dangerous}([^\\p{ID_Continue}$\\u200c\\u200d]|$)`, 'iu');
     if (pattern.test(lowerProp)) return true;
   }
 

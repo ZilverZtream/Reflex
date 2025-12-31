@@ -887,11 +887,29 @@ export class Reflex {
         }
       }
 
-      // Process bindings on slotted content but don't walk yet
+      // Process bindings on slotted content and walk with PARENT scope
+      // TASK 13.2: Slot content must use parent scope, not component scope
+      // The slot content ({{ parentVar }}) should resolve from the parent context,
+      // not from the component's internal scope.
       for (const node of slotContent) {
         if (node.nodeType === 1) {
-          this._bnd(node as Element, o);
-          // CRITICAL FIX #6: Don't call _w - caller will walk
+          const el = node as Element;
+          const mIf = el.getAttribute('m-if');
+          const mFor = el.getAttribute('m-for');
+
+          // TASK 13.2: Handle structural directives (m-if, m-for) on slot content
+          // These must be processed BEFORE walking, since _w only processes children's directives
+          if (mFor !== null) {
+            this._dir_for(el, o);
+          } else if (mIf !== null) {
+            this._dir_if(el, o);
+          } else {
+            this._bnd(el, o);
+            // TASK 13.2: Queue slot content for walking with PARENT scope (o)
+            // This ensures {{ parentVar }} in <my-comp>{{ parentVar }}</my-comp>
+            // correctly resolves from the parent's scope, not the component's scope
+            this._queueWalk(el, o);
+          }
         } else if (node.nodeType === 3) {
           const nv = node.nodeValue;
           if (typeof nv === 'string' && nv.indexOf('{{') !== -1) {

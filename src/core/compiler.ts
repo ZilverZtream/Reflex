@@ -50,6 +50,47 @@ const getRawValue = (v: any): any => {
 };
 
 /**
+ * TASK 13.5: WeakMap-based ID generator for object keys in m-for.
+ *
+ * When using objects as keys (e.g., :key="item" where item is an object),
+ * String(item) returns "[object Object]" which is identical for all objects.
+ * This causes key collisions and DOM corruption.
+ *
+ * Solution: Assign unique numeric IDs to objects using a WeakMap.
+ * The WeakMap ensures IDs are garbage collected when objects are no longer referenced.
+ */
+const objectKeyMap = new WeakMap<object, number>();
+let objectKeyUid = 0;
+
+/**
+ * Convert a key to a stable, unique string representation.
+ * For objects, uses the WeakMap-based ID generator.
+ * For primitives, uses String() directly.
+ */
+function getStableKey(key: any): string | number | symbol {
+  if (key === null || key === undefined) {
+    return String(key);
+  }
+
+  // For objects, use WeakMap-based unique ID
+  if (typeof key === 'object') {
+    // Get raw value first to ensure identity comparison works correctly
+    const rawKey = getRawValue(key);
+    if (typeof rawKey === 'object' && rawKey !== null) {
+      let id = objectKeyMap.get(rawKey);
+      if (id === undefined) {
+        id = objectKeyUid++;
+        objectKeyMap.set(rawKey, id);
+      }
+      return `__obj_${id}`;
+    }
+  }
+
+  // For primitives, use direct value (no conversion to string for better Map keys)
+  return key;
+}
+
+/**
  * Clone a node while preserving node state (valueRef) from WeakMap.
  *
  * TASK 6: THE "PHANTOM STATE" MANDATE
@@ -553,10 +594,24 @@ export const CompilerMixin = {
   _walkQueue: null as { node: any, scope: any }[] | null,
   _walkQueueProcessing: false,
 
+  // TASK 13.2: Track nodes that have been queued for walking to prevent re-walking
+  // This is critical for slot content which should only be walked with parent scope,
+  // not re-walked when the component instance is walked with component scope
+  _walkedNodes: null as WeakSet<Node> | null,
+
   _queueWalk(node: any, scope: any) {
     if (!this._walkQueue) {
       this._walkQueue = [];
     }
+    // TASK 13.2: Only queue if not already queued/walked
+    if (!this._walkedNodes) {
+      this._walkedNodes = new WeakSet();
+    }
+    if (this._walkedNodes.has(node)) {
+      // Node was already queued/walked - skip to prevent re-walking with wrong scope
+      return;
+    }
+    this._walkedNodes.add(node);
     this._walkQueue.push({ node, scope });
   },
 
@@ -643,6 +698,13 @@ export const CompilerMixin = {
 
         // Element node (1)
         if (nt === 1) {
+          // TASK 13.2: Skip nodes that were already walked (e.g., slot content walked with parent scope)
+          // This prevents slot content from being re-walked with the wrong (component) scope
+          if (this._walkedNodes && this._walkedNodes.has(c)) {
+            c = next;
+            continue;
+          }
+
           const mIgnore = c.getAttribute('m-ignore');
           if (mIgnore === null) {
             const tag = c.tagName;
@@ -687,6 +749,10 @@ export const CompilerMixin = {
         }
         c = next;
       }
+    }
+    } finally {
+      // Decrement depth counter when exiting the walk
+      this._walkDepth--;
     }
   },
 
@@ -830,10 +896,6 @@ export const CompilerMixin = {
           this._applyDir(n, dirName, v, mods, o);
         }
       }
-    }
-    } finally {
-      // TASK 12.2: Always decrement depth on exit (success or error)
-      this._walkDepth--;
     }
   },
 
@@ -1159,6 +1221,9 @@ export const CompilerMixin = {
       const config = {
         getKey: (item, index, scope) => {
           let key = kAttr ? (keyIsProp ? (item && item[kAttr]) : keyFn(this.s, scope)) : index;
+          // TASK 13.5: Convert object keys to stable unique IDs
+          // This prevents "[object Object]" collisions when objects are used as keys
+          key = getStableKey(key);
           // Handle duplicate keys to prevent ghost nodes
           return resolveDuplicateKey(seenKeys, key, index);
         },
@@ -1945,10 +2010,11 @@ export const CompilerMixin = {
 
     // Cache initial static class/style to preserve when binding dynamic values
     // This prevents the "class wipeout" bug where :class overwrites static classes
-    // CRITICAL FIX: During hydration, skip initial class/style capture since those values
-    // come from server-side rendering, not static markup. Capturing them causes duplication.
-    const initialClass = (att === 'class' && !this._hydrateMode) ? el.className : null;
-    const initialStyle = (att === 'style' && !this._hydrateMode) ? el.getAttribute('style') || '' : null;
+    // TASK 13.3: During hydration, we MUST read the existing className and style.cssText
+    // The SSR-rendered values should be preserved, not destroyed. The previous logic was
+    // backwards - it skipped capture during hydration, causing static classes to be lost.
+    const initialClass = att === 'class' ? el.className : null;
+    const initialStyle = att === 'style' ? el.getAttribute('style') || '' : null;
 
     // Track previous style keys for cleanup (fixes "stale style" bug)
     // When style object changes, we need to explicitly remove old properties
@@ -2156,13 +2222,13 @@ export const CompilerMixin = {
           // In strict mode (ES modules), assigning to read-only properties throws TypeError
           // Use try-catch to gracefully fall back to setAttribute for read-only properties
           try {
-            // TASK 6: Object Identity for Checkbox/Radio Values
-            // When binding :value="obj" to a checkbox or radio, the DOM stringifies objects to "[object Object]"
-            // This makes it impossible to match objects in m-model array binding since all objects become identical strings
+            // TASK 6 + 13.1: Object Identity for Checkbox/Radio/Option Values
+            // When binding :value="obj" to a checkbox, radio, or option, the DOM stringifies objects to "[object Object]"
+            // This makes it impossible to match objects in m-model array/select binding since all objects become identical strings
             // Solution: Store the original object reference in WeakMap for later retrieval by m-model
             if (att === 'value' && v !== null && typeof v === 'object' &&
-                (el.type === 'checkbox' || el.type === 'radio')) {
-              // TASK 6: Store in WeakMap instead of DOM property
+                (el.type === 'checkbox' || el.type === 'radio' || el.tagName === 'OPTION')) {
+              // TASK 6/13.1: Store in WeakMap instead of DOM property
               const state = this._nodeState.get(el) || {};
               state.valueRef = v;
               this._nodeState.set(el, state);
@@ -2306,30 +2372,24 @@ export const CompilerMixin = {
             }
           }
 
-          // TASK 12.9: Hash Comparison for complex HTML
-          // Compute a simple Adler-32 hash of both strings
-          // Only perform expensive DOM normalization if hashes differ
-          const adler32 = (str: string): number => {
-            const MOD_ADLER = 65521;
-            let a = 1, b = 0;
-            for (let i = 0; i < str.length; i++) {
-              a = (a + str.charCodeAt(i)) % MOD_ADLER;
-              b = (b + a) % MOD_ADLER;
-            }
-            return (b << 16) | a;
-          };
-
-          const currentHash = adler32(currentHTML);
-          const newHash = adler32(htmlString);
-
-          // If hashes match, content is extremely likely to be identical
-          // Skip DOM parsing entirely (hash collision probability is very low)
-          if (currentHash === newHash && currentHTML.length === htmlString.length) {
+          // TASK 13.7: Fast Path - Length Comparison First
+          // Compare string lengths before doing expensive string comparison
+          // If lengths differ, content is definitely different - skip the comparison
+          // This is O(1) and catches most cases where content has changed
+          //
+          // NOTE: Adler-32 hash was removed because:
+          // 1. Hash collisions (though rare) can cause silent data corruption
+          // 2. Hash computation is O(n) anyway, same as string comparison
+          // 3. Correctness > micro-optimization for security-critical code
+          if (currentHTML.length !== htmlString.length) {
+            // Lengths differ - content is definitely different, proceed to update
+          } else if (currentHTML === htmlString) {
+            // Lengths match AND content matches - skip the update
             prev = safeHtml;
             return;
           }
 
-          // Hashes differ or lengths differ - fall back to normalized comparison
+          // Lengths match but content differs - fall back to normalized comparison
           // Only now do we incur the cost of DOM parsing
           const tempDiv = document.createElement('div');
           tempDiv.innerHTML = htmlString;
@@ -2505,9 +2565,11 @@ export const CompilerMixin = {
         // File inputs have read-only .value, so setting it throws InvalidStateError
         const currentType = (el.type || '').toLowerCase();
         if (currentType === 'file') {
-          // Type changed to file - skip value assignment to prevent crash
-          // The initial isFile check above prevents initial binding, but this
-          // prevents crashes when type changes dynamically via :type binding
+          // TASK 13.1: File inputs are read-only, but we still track the model
+          // The binding works in reverse: DOM -> Model (via the 'up' handler)
+          // We track the dependency here so the effect re-runs on model changes
+          // but we don't try to set el.value (which would throw)
+          fn(this.s, o); // Track dependency
           return;
         }
 
@@ -2578,11 +2640,60 @@ export const CompilerMixin = {
           // For multi-select, v should be an array of selected values
           const selectedValues = Array.isArray(v) ? v : [];
           // Update the selected options
-          // CRITICAL FIX: DOM option.value is always a string, but model data might contain numbers
-          // Use String() conversion to handle type coercion (e.g., [1, 2] should match <option value="1">)
+          // TASK 13.1: Support object values in multi-select
+          // DOM option.value is always a string, but model data might contain objects or numbers
+          // Get the original object from nodeState if available
           const options = el.options;
           for (let i = 0; i < options.length; i++) {
-            options[i].selected = selectedValues.some(val => String(val) === options[i].value);
+            const opt = options[i];
+            const optState = this._nodeState.get(opt);
+            const optValue = (optState && optState.valueRef !== undefined) ? optState.valueRef : opt.value;
+            const isObjectValue = optValue !== null && typeof optValue === 'object';
+            const rawOptValue = getRawValue(optValue);
+
+            opt.selected = selectedValues.some(val => {
+              // For objects, use identity comparison on raw (unwrapped) values
+              if (isObjectValue || (val !== null && typeof val === 'object')) {
+                const rawVal = getRawValue(val);
+                return rawVal === rawOptValue;
+              }
+              // For primitives, use type coercion to match DOM string values
+              return String(val) === String(optValue);
+            });
+          }
+        } else if (el.tagName === 'SELECT') {
+          // TASK 13.1: Handle single-select with object values
+          // The model value v might be an object, and options might have object values stored in nodeState
+          const options = el.options;
+          let foundMatch = false;
+          const rawV = getRawValue(v);
+          const isObjectModel = v !== null && typeof v === 'object';
+
+          for (let i = 0; i < options.length; i++) {
+            const opt = options[i];
+            const optState = this._nodeState.get(opt);
+            const optValue = (optState && optState.valueRef !== undefined) ? optState.valueRef : opt.value;
+            const isObjectOption = optValue !== null && typeof optValue === 'object';
+            const rawOptValue = getRawValue(optValue);
+
+            let isMatch = false;
+            if (isObjectModel || isObjectOption) {
+              // Object comparison: use identity
+              isMatch = rawV === rawOptValue;
+            } else {
+              // Primitive comparison: use string coercion
+              isMatch = String(v) === String(optValue);
+            }
+
+            if (isMatch && !foundMatch) {
+              el.selectedIndex = i;
+              foundMatch = true;
+            }
+          }
+
+          // If no match and value is null/undefined, reset to no selection or first option
+          if (!foundMatch && v == null) {
+            el.selectedIndex = options.length > 0 ? 0 : -1;
           }
         } else if (isNum) {
           // For number inputs, avoid cursor jumping by comparing loosely
@@ -2815,31 +2926,62 @@ export const CompilerMixin = {
           }
         }
 
+        // TASK 13.1: Get selected values, preserving object references from nodeState
         // Fallback for environments without selectedOptions (e.g., happy-dom)
-        let selectedValues;
+        let selectedOptions: HTMLOptionElement[];
         if (el.selectedOptions) {
-          selectedValues = Array.from(el.selectedOptions).map(opt => opt.value);
+          selectedOptions = Array.from(el.selectedOptions);
         } else {
-          selectedValues = Array.from(el.options)
-            .filter(opt => opt.selected)
-            .map(opt => opt.value);
+          selectedOptions = Array.from(el.options).filter(opt => opt.selected);
         }
 
-        // Coerce to numbers if the original array contained numbers or all options are numeric
-        // CRITICAL FIX #8: Data Integrity - Whitespace Coercion to Zero
-        // Number(" ") returns 0, which passes !isNaN check but corrupts data
-        // Check for empty/whitespace strings BEFORE numeric conversion
-        if (shouldCoerceToNumber) {
-          v = selectedValues.map(val => {
-            const trimmed = val.trim();
-            // Empty or whitespace-only values should remain as strings, not become 0
-            if (trimmed === '') return val;
-            // Valid numeric conversion
-            return !isNaN(Number(val)) ? Number(val) : val;
+        // TASK 13.1: Check if any option has an object value in nodeState
+        // If so, we return object values; otherwise, we continue with string/number handling
+        const hasObjectValues = selectedOptions.some(opt => {
+          const optState = this._nodeState.get(opt);
+          return optState && optState.valueRef !== undefined && typeof optState.valueRef === 'object';
+        });
+
+        if (hasObjectValues) {
+          // Return object values from nodeState
+          v = selectedOptions.map(opt => {
+            const optState = this._nodeState.get(opt);
+            return (optState && optState.valueRef !== undefined) ? optState.valueRef : opt.value;
           });
         } else {
-          v = selectedValues;
+          // Original behavior: string/number coercion
+          const selectedValues = selectedOptions.map(opt => opt.value);
+
+          // Coerce to numbers if the original array contained numbers or all options are numeric
+          // CRITICAL FIX #8: Data Integrity - Whitespace Coercion to Zero
+          // Number(" ") returns 0, which passes !isNaN check but corrupts data
+          // Check for empty/whitespace strings BEFORE numeric conversion
+          if (shouldCoerceToNumber) {
+            v = selectedValues.map(val => {
+              const trimmed = val.trim();
+              // Empty or whitespace-only values should remain as strings, not become 0
+              if (trimmed === '') return val;
+              // Valid numeric conversion
+              return !isNaN(Number(val)) ? Number(val) : val;
+            });
+          } else {
+            v = selectedValues;
+          }
         }
+      } else if (el.tagName === 'SELECT') {
+        // TASK 13.1: Handle single-select reading with object values
+        const selectedOpt = el.options[el.selectedIndex];
+        if (selectedOpt) {
+          const optState = this._nodeState.get(selectedOpt);
+          v = (optState && optState.valueRef !== undefined) ? optState.valueRef : selectedOpt.value;
+        } else {
+          v = null;
+        }
+      } else if ((el.type || '').toLowerCase() === 'file') {
+        // TASK 13.1: File input reading - return FileList or first file
+        // File inputs can only be read (not set), so this is a one-way binding
+        // Return el.files (FileList) so model can access the selected files
+        v = el.files;
       } else v = el.value;
 
       // TASK 8.1: Parse path with dynamic segment support
