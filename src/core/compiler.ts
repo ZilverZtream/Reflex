@@ -2313,6 +2313,24 @@ export const CompilerMixin = {
             next === null ? el.removeAttribute(attrName) : el.setAttribute(attrName, next);
           }
         } else if (att in el && !isSVGAttr) {
+          // CRITICAL SECURITY FIX: Block innerHTML and outerHTML binding to prevent SafeHTML bypass
+          // The m-html directive enforces SafeHTML for XSS protection, but :innerHTML="str" bypasses this
+          // Attackers or careless developers could inject XSS by binding to innerHTML directly
+          // This creates an inconsistent security model where m-html is safe but :innerHTML is not
+          const dangerousHtmlProps = ['innerHTML', 'outerHTML'];
+          if (dangerousHtmlProps.includes(att)) {
+            throw new Error(
+              `Reflex: SECURITY ERROR - Cannot bind to '${att}' property.\n` +
+              `The '${att}' property accepts raw HTML and bypasses SafeHTML security.\n\n` +
+              `Solution:\n` +
+              `  1. Use the m-html directive instead: <div m-html="safeContent"></div>\n` +
+              `  2. Wrap your HTML with SafeHTML: SafeHTML.sanitize(htmlString)\n` +
+              `  3. Configure DOMPurify: SafeHTML.configureSanitizer(DOMPurify)\n\n` +
+              `This prevents XSS attacks by enforcing consistent security checks.\n` +
+              `For dynamic text content (no HTML), use m-text or :textContent instead.`
+            );
+          }
+
           // CRITICAL FIX: Read-Only Property Crash
           // Many DOM properties are read-only (e.g., input.list, video.duration, element.clientTop)
           // In strict mode (ES modules), assigning to read-only properties throws TypeError
