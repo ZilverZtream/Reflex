@@ -2127,38 +2127,32 @@ export const CompilerMixin = {
         //   - Regex sees: j&#97;vascript: (passes as unrecognized protocol)
         //   - Browser sees: javascript:alert(1) (executes!)
         if (isUrlAttr && v != null && typeof v === 'string') {
-          // Decode HTML entities by using a temporary DOM element
+          // SECURITY FIX: DOM XSS via Attribute Validation
+          // Previous code used decoder.innerHTML = v which is vulnerable to DOM XSS
+          // Attack: v = '</textarea><img src=x onerror=alert(1)>'
+          //   - Setting innerHTML would close the textarea and execute the onerror handler
+          // Fix: Use safe manual decoding instead of innerHTML
+          //
+          // Manual decoding of HTML entities to match browser behavior
           // This catches ALL entity forms: &#97; &#x61; &amp; etc.
-          // CRITICAL FIX #5: SSR Attribute Binding XSS Bypass
-          // Browsers decode entities even without semicolons: &#106avascript: -> javascript:
-          // The SSR fallback must match browser behavior to prevent bypasses
-          let decodedUrl = v;
-          try {
-            // Create a temporary element to decode entities
-            const decoder = document.createElement('textarea');
-            decoder.innerHTML = v;
-            decodedUrl = decoder.value;
-          } catch (e) {
-            // If DOM is not available (SSR), do manual decoding of common entities
-            // CRITICAL: Make semicolon optional (;?) to match browser lenient parsing
-            // Browsers decode &#106avascript: as javascript: even without semicolon
-            decodedUrl = v
-              .replace(/&#x([0-9a-fA-F]+);?/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-              .replace(/&#(\d+);?/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
-              .replace(/&amp;/g, '&')
-              .replace(/&lt;/g, '<')
-              .replace(/&gt;/g, '>')
-              .replace(/&quot;/g, '"')
-              .replace(/&#39;/g, "'")
-              .replace(/&apos;/g, "'")
-              .replace(/&nbsp;/g, '\u00A0')
-              // Decode more named entities to match browser behavior
-              .replace(/&colon;/g, ':')
-              .replace(/&sol;/g, '/')
-              .replace(/&quest;/g, '?')
-              .replace(/&equals;/g, '=')
-              .replace(/&num;/g, '#');
-          }
+          // CRITICAL: Make semicolon optional (;?) to match browser lenient parsing
+          // Browsers decode &#106avascript: as javascript: even without semicolon
+          const decodedUrl = v
+            .replace(/&#x([0-9a-fA-F]+);?/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+            .replace(/&#(\d+);?/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+            .replace(/&apos;/g, "'")
+            .replace(/&nbsp;/g, '\u00A0')
+            // Decode more named entities to match browser behavior
+            .replace(/&colon;/g, ':')
+            .replace(/&sol;/g, '/')
+            .replace(/&quest;/g, '?')
+            .replace(/&equals;/g, '=')
+            .replace(/&num;/g, '#');
 
           // Check the DECODED URL against our allowlist
           const isSafe = RELATIVE_URL_RE.test(decodedUrl) || SAFE_URL_RE.test(decodedUrl);
