@@ -21,7 +21,12 @@
 import { META, ITERATE, SKIP, UNSAFE_PROPS, SAFE_URL_RE, RELATIVE_URL_RE } from './symbols.js';
 import { computeLIS, resolveDuplicateKey, reconcileKeyedList } from './reconcile.js';
 import { ScopeContainer } from '../csp/SafeExprParser.js';
-import { SafeHTML } from '../renderers/dom.js';
+// CRITICAL FIX (Issue #5): Import SafeHTML from dedicated module instead of DOM renderer
+// This decouples the core compiler from browser-specific code, allowing it to work
+// in non-browser environments (React Native, Edge workers) when using VirtualRenderer
+import { SafeHTML } from './safe-html.js';
+// CRITICAL FIX (Issue #6): Import queueMicrotaskSafe to avoid global polyfill side-effects
+import { queueMicrotaskSafe } from './scheduler.js';
 import {
   ScopeRegistry,
   createFlatScope,
@@ -863,28 +868,77 @@ export const CompilerMixin = {
             this.s[v].push(n);
             this._refs[v].push(n);
 
-            // CRITICAL FIX: Preserve DOM order for ref arrays
-            // While swap-and-pop is O(1) vs splice's O(N), DOM order MUST be preserved
-            // Developers rely on refs[i].focus() to focus items in visual order
-            // Correctness trumps performance: use splice() to maintain order
+            // CRITICAL FIX (Issue #1): O(N²) Unmount Performance Fix for m-ref Arrays
+            //
+            // PROBLEM: When unmounting a list of N items (e.g., navigating away from a page
+            // with 5,000 items), _kill runs for every item. Each cleanup callback uses
+            // splice() which is O(N) because it shifts all subsequent elements.
+            // N calls × O(N) splice = O(N²) complexity.
+            //
+            // SOLUTION: Use batched removal with Set for O(1) marking + single O(N) filter.
+            // Instead of immediately splicing, we mark elements for removal in a Set.
+            // On the next microtask, we filter out all marked elements in one pass.
+            // This converts O(N²) to O(N) for bulk unmounts.
+            //
+            // CORRECTNESS: DOM order is still preserved because:
+            // 1. filter() preserves relative order of remaining elements
+            // 2. The microtask runs synchronously after all unmount callbacks complete
+            // 3. Developers accessing refs during unmount will still see correct order
+            //    (elements are only removed after all callbacks have run)
             this._reg(n, () => {
               const stateArray = this.s[v];
               const refsArray = this._refs[v];
 
+              // Initialize batch removal sets if they don't exist
+              if (!this._refBatchRemoval) {
+                this._refBatchRemoval = new Map();
+              }
+
+              // Get or create the batch for this ref name
+              let batch = this._refBatchRemoval.get(v);
+              if (!batch) {
+                batch = { stateSet: new Set(), refsSet: new Set(), scheduled: false };
+                this._refBatchRemoval.set(v, batch);
+              }
+
+              // Mark element for removal (O(1))
               if (Array.isArray(stateArray)) {
-                const idx = stateArray.indexOf(n);
-                if (idx !== -1) {
-                  const raw = this.toRaw(stateArray);
-                  // Use splice to preserve order
-                  raw.splice(idx, 1);
-                }
+                batch.stateSet.add(n);
               }
               if (Array.isArray(refsArray)) {
-                const idx = refsArray.indexOf(n);
-                if (idx !== -1) {
-                  // Use splice to preserve order for non-reactive array too
-                  refsArray.splice(idx, 1);
-                }
+                batch.refsSet.add(n);
+              }
+
+              // Schedule batch removal if not already scheduled
+              if (!batch.scheduled) {
+                batch.scheduled = true;
+                queueMicrotaskSafe(() => {
+                  // Apply batch removal (single O(N) filter)
+                  if (batch.stateSet.size > 0 && Array.isArray(this.s[v])) {
+                    const raw = this.toRaw(this.s[v]);
+                    // Filter in place to avoid creating new array
+                    let writeIdx = 0;
+                    for (let readIdx = 0; readIdx < raw.length; readIdx++) {
+                      if (!batch.stateSet.has(raw[readIdx])) {
+                        raw[writeIdx++] = raw[readIdx];
+                      }
+                    }
+                    raw.length = writeIdx;
+                  }
+
+                  if (batch.refsSet.size > 0 && Array.isArray(this._refs[v])) {
+                    let writeIdx = 0;
+                    for (let readIdx = 0; readIdx < this._refs[v].length; readIdx++) {
+                      if (!batch.refsSet.has(this._refs[v][readIdx])) {
+                        this._refs[v][writeIdx++] = this._refs[v][readIdx];
+                      }
+                    }
+                    this._refs[v].length = writeIdx;
+                  }
+
+                  // Clear the batch
+                  this._refBatchRemoval.delete(v);
+                });
               }
             });
           } else {
@@ -2564,31 +2618,35 @@ export const CompilerMixin = {
 
   /**
    * Two-way binding: m-model="expr"
+   *
+   * CRITICAL FIX (Issue #2): m-model Dynamic Type Switching
+   *
+   * PROBLEM: The original implementation captured input type at binding time:
+   *   const type = el.type; const isChk = type === 'checkbox'; ...
+   * If the input type changes dynamically (e.g., <input :type="showPassword ? 'text' : 'password'">
+   * or switching text -> checkbox), the m-model logic doesn't adapt. The binding becomes
+   * desynchronized from the DOM type.
+   *
+   * SOLUTION: Move type detection inside the reactive effect and input handler so it's
+   * evaluated on each update/input. Now switching from text to checkbox will:
+   * - Re-evaluate the type in the effect
+   * - Use the correct DOM property (checked vs value)
+   * - Fire the correct events (change vs input)
+   *
+   * PERFORMANCE: Type detection inside effects adds a negligible String.toLowerCase() call
+   * per reactive update. This is acceptable because m-model updates are user-driven (typing)
+   * which are inherently rate-limited by human input speed (~20-40 chars/sec max).
    */
   _mod(el, exp, o, modifiers = []) {
     const fn = this._fn(exp);
-    const type = (el.type || '').toLowerCase();
-    const isChk = type === 'checkbox';
-    const isRadio = type === 'radio';
-    // CRITICAL FIX #8: Support .number modifier on text inputs
-    // Previous bug: Only checked type === 'number' || type === 'range'
-    // This ignored the .number modifier on text inputs (m-model.number on type="text")
-    // Fix: Also check if 'number' modifier is present
-    const isNum = type === 'number' || type === 'range' || modifiers.includes('number');
-    const isMultiSelect = type === 'select-multiple';
+    // CRITICAL FIX (Issue #2): Only capture modifiers and lazy flag at binding time
+    // Type-related flags (isChk, isRadio, isNum, isMultiSelect) are now dynamic
+    const hasNumberMod = modifiers.includes('number');
     const isLazy = modifiers.includes('lazy');
-    // CRITICAL FIX: m-model Input Type Switching
-    // File inputs have a read-only .value property (security restriction)
-    // We track the initial type to warn appropriately, but DON'T return early.
-    // The effect dynamically checks the type, so if an input starts as type="file"
-    // but is later switched to type="text" via :type binding, the m-model will work.
-    //
-    // Previous bug: Early return prevented binding entirely for initial file inputs,
-    // so switching from file to text left the input unresponsive.
-    const initialIsFile = type === 'file';
-    if (initialIsFile) {
-      // CRITICAL FIX: Prevent warning spam by only logging once per element
-      // Use WeakSet to track which elements have been warned
+
+    // Initial file input warning (still static - just a warning)
+    const initialType = (el.type || '').toLowerCase();
+    if (initialType === 'file') {
       if (!this._fileInputsWarned.has(el)) {
         this._fileInputsWarned.add(el);
         console.warn(
@@ -2597,23 +2655,25 @@ export const CompilerMixin = {
           'Note: If the input type changes dynamically, m-model will work when not type="file".'
         );
       }
-      // DON'T return early - let the effect handle dynamic type changes
     }
 
     const e = this.createEffect(() => {
       try {
-        // CRITICAL FIX #5: Dynamic Type Switching Protection
-        // Check if the input has dynamically changed to type="file"
-        // File inputs have read-only .value, so setting it throws InvalidStateError
+        // CRITICAL FIX (Issue #2): Dynamic type detection inside effect
+        // Re-evaluate type on every reactive update to handle :type bindings
         const currentType = (el.type || '').toLowerCase();
+
+        // Handle file inputs (read-only .value)
         if (currentType === 'file') {
-          // TASK 13.1: File inputs are read-only, but we still track the model
-          // The binding works in reverse: DOM -> Model (via the 'up' handler)
-          // We track the dependency here so the effect re-runs on model changes
-          // but we don't try to set el.value (which would throw)
-          fn(this.s, o); // Track dependency
+          fn(this.s, o); // Track dependency only
           return;
         }
+
+        // CRITICAL FIX (Issue #2): Dynamic type flags
+        const isChk = currentType === 'checkbox';
+        const isRadio = currentType === 'radio';
+        const isNum = currentType === 'number' || currentType === 'range' || hasNumberMod;
+        const isMultiSelect = currentType === 'select-multiple';
 
         const v = fn(this.s, o);
 
@@ -2764,6 +2824,14 @@ export const CompilerMixin = {
     const up = () => {
       // CRITICAL: Skip update if IME composition is in progress
       if (isComposing) return;
+
+      // CRITICAL FIX (Issue #2): Dynamic type detection in input handler
+      // Re-evaluate type on every input event to handle :type bindings
+      const currentType = (el.type || '').toLowerCase();
+      const isChk = currentType === 'checkbox';
+      const isRadio = currentType === 'radio';
+      const isNum = currentType === 'number' || currentType === 'range' || hasNumberMod;
+      const isMultiSelect = currentType === 'select-multiple';
 
       let v;
       // TASK 8.3: Check contenteditable dynamically
@@ -3151,22 +3219,42 @@ export const CompilerMixin = {
       up();
     };
 
-    // Determine event type based on element type and .lazy modifier
-    let evt;
+    // CRITICAL FIX (Issue #2): Dynamic Event Listener Setup
+    // When input type can change dynamically, we need to listen to both 'input' and 'change'
+    // events to handle all type scenarios. This is a trade-off:
+    // - For static types: slightly more listeners (negligible overhead)
+    // - For dynamic types: correct behavior when switching between text/checkbox/radio
+    //
+    // The alternative (adding/removing listeners dynamically) is more complex and error-prone.
+    // Since most inputs don't change type, and the extra listener is cheap, we always
+    // listen to both events (unless .lazy is specified, which forces change-only).
+    const initType = (el.type || '').toLowerCase();
+    const initIsChk = initType === 'checkbox';
+    const initIsRadio = initType === 'radio';
+
+    // Determine initial event type for IME composition support
+    let primaryEvt;
     if (isLazy) {
-      evt = 'change'; // .lazy always uses 'change'
+      primaryEvt = 'change'; // .lazy always uses 'change' only
     } else {
-      evt = isChk || isRadio || el.tagName === 'SELECT' ? 'change' : 'input';
+      primaryEvt = initIsChk || initIsRadio || el.tagName === 'SELECT' ? 'change' : 'input';
     }
 
-    el.addEventListener(evt, up);
+    el.addEventListener(primaryEvt, up);
     // Also listen to 'change' for inputs (unless already using it)
-    if (evt !== 'change' && !isLazy) {
+    // This ensures we catch both events for dynamic type switching
+    if (primaryEvt !== 'change' && !isLazy) {
       el.addEventListener('change', up);
+    }
+    // Also listen to 'input' for checkboxes/radios in case they become text inputs
+    // (only if we didn't already add it)
+    if (primaryEvt === 'change' && !isLazy) {
+      el.addEventListener('input', up);
     }
 
     // Add IME composition listeners for text inputs
-    if (evt === 'input' && !isChk && !isRadio) {
+    // (checkbox/radio don't need IME support, but harmless if type changes)
+    if (!initIsChk && !initIsRadio) {
       el.addEventListener('compositionstart', onCompositionStart);
       el.addEventListener('compositionend', onCompositionEnd);
     }
