@@ -3209,6 +3209,15 @@ export const CompilerMixin = {
         }
       }
 
+      // CRITICAL SECURITY FIX: Check finalKey AFTER evaluation for dynamic segments
+      // The initial check at line 3128 only validates the raw expression string.
+      // For dynamic keys (e.g., m-model="data[dynamicKey]"), we must also validate
+      // the evaluated value to prevent prototype pollution via runtime-controlled keys.
+      if (UNSAFE_PROPS[finalKey]) {
+        console.warn('Reflex: Blocked attempt to set unsafe property:', finalKey);
+        return;
+      }
+
       // CRITICAL SECURITY FIX: Prevent ALL Prototype Pollution
       // The original scope shadowing logic walked the prototype chain to find where
       // a property was defined. However, this is fundamentally unsafe:
