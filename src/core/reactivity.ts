@@ -44,6 +44,7 @@ interface ReactivityEngine {
     isMap: boolean
   ) => (...args: any[]) => any;
   toRaw: <T>(value: T) => T;
+  toRawDeep: <T>(value: T) => T;  // CRITICAL FIX: Recursive deep unwrap for nested proxies
   _recursionDepth: number;  // CRITICAL: Track recursion depth to prevent infinite loops
 }
 
@@ -611,6 +612,109 @@ export const ReactivityMixin = {
 
     // Not a reactive proxy, return as-is
     return v;
+  },
+
+  /**
+   * CRITICAL FIX: Incomplete toRaw Handling - Recursive Deep Unwrap
+   *
+   * Recursively unwraps all reactive proxies in a nested object structure.
+   * This is essential for:
+   * - Array operations: state.items.includes(item) when item is raw and state.items contains proxies
+   * - Object comparison: JSON.stringify(toRawDeep(state)) for debugging/serialization
+   * - API calls: Sending raw data to external APIs that can't handle proxies
+   * - Testing: Comparing expected vs actual state in unit tests
+   *
+   * Unlike toRaw() which only unwraps one level, toRawDeep() recursively processes:
+   * - Arrays: Unwraps all elements
+   * - Objects: Unwraps all property values
+   * - Maps: Unwraps all keys and values
+   * - Sets: Unwraps all values
+   *
+   * Performance: Uses iterative approach to avoid stack overflow on deeply nested structures.
+   * Cycle-safe: Tracks seen objects to handle circular references.
+   *
+   * @param v - Value to deeply unwrap (may be a nested reactive structure)
+   * @returns A deeply unwrapped copy with all proxies replaced by their raw targets
+   *
+   * @example
+   * // Array comparison with mixed proxy/raw items
+   * const rawItem = { id: 1, name: 'Test' };
+   * state.items.push(rawItem);
+   * console.log(toRawDeep(state.items).includes(rawItem)); // true
+   *
+   * @example
+   * // Safe JSON serialization
+   * const snapshot = JSON.stringify(app.toRawDeep(app.s));
+   */
+  toRawDeep<T>(v: T): T {
+    // Primitives and null/undefined pass through
+    if (v == null || typeof v !== 'object') return v;
+
+    // First, unwrap the top-level proxy if it is one
+    let raw = this.toRaw(v);
+
+    // Track seen objects to handle circular references
+    const seen = new Map<object, any>();
+
+    // Iterative approach to avoid stack overflow
+    const process = (obj: any): any => {
+      if (obj == null || typeof obj !== 'object') return obj;
+
+      // Check if already processed (circular reference)
+      if (seen.has(obj)) return seen.get(obj);
+
+      // Unwrap if it's a proxy
+      const unwrapped = this.toRaw(obj);
+
+      // Handle different collection types
+      if (Array.isArray(unwrapped)) {
+        const result: any[] = [];
+        seen.set(obj, result);
+        for (let i = 0; i < unwrapped.length; i++) {
+          result[i] = process(unwrapped[i]);
+        }
+        return result;
+      }
+
+      if (unwrapped instanceof Map) {
+        const result = new Map();
+        seen.set(obj, result);
+        unwrapped.forEach((value, key) => {
+          result.set(process(key), process(value));
+        });
+        return result;
+      }
+
+      if (unwrapped instanceof Set) {
+        const result = new Set();
+        seen.set(obj, result);
+        unwrapped.forEach(value => {
+          result.add(process(value));
+        });
+        return result;
+      }
+
+      // Skip non-plain objects that shouldn't be cloned (Date, RegExp, etc.)
+      // These are already skipped by _r() so they're never proxied
+      if (unwrapped instanceof Date || unwrapped instanceof RegExp ||
+          unwrapped instanceof Error || unwrapped instanceof Promise ||
+          (typeof WeakMap !== 'undefined' && unwrapped instanceof WeakMap) ||
+          (typeof WeakSet !== 'undefined' && unwrapped instanceof WeakSet)) {
+        return unwrapped;
+      }
+
+      // Handle plain objects
+      const result: Record<string, any> = {};
+      seen.set(obj, result);
+      for (const key in unwrapped) {
+        if (Object.prototype.hasOwnProperty.call(unwrapped, key)) {
+          result[key] = process(unwrapped[key]);
+        }
+      }
+      return result;
+    };
+
+    return process(raw) as T;
   },
 
   /**

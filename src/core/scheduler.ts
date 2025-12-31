@@ -11,12 +11,18 @@
 
 import { ACTIVE, RUNNING, QUEUED, META } from './symbols.js';
 
-// CRITICAL FIX #11 + #8: queueMicrotask polyfill with pollution prevention
+// CRITICAL FIX #11 + #8 + Task 15: queueMicrotask polyfill (SINGLE LOCATION)
+// This is the ONLY location where the polyfill is defined. Previously it was
+// duplicated in reflex.ts, causing potential double-initialization and making
+// it harder to maintain.
+//
+// Why here: The scheduler module uses queueMicrotask for job scheduling.
+// This file is imported early via the mixin chain, ensuring the polyfill
+// is applied before any code attempts to use queueMicrotask.
+//
 // Missing in iOS < 13, older Node.js, and legacy browsers
 // Fallback to Promise.resolve().then() which has equivalent semantics
-// CRITICAL FIX #8: Only polyfill if not already defined to prevent namespace pollution
-// If multiple libraries polyfill queueMicrotask, each overwrites the other's implementation
-// This can break libraries that expect native behavior or have custom polyfills
+// Only polyfills if not already defined to prevent namespace pollution
 if (typeof globalThis !== 'undefined' && typeof globalThis.queueMicrotask === 'undefined') {
   (globalThis as any).queueMicrotask = (callback: () => void) => {
     Promise.resolve().then(callback).catch(err => {
