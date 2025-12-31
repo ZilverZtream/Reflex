@@ -95,6 +95,23 @@ const HydrationMixin = {
    * The server renders evaluated values ("Hello World") not templates ("{{ value }}").
    * We detect reactive text nodes via comment markers: <!--txt:{{ expr }}-->
    * This allows the server to render the final value while preserving template info.
+   *
+   * CRITICAL FIX (Task 14 Issue #9): Whitespace Mismatch Desync Prevention
+   * Problem: Server HTML formatting (pretty-print vs minified) may differ from
+   * what the client DOM parser produces (extra newline text nodes).
+   *
+   * Example scenarios that cause desync:
+   * 1. Server sends: <div>\n  <span>text</span>\n</div>
+   *    Client parses: Extra text nodes for whitespace
+   * 2. Server minifies: <div><span>text</span></div>
+   *    Client template has: <div>  <span>text</span>  </div>
+   *
+   * Solution: Normalize the hydration walking to be whitespace-resilient:
+   * - Pure whitespace text nodes between elements are skipped during matching
+   * - This prevents index desync when server/client have different whitespace
+   * - We ONLY skip whitespace nodes that are purely formatting (newlines/indent)
+   * - Whitespace between inline elements like <span>A</span> <span>B</span> is preserved
+   *   because it has a preceding text marker comment from SSR
    */
   _hydrateWalk(n, o) {
     // Stack of {node, scope} pairs to process
@@ -103,18 +120,47 @@ const HydrationMixin = {
     while (stack.length > 0) {
       const { node: parent, scope: parentScope } = stack.pop();
 
+      // CRITICAL FIX (Task 14 Issue #9): Check if parent preserves whitespace
+      // Elements with CSS white-space: pre, pre-wrap, pre-line, or <pre> tags
+      // must NOT have their whitespace normalized
+      const parentTag = parent.nodeName?.toLowerCase();
+      const preserveWhitespace = parentTag === 'pre' || parentTag === 'code' ||
+        parentTag === 'textarea' || parentTag === 'script' || parentTag === 'style';
+
       let c = parent.firstChild;
       while (c) {
         const next = c.nextSibling;
         const nt = c.nodeType;
 
-        // CRITICAL FIX: Do NOT skip whitespace-only text nodes
-        // While it may seem safe to skip them, whitespace is often semantically significant:
-        // - Space between inline elements: <span>A</span> <span>B</span>
-        // - Whitespace in <pre> tags
-        // - CSS white-space: pre-wrap
-        // Skipping them causes visual layout corruption (elements mashing together)
-        // Instead, hydration must preserve ALL text nodes exactly as the server rendered them
+        // CRITICAL FIX (Task 14 Issue #9): Skip pure formatting whitespace
+        // Pure formatting whitespace is:
+        // - Text node with only whitespace characters (\n, \r, \t, space)
+        // - Located between elements (not between element and text with content)
+        // - Not inside a whitespace-preserving element (<pre>, <code>, etc.)
+        // This prevents desync when server/client have different formatting
+        if (nt === 3 && !preserveWhitespace) {
+          const text = c.nodeValue;
+          // Check if this is purely formatting whitespace (only newlines/tabs/spaces)
+          if (text && /^[\s\n\r\t]+$/.test(text)) {
+            // Check if this whitespace is between elements (formatting) vs inline spacing
+            const prev = c.previousSibling;
+            const nextSib = c.nextSibling;
+            const prevIsElement = prev && prev.nodeType === 1;
+            const nextIsElement = nextSib && nextSib.nodeType === 1;
+            const nextIsComment = nextSib && nextSib.nodeType === 8;
+
+            // Skip if it's formatting whitespace between elements or at container edges
+            // But preserve if it's between inline content or has a text marker comment nearby
+            if ((prevIsElement || prev === null) && (nextIsElement || nextIsComment || nextSib === null)) {
+              // Check if the whitespace contains only newlines and indentation
+              // Single spaces between inline elements should be preserved
+              if (text.includes('\n') || text.includes('\r') || text.length > 1) {
+                c = next;
+                continue; // Skip this pure formatting whitespace node
+              }
+            }
+          }
+        }
 
         // Comment node (8) - check for text interpolation markers
         if (nt === 8) {
@@ -294,18 +340,47 @@ const HydrationMixin = {
             // Handle escaped quotes in bracket notation: items['User\'s Name']
             // The regex must skip escaped characters (\') when matching string content
             // Pattern: [^'\\]* (non-quote/backslash) + (?:\\.[^'\\]*)* (backslash+any+non-quote/backslash, repeated)
-            const bracketMatch = currentPath.match(/^\[(\d+|'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")\]/);
+            //
+            // CRITICAL FIX (Task 14 Issue #2): Support dynamic variable keys in bracket notation
+            // Previous bug: Only matched numbers and quoted strings, missing dynamic variables
+            // Example that failed: users[userId].name - [userId] was not parsed
+            // Solution: Add identifier pattern [a-zA-Z_$][\w$]* to match variable references
+            // The new regex matches:
+            //   - \d+ : numeric indices like [0], [42]
+            //   - '(?:[^'\\]|\\.)*' : single-quoted strings like ['key']
+            //   - "(?:[^"\\]|\\.)*" : double-quoted strings like ["key"]
+            //   - [a-zA-Z_$][\w$]* : identifiers like [userId], [index], [$ref]
+            const bracketMatch = currentPath.match(/^\[(\d+|'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|[a-zA-Z_$][\w$]*)\]/);
 
             if (bracketMatch) {
               // Bracket notation: extract the index/key
-              let key = bracketMatch[1];
+              let key: any = bracketMatch[1];
               // Remove quotes if present
               if ((key[0] === "'" && key[key.length - 1] === "'") ||
                   (key[0] === '"' && key[key.length - 1] === '"')) {
                 key = key.slice(1, -1);
-              } else {
+              } else if (/^\d+$/.test(key)) {
                 // Convert to number if it's a numeric index
                 key = parseInt(key, 10);
+              } else {
+                // CRITICAL FIX (Task 14 Issue #2): Resolve dynamic variable references
+                // When key is an identifier (not a number or quoted string), resolve it
+                // against the scope to get the actual key value
+                // Example: users[userId].name - userId is resolved from scope/state
+                const varName = key;
+                // Try to resolve from scope first, then state
+                if (o && varName in o) {
+                  key = o[varName];
+                } else if (this.s && varName in this.s) {
+                  key = this.s[varName];
+                } else {
+                  // Variable not found - skip this path as we can't resolve it
+                  console.warn(
+                    `Reflex Hydration: Cannot resolve dynamic key "${varName}" in m-model expression.\n` +
+                    `The variable "${varName}" is not defined in the current scope or state.`
+                  );
+                  break;
+                }
               }
               pathSegments.push(key);
               currentPath = currentPath.slice(bracketMatch[0].length);
@@ -801,43 +876,73 @@ const HydrationMixin = {
    * CRITICAL SECURITY: This method validates that a template from a comment marker
    * is safe to evaluate and not injected by an attacker.
    *
+   * CRITICAL FIX (Task 14 Issue #4): Unicode-aware Pattern Matching
+   * The previous implementation used simple regex patterns like /constructor/i which
+   * could be bypassed using unicode homoglyphs or zero-width characters.
+   *
+   * Attack Example: constr\u200Cuctor (with zero-width non-joiner)
+   * The simple regex /constructor/i would miss this, but it would still be parsed
+   * as "constructor" by the JavaScript engine.
+   *
+   * Solution: Use unicode-aware word boundary detection that matches the logic in
+   * SafeExprParser.ts. This ensures consistent security enforcement across all paths.
+   *
    * @param {string} template - The template string to validate
    * @returns {boolean} True if safe, false if potentially malicious
    */
   _validateTemplate(template) {
     if (!template || typeof template !== 'string') return false;
 
-    // Dangerous patterns that should never appear in server-rendered templates
-    const dangerousPatterns = [
-      /constructor/i,           // Prototype pollution attempts
-      /__proto__/i,             // Prototype pollution
-      /prototype/i,             // Prototype access
-      /Function/,               // Function constructor
-      /eval\s*\(/i,             // eval() calls
-      /import\s*\(/i,           // Dynamic imports
-      /require\s*\(/i,          // CommonJS requires
-      /process\./i,             // Node.js process access
-      /global\./i,              // Global object access
-      /window\./i,              // Window object access (suspicious in templates)
-      /document\./i,            // Document access (suspicious in templates)
-      /location\./i,            // Location object (can be used for redirects)
-      /fetch\s*\(/i,            // Fetch API (data exfiltration)
-      /XMLHttpRequest/i,        // XHR (data exfiltration)
-      /WebSocket/i,             // WebSocket (data exfiltration)
-      /setTimeout\s*\(/i,       // setTimeout (code execution)
-      /setInterval\s*\(/i,      // setInterval (code execution)
-      /setImmediate\s*\(/i,     // setImmediate (code execution)
-      /\bthis\s*\.\s*constructor/i, // this.constructor access
-      /ownerDocument/i,         // DOM access to document
-      /contentWindow/i,         // iframe window access
-      /contentDocument/i,       // iframe document access
-      /getRootNode/i,           // Access to document root
-      /importScripts/i,         // Worker importScripts
-      /postMessage/i            // postMessage (potential data leak)
+    // CRITICAL FIX: Normalize unicode to prevent homoglyph bypasses
+    // Remove zero-width characters that could be used to break up dangerous words
+    // U+200B (zero-width space), U+200C (ZWNJ), U+200D (ZWJ), U+FEFF (BOM)
+    const normalized = template.replace(/[\u200B\u200C\u200D\uFEFF]/g, '');
+
+    // List of dangerous base words to check for
+    const dangerousWords = [
+      'constructor', 'prototype', '__proto__',
+      'function', 'eval',
+      'import', 'require', 'process', 'global',
+      'window', 'document', 'location',
+      'fetch', 'xmlhttprequest', 'websocket',
+      'settimeout', 'setinterval', 'setimmediate',
+      'ownerdocument', 'contentwindow', 'contentdocument',
+      'getrootnode', 'importscripts', 'postmessage'
     ];
 
-    for (const pattern of dangerousPatterns) {
-      if (pattern.test(template)) {
+    // Check for dangerous words using unicode-aware word boundary detection
+    // This matches the logic in SafeExprParser.isDangerousPropertyPattern()
+    const lowerNormalized = normalized.toLowerCase();
+
+    for (const dangerous of dangerousWords) {
+      // Use unicode-aware word boundary detection
+      // Match if the dangerous word appears as a complete identifier (not substring)
+      // [^\p{ID_Continue}$] matches non-identifier characters
+      const pattern = new RegExp(
+        `(^|[^\\p{ID_Continue}$\\u200c\\u200d])${dangerous}([^\\p{ID_Continue}$\\u200c\\u200d]|$)`,
+        'iu'
+      );
+      if (pattern.test(lowerNormalized)) {
+        if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+          console.warn(
+            `Reflex Security: Template contains dangerous pattern: ${dangerous}\n` +
+            `Template: ${template}`
+          );
+        }
+        return false;
+      }
+    }
+
+    // Additional patterns that need exact regex matching (not word boundaries)
+    const exactPatterns = [
+      /this\s*\.\s*constructor/i,  // this.constructor access
+      /\[\s*['"]constructor['"]\s*\]/i, // ["constructor"] bracket access
+      /\[\s*['"]__proto__['"]\s*\]/i,   // ["__proto__"] bracket access
+      /\[\s*['"]prototype['"]\s*\]/i    // ["prototype"] bracket access
+    ];
+
+    for (const pattern of exactPatterns) {
+      if (pattern.test(normalized)) {
         if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
           console.warn(
             `Reflex Security: Template contains dangerous pattern: ${pattern}\n` +
@@ -847,10 +952,6 @@ const HydrationMixin = {
         return false;
       }
     }
-
-    // Additional check: Ensure template only contains simple expressions
-    // Valid templates should be like: {{ value }}, {{ user.name }}, {{ count + 1 }}
-    // Invalid: {{ constructor.constructor('code')() }}
 
     // Basic syntax check: template should start with {{ and end with }}
     const trimmed = template.trim();

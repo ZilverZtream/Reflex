@@ -66,7 +66,22 @@ let objectKeyUid = 0;
  * Convert a key to a stable, unique string representation.
  * For objects, uses the WeakMap-based ID generator.
  * For primitives, uses String() directly.
+ *
+ * CRITICAL FIX (Task 14 Issue #3): Key Collision Prevention
+ * The previous format `__obj_${id}` could collide with user-provided string keys.
+ * Example: If a user's data has { id: "__obj_0" }, it would collide with the
+ * auto-generated key for the first object, causing DOM corruption.
+ *
+ * Solution: Use a more unique prefix that includes:
+ * 1. A distinctive marker that's unlikely to appear in user data
+ * 2. A non-printable character (U+200B zero-width space) for extra uniqueness
+ * 3. The "reflex" namespace to claim ownership
+ *
+ * New format: `\u200B__rfx_obj__${id}` (starts with zero-width space)
+ * This is practically impossible to accidentally match with user data.
  */
+const OBJECT_KEY_PREFIX = '\u200B__rfx_obj__';
+
 function getStableKey(key: any): string | number | symbol {
   if (key === null || key === undefined) {
     return String(key);
@@ -82,7 +97,7 @@ function getStableKey(key: any): string | number | symbol {
         id = objectKeyUid++;
         objectKeyMap.set(rawKey, id);
       }
-      return `__obj_${id}`;
+      return `${OBJECT_KEY_PREFIX}${id}`;
     }
   }
 
@@ -1134,12 +1149,39 @@ export const CompilerMixin = {
     // If the user aliases a variable to a built-in name (e.g., "toString"),
     // it shadows the prototype method, causing crashes or unpredictable behavior
     // when Reflex internals or expressions call scope.toString()
-    const reservedNames = ['toString', 'valueOf', 'toLocaleString', 'hasOwnProperty',
-                           'isPrototypeOf', 'propertyIsEnumerable', 'constructor', '__proto__'];
+    //
+    // CRITICAL FIX (Task 14 Issue #10): Expanded Reserved Word List
+    // The previous list was incomplete and missed:
+    // - Function.prototype methods: call, apply, bind
+    // - Object.prototype methods: __lookupGetter__, __lookupSetter__, __defineGetter__, __defineSetter__
+    // - Reflex internal names: watch (used by Object.prototype.watch in legacy Firefox)
+    // - Other dangerous names that could interfere with scope lookups
+    //
+    // This comprehensive list prevents obscure runtime errors when users accidentally
+    // use reserved names in m-for expressions like: m-for="watch in watches"
+    const reservedNames = [
+      // Object.prototype methods
+      'toString', 'valueOf', 'toLocaleString', 'hasOwnProperty',
+      'isPrototypeOf', 'propertyIsEnumerable', 'constructor', '__proto__',
+      '__defineGetter__', '__defineSetter__', '__lookupGetter__', '__lookupSetter__',
+
+      // Function.prototype methods (could interfere with method calls)
+      'call', 'apply', 'bind',
+
+      // Legacy browser properties (Object.prototype.watch in old Firefox)
+      'watch', 'unwatch',
+
+      // Common property names that could cause issues
+      'prototype', 'length', 'name', 'arguments', 'caller',
+
+      // Symbols and special properties
+      'toJSON', 'then', 'catch', 'finally'
+    ];
+
     if (reservedNames.includes(alias)) {
       console.error(
         `Reflex: Invalid m-for alias "${alias}". This name shadows a JavaScript built-in.\n` +
-        `Reserved names: ${reservedNames.join(', ')}\n` +
+        `Reserved names include: ${reservedNames.slice(0, 10).join(', ')}, ...\n` +
         `Use a different variable name (e.g., "${alias}Item" instead of "${alias}").`
       );
       return;
@@ -1147,8 +1189,8 @@ export const CompilerMixin = {
     if (idxAlias && reservedNames.includes(idxAlias)) {
       console.error(
         `Reflex: Invalid m-for index alias "${idxAlias}". This name shadows a JavaScript built-in.\n` +
-        `Reserved names: ${reservedNames.join(', ')}\n` +
-        `Use a different variable name (e.g., "i" or "index" instead of "${idxAlias}").`
+        `Reserved names include: ${reservedNames.slice(0, 10).join(', ')}, ...\n` +
+        `Use a different variable name (e.g., "i" or "idx" instead of "${idxAlias}").`
       );
       return;
     }

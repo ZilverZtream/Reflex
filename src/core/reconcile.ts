@@ -276,7 +276,39 @@ export function reconcileKeyedList({
 //
 // Solution: Cache the symbols by {originalKey, counter} so the same duplicate occurrence
 // returns the same symbol across renders. The cache is WeakRef-friendly and cleans itself.
+//
+// CRITICAL FIX (Task 14): Memory Leak Prevention
+// The previous implementation used an unbounded Map that was never cleared. In long-running
+// applications with dynamic lists (infinite scroll, streaming data, dashboards), every unique
+// key string would be permanently stored, causing monotonic memory growth until OOM.
+//
+// Solution: Use an LRU-like bounded cache with:
+// 1. Maximum size limit (MAX_CACHE_SIZE)
+// 2. Periodic cleanup when size exceeds threshold
+// 3. FIFO eviction of oldest entries when at capacity
+//
+// The cache size is tuned for typical use cases:
+// - Most apps have <1000 unique duplicate key patterns
+// - Eviction is infrequent for normal usage
+// - Memory is bounded at O(MAX_CACHE_SIZE) instead of O(unique_keys_ever_seen)
+const MAX_DUPLICATE_KEY_CACHE_SIZE = 1000;
 const duplicateKeyCache = new Map<string, Map<number, symbol>>();
+const duplicateKeyCacheOrder: string[] = []; // Track insertion order for FIFO eviction
+
+/**
+ * Evict oldest entries from the duplicate key cache when it exceeds the maximum size.
+ * Uses FIFO eviction strategy for simplicity and predictable behavior.
+ */
+function evictDuplicateKeyCache(): void {
+  // Remove oldest entries until we're at 75% capacity
+  const targetSize = Math.floor(MAX_DUPLICATE_KEY_CACHE_SIZE * 0.75);
+  while (duplicateKeyCache.size > targetSize && duplicateKeyCacheOrder.length > 0) {
+    const oldestKey = duplicateKeyCacheOrder.shift();
+    if (oldestKey !== undefined) {
+      duplicateKeyCache.delete(oldestKey);
+    }
+  }
+}
 
 /**
  * Handle duplicate keys in a list.
@@ -330,8 +362,15 @@ export function resolveDuplicateKey(seen, key, _index) {
     const keyStr = String(key);
     let counterMap = duplicateKeyCache.get(keyStr);
     if (!counterMap) {
+      // CRITICAL FIX (Task 14): Evict old entries when cache exceeds max size
+      // This prevents unbounded memory growth in long-running applications
+      if (duplicateKeyCache.size >= MAX_DUPLICATE_KEY_CACHE_SIZE) {
+        evictDuplicateKeyCache();
+      }
+
       counterMap = new Map();
       duplicateKeyCache.set(keyStr, counterMap);
+      duplicateKeyCacheOrder.push(keyStr); // Track for FIFO eviction
     }
 
     let cachedSymbol = counterMap.get(counter);

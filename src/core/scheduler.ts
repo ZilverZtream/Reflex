@@ -124,11 +124,35 @@ export const SchedulerMixin = {
 
   /**
    * Queue a job for execution
-   * Uses QUEUED flag for O(1) deduplication instead of Set.has()
+   *
+   * CRITICAL FIX (Task 14 Issue #5): Per-instance queued job tracking
+   * The previous implementation used a QUEUED flag set directly on the effect function
+   * (j.f |= QUEUED). This caused issues when an effect function was shared between
+   * multiple Reflex instances (e.g., a shared state utility).
+   *
+   * Problem: If Instance A queued the job, it would set the QUEUED flag. Instance B
+   * would see the flag and skip queueing, but Instance B's scheduler never received
+   * the job. Result: desynchronized state in shared-logic architectures.
+   *
+   * Solution: Use a per-instance WeakSet (_queuedJobs) to track which jobs are
+   * queued for THIS scheduler. Each instance maintains its own tracking, so the
+   * same job can be queued independently in multiple schedulers.
+   *
+   * Trade-off: WeakSet.has() is O(1) like bit operations, but slightly slower
+   * in practice. However, correctness trumps micro-optimization here.
    */
   queueJob(j: EffectRunner) {
-    if (j.f & QUEUED) return; // Already queued
-    j.f |= QUEUED;            // Mark as queued
+    // Initialize per-instance queued job tracking if not exists
+    if (!this._queuedJobs) {
+      this._queuedJobs = new WeakSet();
+    }
+
+    // Check if already queued for THIS instance's scheduler
+    if (this._queuedJobs.has(j)) return;
+
+    // Mark as queued for THIS instance
+    this._queuedJobs.add(j);
+
     // Push to the active queue (double-buffering for GC reduction)
     (this._qf ? this._qb : this._q).push(j);
     if (!this._p) { this._p = true; queueMicrotask(() => this.flushQueue()); }
@@ -229,7 +253,11 @@ export const SchedulerMixin = {
         }
 
         const j = q[i];
-        j.f &= ~QUEUED; // Clear queued flag before running
+        // CRITICAL FIX (Task 14 Issue #5): Clear from per-instance tracking instead of flag
+        // Remove from WeakSet before running so re-queueing during execution works
+        if (this._queuedJobs) {
+          this._queuedJobs.delete(j);
+        }
         try {
           j();
         } catch (err) {
