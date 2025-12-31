@@ -2252,31 +2252,23 @@ export const CompilerMixin = {
                 // We must detect it and pass as the 3rd argument
                 let strVal = String(val);
 
-                // CRITICAL SECURITY FIX: CSS Injection via url() in style properties
-                // CSS properties that accept URLs (backgroundImage, borderImage, etc.) can execute
-                // JavaScript in older browsers or when used with javascript: URIs
-                // We must validate URLs inside url() functions
-                // CRITICAL: Include 'background' shorthand to prevent bypass attacks
-                const urlSensitiveProps = ['background', 'background-image', 'border-image', 'border-image-source',
-                  'list-style-image', 'content', 'cursor', 'mask', 'mask-image', '-webkit-mask-image'];
+                // CRITICAL SECURITY FIX: Apply comprehensive CSS sanitization
+                // Object-style bindings must use the same sanitization as string-style bindings
+                // This blocks:
+                // - javascript:, data:, vbscript: protocols
+                // - expression() (IE CSS expressions)
+                // - -moz-binding (Firefox XBL binding)
+                // - behavior: (IE behavior)
+                // - @import directives
+                // - CSS escape sequence bypasses
+                // Previously only validated URLs for specific properties, allowing bypasses via:
+                // - :style="{ width: 'expression(alert(1))' }"
+                // - :style="{ '--custom': 'url(javascript:alert(1))' }"
+                strVal = this._sanitizeStyleString(strVal);
 
-                if (urlSensitiveProps.includes(cssProp)) {
-                  // Extract URLs from url() functions: url("...") or url('...') or url(...)
-                  const urlMatches = strVal.matchAll(/url\s*\(\s*(['"]?)([^'")\s]+)\1\s*\)/gi);
-                  for (const match of urlMatches) {
-                    const url = match[2];
-                    // Validate the URL using the same logic as href/src attributes
-                    const isSafe = RELATIVE_URL_RE.test(url) || SAFE_URL_RE.test(url);
-                    if (!isSafe) {
-                      console.warn(
-                        `Reflex: Blocked unsafe URL in style property "${key}": ${url}\n` +
-                        'Only http://, https://, mailto:, tel:, sms:, and relative URLs are allowed.\n' +
-                        'To prevent CSS injection attacks, dangerous protocols are blocked.'
-                      );
-                      // Replace the entire url() with a safe placeholder
-                      strVal = strVal.replace(match[0], 'none');
-                    }
-                  }
+                // If sanitization returned empty string, skip this property
+                if (!strVal) {
+                  continue;
                 }
 
                 const hasImportant = strVal.includes('!important');
