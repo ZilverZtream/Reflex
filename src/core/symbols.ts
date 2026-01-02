@@ -67,19 +67,62 @@ export const COLLECTION_METHODS = {
 
 // === SECURITY CONSTANTS ===
 
-// Dangerous property names that could lead to prototype pollution
+// CRITICAL FIX (Issue #4): Extended Security Blocklist
+// Dangerous property names that could lead to prototype pollution or sandbox escape
+//
+// SECURITY ARCHITECTURE NOTE: While an allowlist would be more secure, it would break
+// legitimate use cases (accessing custom properties on state objects). The blocklist
+// approach is combined with the "Iron Membrane" (createMembrane) for defense-in-depth.
+//
+// The blocklist catches compile-time obvious attacks; the membrane catches runtime bypasses.
 export const UNSAFE_PROPS = Object.assign(Object.create(null), {
+  // Prototype chain manipulation (prototype pollution attacks)
   constructor: 1,
   prototype: 1,
   __defineGetter__: 1,
   __defineSetter__: 1,
   __lookupGetter__: 1,
   __lookupSetter__: 1,
-  // CRITICAL SECURITY FIX: Block access to __rfx_app to prevent app state leak
-  // Without this, templates can access the entire internal state via {{ $el.__rfx_app.s.secretToken }}
-  __rfx_app: 1
+
+  // Internal Reflex state (prevents app state leak via templates)
+  __rfx_app: 1,
+
+  // Object internals that could be exploited
+  __proto__: 1,  // Note: Also set via bracket notation below for compatibility
+
+  // Function-related properties (RCE vectors)
+  caller: 1,      // Function.caller - deprecated but still dangerous
+  callee: 1,      // arguments.callee - deprecated but still dangerous
+  arguments: 1,   // Function.arguments - deprecated but still dangerous
+
+  // Symbol-related properties that could leak internal state
+  // These are less dangerous but included for defense-in-depth
+  toStringTag: 1, // Symbol.toStringTag manipulation
+
+  // Browser-specific properties that could bypass sandbox
+  // Note: These are also blocked in DANGEROUS_GLOBALS, but having them here
+  // provides an additional layer of defense at the property access level
+  ownerDocument: 1,    // DOM sandbox escape
+  contentWindow: 1,    // iframe sandbox escape
+  contentDocument: 1,  // iframe sandbox escape
+  defaultView: 1,      // Document.defaultView = window
+
+  // Node.js specific (for SSR environments)
+  __filename: 1,
+  __dirname: 1,
+
+  // Reflect API properties (could be used to bypass traps)
+  // Note: The Reflect object itself is blocked in DANGEROUS_GLOBALS
+  getPrototypeOf: 1,
+  setPrototypeOf: 1,
+  defineProperty: 1,
+
+  // Proxy trap-related (prevent handler manipulation)
+  handler: 1,
+  revocable: 1
 });
-UNSAFE_PROPS['__proto__'] = 1; // Must use bracket notation to avoid syntax error
+// Must use bracket notation to avoid syntax error for __proto__
+UNSAFE_PROPS['__proto__'] = 1;
 
 // SECURITY FIX: Use allowlist instead of blocklist for URL protocols
 // Blocklist approach (blocking javascript:, vbscript:, data:) can be bypassed with:
@@ -212,7 +255,47 @@ const DANGEROUS_GLOBALS = {
   Intl: 1,         // Internationalization API (timing attacks)
   WebAssembly: 1,  // WebAssembly (arbitrary code execution)
   // CRITICAL FIX #10: Worker APIs
-  importScripts: 1 // Worker importScripts (code execution in workers)
+  importScripts: 1, // Worker importScripts (code execution in workers)
+
+  // CRITICAL FIX (Issue #4): Additional Dangerous Globals
+  // Async iteration / generators (could be used for timing attacks or DoS)
+  AsyncFunction: 1,      // async function constructor
+  GeneratorFunction: 1,  // function* constructor
+  AsyncGeneratorFunction: 1,
+
+  // Additional browser APIs that could be exploited
+  Proxy: 1,              // Creating proxies could bypass security
+  SharedArrayBuffer: 1,  // Can be used for Spectre attacks
+  Atomics: 1,            // Atomic operations on shared memory
+
+  // Performance APIs (timing attacks)
+  performance: 1,        // High-resolution timing
+
+  // Crypto APIs (could be misused)
+  crypto: 1,             // Cryptographic operations
+  subtle: 1,             // SubtleCrypto
+
+  // Cache APIs (data exfiltration)
+  caches: 1,             // Cache Storage API
+
+  // Service Workers
+  ServiceWorker: 1,
+  serviceWorker: 1,
+
+  // Console (information disclosure in production)
+  // Note: console is useful for debugging, only block in strict mode
+  // console: 1,
+
+  // Additional eval-like functions
+  execScript: 1,         // IE-specific eval
+  MSCSSMatrix: 1,        // Old IE matrix (has eval-like behavior)
+
+  // Node.js globals for SSR environments
+  require: 1,            // CommonJS require
+  module: 1,             // CommonJS module
+  exports: 1,            // CommonJS exports
+  Buffer: 1,             // Node.js Buffer
+  __non_webpack_require__: 1  // Webpack escape hatch
 };
 
 /**

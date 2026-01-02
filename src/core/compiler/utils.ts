@@ -195,7 +195,7 @@ export function parsePath(exp: string): PathSegment[] {
 }
 
 /**
- * Clone a node while preserving node state (valueRef) from WeakMap.
+ * Clone a node while preserving ALL node state from WeakMap.
  *
  * TASK 6: THE "PHANTOM STATE" MANDATE
  * BREAKING CHANGE: State is NO LONGER stored on DOM nodes (el._rx_value_ref).
@@ -205,6 +205,11 @@ export function parsePath(exp: string): PathSegment[] {
  * node.cloneNode(true) only copies attributes, not WeakMap entries.
  * This helper recursively walks the cloned tree and copies nodeState from
  * corresponding source nodes, ensuring object identity is preserved.
+ *
+ * CRITICAL FIX (Issue #10): Copy ALL State Properties
+ * Previous implementation only copied valueRef, causing state desync when
+ * new properties were added (e.g., dirty flags, validation state).
+ * Now we shallow-copy the entire state object to prevent silent data loss.
  *
  * Security Impact: Malicious scripts can NO LONGER access or spoof internal
  * state because it doesn't exist on the DOM - it lives in a closure-protected WeakMap.
@@ -217,13 +222,21 @@ export function parsePath(exp: string): PathSegment[] {
 export function cloneNodeWithProps(node: any, deep = true, nodeState?: WeakMap<Element, any>): any {
   const cloned = node.cloneNode(deep);
 
+  // CRITICAL FIX (Issue #10): Helper to shallow-copy ALL state properties
+  // This ensures new state properties added in the future are automatically copied
+  const copyState = (source: any, target: any, stateMap: WeakMap<Element, any>) => {
+    const state = stateMap.get(source);
+    if (state) {
+      // Shallow copy ALL properties from state object
+      // Uses Object.assign to handle any future state properties automatically
+      const clonedState = Object.assign({}, state);
+      stateMap.set(target, clonedState);
+    }
+  };
+
   // TASK 6: Copy node state from WeakMap if provided
   if (nodeState && node.nodeType === 1) { // Element node
-    const state = nodeState.get(node);
-    if (state && state.valueRef !== undefined) {
-      // Copy state to the cloned node
-      nodeState.set(cloned, { valueRef: state.valueRef });
-    }
+    copyState(node, cloned, nodeState);
   }
 
   // If deep cloning, recursively copy node state for all descendants
@@ -238,12 +251,9 @@ export function cloneNodeWithProps(node: any, deep = true, nodeState?: WeakMap<E
           const srcChild = sourceChildren[i];
           const tgtChild = targetChildren[i];
 
-          // TASK 6: Copy node state from WeakMap
+          // CRITICAL FIX (Issue #10): Copy ALL state properties
           if (nodeState && srcChild.nodeType === 1) {
-            const childState = nodeState.get(srcChild);
-            if (childState && childState.valueRef !== undefined) {
-              nodeState.set(tgtChild, { valueRef: childState.valueRef });
-            }
+            copyState(srcChild, tgtChild, nodeState);
           }
 
           // Recursively process children

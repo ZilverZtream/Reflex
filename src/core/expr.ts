@@ -7,8 +7,35 @@
  * - Security validation for prototype pollution prevention
  * - CSP-safe mode support via external parser
  *
- * Standard mode uses `new Function()` for performance.
- * CSP mode requires an external parser (SafeExprParser).
+ * ## CSP (Content Security Policy) Compatibility
+ *
+ * CRITICAL FIX (Issue #5): Default CSP Violation Documentation
+ *
+ * ### The Problem
+ * Standard mode uses `new Function()` which requires 'unsafe-eval' in CSP headers.
+ * Many enterprise environments (banking, government, healthcare) block 'unsafe-eval'.
+ * Without proper configuration, Reflex will crash with cryptic CSP errors.
+ *
+ * ### The Solution
+ * Reflex auto-detects CSP restrictions and warns developers. For CSP-safe mode:
+ *
+ * ```javascript
+ * import { Reflex } from 'reflex';
+ * import { SafeExprParser } from 'reflex/csp';
+ *
+ * const app = new Reflex({ count: 0 });
+ * app.configure({
+ *   cspSafe: true,
+ *   parser: new SafeExprParser()
+ * });
+ * ```
+ *
+ * ### Performance Trade-off
+ * - Standard mode: ~10x faster expression compilation (uses native `new Function()`)
+ * - CSP-safe mode: Slower but works in strict CSP environments
+ *
+ * For high-performance needs in CSP environments, consider pre-compiling expressions
+ * at build time instead of runtime.
  */
 
 import { META, RESERVED, UNSAFE_PROPS, UNSAFE_EXPR_RE, ID_RE, normalizeUnicodeEscapes, createMembrane, createElementMembrane } from './symbols.js';

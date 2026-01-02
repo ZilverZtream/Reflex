@@ -94,6 +94,46 @@ interface WatchOptions {
  */
 export const SchedulerMixin = {
   /**
+   * CRITICAL FIX (Issue #1): Notify about deep watch traversal limits
+   * This method is called when deep watch traversal hits depth or node limits.
+   * Allows developers to:
+   * 1. Detect "stale UI" issues in large data applications
+   * 2. Configure onDeepWatchLimit callback in app config
+   * 3. Monitor via DevTools events
+   *
+   * @param {string} limitType - 'depth' or 'nodes'
+   * @param {number} limit - The limit that was hit
+   * @param {number} visited - Number of nodes/depth visited before limit
+   * @param {any} rootObject - The root object being traversed
+   */
+  _notifyDeepWatchLimit(limitType: string, limit: number, visited: number, rootObject: any) {
+    const payload = {
+      type: limitType,
+      limit,
+      visited,
+      rootObject,
+      message: limitType === 'nodes'
+        ? `Deep watch traversal stopped after ${visited} nodes (limit: ${limit}). Some data changes may not trigger reactivity.`
+        : `Deep watch traversal exceeded max depth of ${limit}. Nested data beyond this depth won't trigger reactivity.`
+    };
+
+    // Emit DevTools event for monitoring
+    if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+      this._dtEmit?.('deepwatch:limit', payload);
+    }
+
+    // Call configured callback if present
+    const callback = this.cfg?.onDeepWatchLimit;
+    if (typeof callback === 'function') {
+      try {
+        callback(payload);
+      } catch (err) {
+        console.error('Reflex: Error in onDeepWatchLimit callback:', err);
+      }
+    }
+  },
+
+  /**
    * Create a reactive effect
    * @param {Function} fn - Effect function to run
    * @param {Object} options - { lazy: boolean, sched: Function }
@@ -480,6 +520,38 @@ export const SchedulerMixin = {
 
   /**
    * Execute callback after next DOM update
+   *
+   * ## BREAKING CHANGE (Issue #8): Error Handling in nextTick
+   *
+   * In previous versions, nextTick() would silently swallow errors during DOM updates.
+   * This made debugging very difficult as errors would vanish into the void.
+   *
+   * **New behavior (v1.4+):**
+   * - `await nextTick()` rejects if DOM updates fail (no callback)
+   * - `nextTick(cb)` resolves but passes errors to callback
+   *
+   * **Migration guide:**
+   *
+   * ```javascript
+   * // Before (v1.3 and earlier) - errors silently swallowed
+   * await nextTick();
+   * doSomething(); // Might run on corrupt DOM!
+   *
+   * // After (v1.4+) - OPTION 1: Handle with try/catch
+   * try {
+   *   await nextTick();
+   *   doSomething();
+   * } catch (err) {
+   *   console.error('DOM update failed:', err);
+   * }
+   *
+   * // After (v1.4+) - OPTION 2: Use callback to inspect errors
+   * await nextTick((errors) => {
+   *   if (errors) console.warn('Non-fatal errors:', errors);
+   * });
+   * doSomething();
+   * ```
+   *
    * CRITICAL FIX: Prevent deadlock by handling errors properly
    *
    * CRITICAL FIX: nextTick Deadlock Risk
@@ -603,6 +675,13 @@ export const SchedulerMixin = {
    * Without limits, traversing massive non-reactive objects (e.g., Three.js scenes,
    * large JSON blobs) can freeze the main thread for seconds.
    * We add depth and node count limits to prevent DoS.
+   *
+   * CRITICAL FIX (Issue #1): Deep Watch Silent Failure Notification
+   * When traversal limits are hit, the function now:
+   * 1. Emits a 'deepwatch:limit' event via _dtEmit for DevTools
+   * 2. Calls cfg.onDeepWatchLimit callback if configured
+   * 3. Logs a warning in development mode
+   * This prevents "stale UI" bugs from going unnoticed in large data applications.
    */
   _trv(v: any, s = new Set<any>()) {
     if (v === null || typeof v !== 'object') return;
@@ -629,6 +708,7 @@ export const SchedulerMixin = {
     const MAX_DEPTH = 100;       // Maximum nesting depth (sufficient for most real-world data)
     const MAX_NODES = 10000;     // Maximum number of objects to traverse (supports moderate datasets)
     let nodesVisited = 0;
+    let limitHit: string | false = false;  // Track if we hit a limit for notification ('depth' | 'nodes' | false)
 
     // Use a stack to avoid recursion (prevents stack overflow on deep objects)
     // Each stack entry includes the object and its depth
@@ -639,18 +719,24 @@ export const SchedulerMixin = {
 
       // CRITICAL: Enforce depth limit
       if (depth > MAX_DEPTH) {
-        if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
-          console.warn(
-            `Reflex: Deep watch traversal exceeded max depth (${MAX_DEPTH}). ` +
-            'This may indicate a circular reference or excessively deep object. ' +
-            'Consider using shallow watch or restructuring your data.'
-          );
+        if (!limitHit) {
+          limitHit = 'depth';
+          if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+            console.warn(
+              `Reflex: Deep watch traversal exceeded max depth (${MAX_DEPTH}). ` +
+              'This may indicate a circular reference or excessively deep object. ' +
+              'Consider using shallow watch or restructuring your data.'
+            );
+          }
+          // CRITICAL FIX (Issue #1): Notify about depth limit
+          this._notifyDeepWatchLimit?.('depth', MAX_DEPTH, depth, v);
         }
         continue; // Skip this subtree
       }
 
       // CRITICAL: Enforce node count limit
       if (++nodesVisited > MAX_NODES) {
+        limitHit = 'nodes';
         if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
           console.warn(
             `Reflex: Deep watch traversal exceeded max nodes (${MAX_NODES}). ` +
@@ -658,6 +744,8 @@ export const SchedulerMixin = {
             'Use shallow watch or mark objects with SKIP symbol.'
           );
         }
+        // CRITICAL FIX (Issue #1): Notify about limit hit before returning
+        this._notifyDeepWatchLimit?.('nodes', MAX_NODES, nodesVisited, v);
         return; // Stop traversal entirely
       }
 
