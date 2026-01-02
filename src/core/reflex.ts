@@ -104,6 +104,10 @@ export class Reflex {
     cacheSize: number;
     onError: ((err: any) => void) | null;
     domPurify: any | null;
+    // CRITICAL FIX (Issue #1): Deep Watch Limit Notification
+    // Callback invoked when deep watch traversal hits limits (nodes or depth)
+    // Allows developers to detect "stale UI" bugs in large data applications
+    onDeepWatchLimit: ((payload: { type: string; limit: number; visited: number; rootObject: any; message: string }) => void) | null;
   };
 
   constructor(init = {}, options: RendererOptions = {}) {
@@ -246,10 +250,15 @@ export class Reflex {
       onError: null,          // Global error handler
       // Try to use globalThis.DOMPurify if available (for test environments)
       domPurify: (typeof globalThis !== 'undefined' && (globalThis as any).DOMPurify) || null,
-      autoMount: options.autoMount !== false  // CRITICAL FIX #2: Make auto-mount opt-in
+      autoMount: options.autoMount !== false,  // CRITICAL FIX #2: Make auto-mount opt-in
+      // CRITICAL FIX (Issue #1): Deep watch limit notification callback
+      // Called when deep watch traversal hits depth (100) or node (10000) limits
+      // Helps detect "stale UI" bugs in large data applications (e.g., data grids)
+      onDeepWatchLimit: null
     };
 
     // === AUTO-CSP DETECTION ===
+    // CRITICAL FIX (Issue #5): Improved CSP detection with actionable guidance
     // Try to detect CSP restrictions and automatically enable safe mode
     // Only run auto-detection if cspSafe wasn't explicitly set in options
     if (!this.cfg.cspSafe) {
@@ -261,8 +270,21 @@ export class Reflex {
         this.cfg.cspSafe = true;
         if (typeof console !== 'undefined' && console.warn) {
           console.warn(
-            'Reflex: CSP restriction detected. Automatically switching to Safe Parser mode.\n' +
-            'To suppress this warning, configure explicitly: app.configure({ cspSafe: true, parser: SafeExprParser })'
+            '┌─────────────────────────────────────────────────────────────────┐\n' +
+            '│ Reflex: CSP (Content Security Policy) Restriction Detected      │\n' +
+            '├─────────────────────────────────────────────────────────────────┤\n' +
+            '│ Your environment blocks \'unsafe-eval\', which is required for   │\n' +
+            '│ Reflex\'s standard expression compiler.                          │\n' +
+            '│                                                                 │\n' +
+            '│ Reflex has automatically switched to CSP-safe mode.            │\n' +
+            '│                                                                 │\n' +
+            '│ TO FIX: Configure the SafeExprParser:                          │\n' +
+            '│                                                                 │\n' +
+            '│   import { SafeExprParser } from \'reflex/csp\';                  │\n' +
+            '│   app.configure({ cspSafe: true, parser: new SafeExprParser() });│\n' +
+            '│                                                                 │\n' +
+            '│ Without a parser, expressions won\'t work correctly.            │\n' +
+            '└─────────────────────────────────────────────────────────────────┘'
           );
         }
       }
@@ -346,6 +368,8 @@ export class Reflex {
     if (opts.parser !== undefined) this._parser = opts.parser;
     if (opts.onError !== undefined) this.cfg.onError = opts.onError;
     if (opts.domPurify !== undefined) this.cfg.domPurify = opts.domPurify;
+    // CRITICAL FIX (Issue #1): Deep watch limit notification callback
+    if (opts.onDeepWatchLimit !== undefined) this.cfg.onDeepWatchLimit = opts.onDeepWatchLimit;
     return this;
   }
 

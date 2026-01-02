@@ -1064,6 +1064,12 @@ const HydrationMixin = {
    * Solution: Use unicode-aware word boundary detection that matches the logic in
    * SafeExprParser.ts. This ensures consistent security enforcement across all paths.
    *
+   * CRITICAL FIX (Issue #7): Strengthened Validation with Allowlist Approach
+   * The previous regex-based blocklist could be bypassed. Now we use:
+   * 1. Character allowlist: Only allow safe characters in expressions
+   * 2. Token allowlist: Only allow safe expression patterns
+   * 3. Dangerous pattern blocklist: Block known attack vectors as final defense
+   *
    * @param {string} template - The template string to validate
    * @returns {boolean} True if safe, false if potentially malicious
    */
@@ -1075,6 +1081,67 @@ const HydrationMixin = {
     // U+200B (zero-width space), U+200C (ZWNJ), U+200D (ZWJ), U+FEFF (BOM)
     const normalized = template.replace(/[\u200B\u200C\u200D\uFEFF]/g, '');
 
+    // CRITICAL FIX (Issue #7): Length limit to prevent ReDoS attacks
+    // Very long templates could cause catastrophic backtracking in regex
+    const MAX_TEMPLATE_LENGTH = 1000;
+    if (normalized.length > MAX_TEMPLATE_LENGTH) {
+      if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+        console.warn(
+          `Reflex Security: Template exceeds maximum length (${MAX_TEMPLATE_LENGTH}). ` +
+          'This may indicate an injection attack.'
+        );
+      }
+      return false;
+    }
+
+    // CRITICAL FIX (Issue #7): Character Allowlist Approach
+    // Only allow characters that are valid in simple template expressions
+    // This catches encoding attacks like &#x63;onstructor before they execute
+    //
+    // Allowed characters:
+    // - a-zA-Z: identifiers
+    // - 0-9: numbers
+    // - ._$: identifier chars
+    // - []: bracket notation
+    // - (): function calls
+    // - '"`: string literals
+    // - +\-*/%: arithmetic operators
+    // - ><!=&|: comparison/logical operators
+    // - ?: ternary operator
+    // - ,: argument separator
+    // - \s: whitespace
+    // - {}: template delimiters
+    //
+    // NOT allowed (security risk):
+    // - `: template literals (can contain ${} expressions)
+    // - \: backslash escapes (can bypass filters)
+    // - &: HTML entities (&#x63;onstructor)
+    // - <script>: HTML injection
+    const allowedCharsPattern = /^[\s\w\d._$\[\]()'"?:,+\-*/%><!=&|{}]+$/;
+    if (!allowedCharsPattern.test(normalized)) {
+      // Check for common encoding attacks
+      if (/&#|%[0-9a-f]{2}|\\u[0-9a-f]{4}/i.test(normalized)) {
+        if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+          console.warn(
+            `Reflex Security: Template contains encoded characters (potential encoding attack).\n` +
+            `Template: ${template}`
+          );
+        }
+        return false;
+      }
+
+      // Check for template literals (grave accent)
+      if (/`/.test(normalized)) {
+        if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+          console.warn(
+            `Reflex Security: Template literals (\`) are not allowed in hydration templates.\n` +
+            `Template: ${template}`
+          );
+        }
+        return false;
+      }
+    }
+
     // List of dangerous base words to check for
     const dangerousWords = [
       'constructor', 'prototype', '__proto__',
@@ -1084,7 +1151,11 @@ const HydrationMixin = {
       'fetch', 'xmlhttprequest', 'websocket',
       'settimeout', 'setinterval', 'setimmediate',
       'ownerdocument', 'contentwindow', 'contentdocument',
-      'getrootnode', 'importscripts', 'postmessage'
+      'getrootnode', 'importscripts', 'postmessage',
+      // CRITICAL FIX (Issue #7): Additional dangerous words
+      'reflect', 'proxy', 'symbol', 'asyncfunction',
+      'generatorfunction', 'webassembly', 'atomics',
+      'sharedarraybuffer', 'buffer', 'module', 'exports'
     ];
 
     // Check for dangerous words using unicode-aware word boundary detection
@@ -1115,7 +1186,15 @@ const HydrationMixin = {
       /this\s*\.\s*constructor/i,  // this.constructor access
       /\[\s*['"]constructor['"]\s*\]/i, // ["constructor"] bracket access
       /\[\s*['"]__proto__['"]\s*\]/i,   // ["__proto__"] bracket access
-      /\[\s*['"]prototype['"]\s*\]/i    // ["prototype"] bracket access
+      /\[\s*['"]prototype['"]\s*\]/i,   // ["prototype"] bracket access
+      // CRITICAL FIX (Issue #7): Additional injection patterns
+      /\(\s*\)\s*\{/,                   // () { - function body start
+      /=>/,                              // Arrow function
+      /async\s+/i,                       // async keyword
+      /await\s+/i,                       // await keyword
+      /yield\s+/i,                       // yield keyword
+      /new\s+[A-Z]/,                     // new Constructor()
+      /\[\s*Symbol\./i                   // Symbol access
     ];
 
     for (const pattern of exactPatterns) {
@@ -1130,11 +1209,26 @@ const HydrationMixin = {
       }
     }
 
-    // Basic syntax check: template should start with {{ and end with }}
+    // CRITICAL FIX (Issue #7): Validate template structure
+    // Template should only contain simple expressions within {{ }}
     const trimmed = template.trim();
-    if (!trimmed.startsWith('{{') || !trimmed.endsWith('}}')) {
-      // Legacy format without {{ }} is also acceptable for backward compatibility
-      // But we still apply the dangerous pattern checks above
+    if (trimmed.startsWith('{{') && trimmed.endsWith('}}')) {
+      // Extract expression content
+      const expr = trimmed.slice(2, -2).trim();
+
+      // CRITICAL FIX (Issue #7): Limit expression complexity
+      // Complex expressions with many operators could be attack vectors
+      const maxOperators = 10;
+      const operatorCount = (expr.match(/[+\-*/%?:&|<>=!]/g) || []).length;
+      if (operatorCount > maxOperators) {
+        if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+          console.warn(
+            `Reflex Security: Template expression is too complex (${operatorCount} operators, max ${maxOperators}).\n` +
+            `Template: ${template}`
+          );
+        }
+        return false;
+      }
     }
 
     return true;

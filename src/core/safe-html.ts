@@ -115,6 +115,12 @@ export class SafeHTML {
    * ⚠️ DANGER: Only use for build-time static HTML that you control.
    * NEVER use with user-provided content.
    *
+   * CRITICAL FIX (Issue #9): SafeHTML.unsafe Misuse Risk Mitigation
+   * This method is a known security risk vector. To help identify misuse:
+   * 1. Logs a warning with stack trace in development
+   * 2. Tracks total calls for monitoring
+   * 3. Rejects obviously dangerous patterns
+   *
    * @param html - Trusted static HTML string
    * @returns SafeHTML instance (unsanitized)
    *
@@ -123,14 +129,91 @@ export class SafeHTML {
    * const icon = SafeHTML.unsafe('<svg>...</svg>');
    */
   static unsafe(html: string): SafeHTML {
+    // CRITICAL FIX (Issue #9): Track usage for monitoring
+    SafeHTML._unsafeCallCount = (SafeHTML._unsafeCallCount || 0) + 1;
+
+    // CRITICAL FIX (Issue #9): Reject obviously dangerous patterns
+    // These patterns almost certainly indicate misuse with user content
+    const str = String(html ?? '');
+    const dangerousPatterns = [
+      /<script\b/i,           // Script tags
+      /\bon\w+\s*=/i,         // Event handlers (onclick, onerror, etc.)
+      /javascript:/i,         // JavaScript URLs
+      /<iframe\b/i,           // Iframes (can be abused)
+      /<object\b/i,           // Object embeds
+      /<embed\b/i,            // Embed elements
+      /document\.(cookie|domain|write)/i,  // Common XSS targets
+    ];
+
+    for (const pattern of dangerousPatterns) {
+      if (pattern.test(str)) {
+        const error = new Error(
+          `Reflex Security: SafeHTML.unsafe() BLOCKED - detected dangerous pattern.\n` +
+          `Pattern: ${pattern}\n` +
+          `HTML snippet: ${str.slice(0, 100)}${str.length > 100 ? '...' : ''}\n\n` +
+          'This content must be sanitized using SafeHTML.sanitize().\n' +
+          'SafeHTML.unsafe() is only for trusted, static HTML without executable content.'
+        );
+        console.error(error.message);
+
+        // In production, still block and return empty to prevent XSS
+        // In development, also throw to make it obvious
+        if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+          throw error;
+        }
+        return new SafeHTML(''); // Production: return empty to prevent XSS
+      }
+    }
+
     if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+      // CRITICAL FIX (Issue #9): Include stack trace to identify source
+      const stack = new Error().stack;
+      const callLocation = stack?.split('\n')[2]?.trim() || 'unknown location';
+
       console.warn(
-        'Reflex Security Warning: SafeHTML.unsafe() bypasses sanitization.\n' +
-        'Only use for static, trusted HTML that you control.\n' +
-        'NEVER use with user-provided content.'
+        '┌────────────────────────────────────────────────────────────────┐\n' +
+        '│ ⚠️  Reflex Security Warning: SafeHTML.unsafe() called          │\n' +
+        '├────────────────────────────────────────────────────────────────┤\n' +
+        '│ This method bypasses XSS sanitization completely.             │\n' +
+        '│                                                               │\n' +
+        '│ SAFE use cases:                                               │\n' +
+        '│   ✓ Static SVG icons from your build                         │\n' +
+        '│   ✓ HTML templates bundled at build-time                     │\n' +
+        '│   ✓ Markdown rendered by a trusted library (server-side)     │\n' +
+        '│                                                               │\n' +
+        '│ DANGEROUS use cases (will cause XSS):                        │\n' +
+        '│   ✗ User comments, posts, or messages                        │\n' +
+        '│   ✗ Data from APIs or databases                              │\n' +
+        '│   ✗ URL query parameters                                      │\n' +
+        '│   ✗ Any data that users can influence                        │\n' +
+        '│                                                               │\n' +
+        `│ Call #${SafeHTML._unsafeCallCount} from:                                            │\n` +
+        `│   ${callLocation.slice(0, 60)}${callLocation.length > 60 ? '...' : ''}   │\n` +
+        '│                                                               │\n' +
+        '│ For user content, use: SafeHTML.sanitize(userContent)        │\n' +
+        '└────────────────────────────────────────────────────────────────┘'
       );
     }
-    return new SafeHTML(String(html ?? ''));
+
+    return new SafeHTML(str);
+  }
+
+  /** Track unsafe() call count for monitoring (Issue #9) */
+  private static _unsafeCallCount: number = 0;
+
+  /**
+   * Get the count of unsafe() calls (for security auditing)
+   * CRITICAL FIX (Issue #9): Allow security monitoring
+   */
+  static getUnsafeCallCount(): number {
+    return SafeHTML._unsafeCallCount || 0;
+  }
+
+  /**
+   * Reset the unsafe call counter (useful for tests)
+   */
+  static resetUnsafeCallCount(): void {
+    SafeHTML._unsafeCallCount = 0;
   }
 
   /**
