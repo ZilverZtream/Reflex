@@ -110,82 +110,99 @@ export class SafeHTML {
   }
 
   /**
-   * Create SafeHTML from a trusted static string WITHOUT sanitization.
+   * @deprecated Use `trustGivenString_DANGEROUS` instead. This method will be removed in v6.
    *
-   * ⚠️ DANGER: Only use for build-time static HTML that you control.
-   * NEVER use with user-provided content.
+   * Create SafeHTML from a trusted static string WITHOUT ANY sanitization or validation.
    *
-   * CRITICAL FIX (Issue #9): SafeHTML.unsafe Misuse Risk Mitigation
-   * This method is a known security risk vector. To help identify misuse:
-   * 1. Logs a warning with stack trace in development
-   * 2. Tracks total calls for monitoring
-   * 3. Rejects obviously dangerous patterns
-   *
-   * @param html - Trusted static HTML string
-   * @returns SafeHTML instance (unsanitized)
-   *
-   * @example
-   * // ONLY for static build-time HTML
-   * const icon = SafeHTML.unsafe('<svg>...</svg>');
+   * ⚠️ CRITICAL SECURITY WARNING: This method provides ZERO protection against XSS.
+   * It exists only for backwards compatibility. Use `trustGivenString_DANGEROUS` instead.
    */
   static unsafe(html: string): SafeHTML {
-    // CRITICAL FIX (Issue #9): Track usage for monitoring
+    return SafeHTML.trustGivenString_DANGEROUS(html);
+  }
+
+  /**
+   * Create SafeHTML from a trusted static string WITHOUT ANY sanitization or validation.
+   *
+   * ╔══════════════════════════════════════════════════════════════════════════════╗
+   * ║  ⛔ CRITICAL SECURITY WARNING - READ BEFORE USING                            ║
+   * ╠══════════════════════════════════════════════════════════════════════════════╣
+   * ║                                                                              ║
+   * ║  This method performs ZERO validation on the input string.                   ║
+   * ║  NO patterns are blocked. NO sanitization is applied.                        ║
+   * ║  The string is trusted EXACTLY as provided.                                  ║
+   * ║                                                                              ║
+   * ║  PREVIOUS VERSIONS had regex-based blocking that was SECURITY THEATER:       ║
+   * ║  - Patterns like `javascript:` could be bypassed with `&#106;avascript:`    ║
+   * ║  - Event handlers could be bypassed with HTML encoding                       ║
+   * ║  - This gave developers a FALSE sense of security                           ║
+   * ║                                                                              ║
+   * ║  The regex checks were REMOVED because:                                      ║
+   * ║  1. They were fundamentally bypassable (see DOMRenderer.setInnerHTML)       ║
+   * ║  2. They created a misleading security guarantee                            ║
+   * ║  3. A proper parser-based approach would have unacceptable overhead         ║
+   * ║                                                                              ║
+   * ║  SAFE use cases (content you fully control at build time):                  ║
+   * ║    ✓ Static SVG icons bundled in your application                           ║
+   * ║    ✓ HTML templates that are part of your source code                       ║
+   * ║    ✓ Markdown rendered server-side by a trusted library                     ║
+   * ║                                                                              ║
+   * ║  DANGEROUS use cases (WILL cause XSS vulnerabilities):                      ║
+   * ║    ✗ User-submitted content (comments, posts, profiles)                     ║
+   * ║    ✗ Data from APIs, databases, or external sources                         ║
+   * ║    ✗ URL query parameters or form inputs                                    ║
+   * ║    ✗ ANYTHING that users can influence in ANY way                           ║
+   * ║                                                                              ║
+   * ║  For user content, ALWAYS use: SafeHTML.sanitize(userContent)               ║
+   * ║                                                                              ║
+   * ╚══════════════════════════════════════════════════════════════════════════════╝
+   *
+   * @param html - Trusted static HTML string (NO validation is performed)
+   * @returns SafeHTML instance containing the UNVALIDATED string
+   *
+   * @example
+   * // ONLY for static build-time HTML that you wrote yourself
+   * const icon = SafeHTML.trustGivenString_DANGEROUS('<svg>...</svg>');
+   *
+   * // NEVER do this - XSS vulnerability:
+   * // const userContent = SafeHTML.trustGivenString_DANGEROUS(userInput);
+   */
+  static trustGivenString_DANGEROUS(html: string): SafeHTML {
+    // CRITICAL FIX (Audit Issue #3): Security Theater Removal
+    //
+    // PREVIOUS IMPLEMENTATION had regex-based pattern blocking that was:
+    // 1. Fundamentally bypassable (e.g., `&#106;avascript:` bypasses `/javascript:/i`)
+    // 2. Denounced in DOMRenderer.setInnerHTML as "bypassable"
+    // 3. Giving developers a FALSE sense of security
+    //
+    // The regex checks have been REMOVED because:
+    // - They cannot provide real security (too many bypass techniques)
+    // - A proper parser-based approach would add unacceptable overhead
+    // - It's better to be honest about the danger than provide false assurance
+    //
+    // The method name was changed to `trustGivenString_DANGEROUS` to make
+    // the risk explicit. The `unsafe()` method is kept for backwards
+    // compatibility but is deprecated.
+
+    // Track usage for security monitoring
     SafeHTML._unsafeCallCount = (SafeHTML._unsafeCallCount || 0) + 1;
 
-    // CRITICAL FIX (Issue #9): Reject obviously dangerous patterns
-    // These patterns almost certainly indicate misuse with user content
     const str = String(html ?? '');
-    const dangerousPatterns = [
-      /<script\b/i,           // Script tags
-      /\bon\w+\s*=/i,         // Event handlers (onclick, onerror, etc.)
-      /javascript:/i,         // JavaScript URLs
-      /<iframe\b/i,           // Iframes (can be abused)
-      /<object\b/i,           // Object embeds
-      /<embed\b/i,            // Embed elements
-      /document\.(cookie|domain|write)/i,  // Common XSS targets
-    ];
-
-    for (const pattern of dangerousPatterns) {
-      if (pattern.test(str)) {
-        const error = new Error(
-          `Reflex Security: SafeHTML.unsafe() BLOCKED - detected dangerous pattern.\n` +
-          `Pattern: ${pattern}\n` +
-          `HTML snippet: ${str.slice(0, 100)}${str.length > 100 ? '...' : ''}\n\n` +
-          'This content must be sanitized using SafeHTML.sanitize().\n' +
-          'SafeHTML.unsafe() is only for trusted, static HTML without executable content.'
-        );
-        console.error(error.message);
-
-        // In production, still block and return empty to prevent XSS
-        // In development, also throw to make it obvious
-        if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
-          throw error;
-        }
-        return new SafeHTML(''); // Production: return empty to prevent XSS
-      }
-    }
 
     if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
-      // CRITICAL FIX (Issue #9): Include stack trace to identify source
+      // Include stack trace to identify source in security audits
       const stack = new Error().stack;
       const callLocation = stack?.split('\n')[2]?.trim() || 'unknown location';
 
       console.warn(
         '┌────────────────────────────────────────────────────────────────┐\n' +
-        '│ ⚠️  Reflex Security Warning: SafeHTML.unsafe() called          │\n' +
+        '│ ⛔ SECURITY: trustGivenString_DANGEROUS() called               │\n' +
         '├────────────────────────────────────────────────────────────────┤\n' +
-        '│ This method bypasses XSS sanitization completely.             │\n' +
         '│                                                               │\n' +
-        '│ SAFE use cases:                                               │\n' +
-        '│   ✓ Static SVG icons from your build                         │\n' +
-        '│   ✓ HTML templates bundled at build-time                     │\n' +
-        '│   ✓ Markdown rendered by a trusted library (server-side)     │\n' +
+        '│ ⚠️  NO VALIDATION IS PERFORMED ON THIS STRING                  │\n' +
         '│                                                               │\n' +
-        '│ DANGEROUS use cases (will cause XSS):                        │\n' +
-        '│   ✗ User comments, posts, or messages                        │\n' +
-        '│   ✗ Data from APIs or databases                              │\n' +
-        '│   ✗ URL query parameters                                      │\n' +
-        '│   ✗ Any data that users can influence                        │\n' +
+        '│ This method trusts the input EXACTLY as provided.             │\n' +
+        '│ If this contains user-controlled data, you have an XSS bug.   │\n' +
         '│                                                               │\n' +
         `│ Call #${SafeHTML._unsafeCallCount} from:                                            │\n` +
         `│   ${callLocation.slice(0, 60)}${callLocation.length > 60 ? '...' : ''}   │\n` +

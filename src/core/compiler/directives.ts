@@ -14,7 +14,7 @@ import {
   type FlatScope,
   type FlatScopeIds
 } from '../scope-registry.js';
-import { getStableKey, hasStrictParent, sortRefsByDOM } from './utils.js';
+import { getStableKey, hasStrictParent, sortRefsByDOM, findScopedMRefs } from './utils.js';
 
 /**
  * DirectivesMixin for Reflex class.
@@ -842,17 +842,18 @@ export const DirectivesMixin = {
         // vs O(totalRefs) of scanning all global refs
         const refElements: Element[] = [];
 
-        // Check if root node has m-ref
-        const rootRefName = (rowNode as Element).getAttribute?.('m-ref');
-        if (rootRefName) {
-          refElements.push(rowNode as Element);
-        }
-
-        // Find descendant m-ref elements
-        if (rowNode.querySelectorAll) {
-          const descendants = (rowNode as Element).querySelectorAll('[m-ref]');
-          refElements.push(...Array.from(descendants));
-        }
+        // CRITICAL FIX (Audit Issue #4): Use scoped m-ref collection
+        //
+        // PREVIOUS BUG: querySelectorAll('[m-ref]') selected ALL descendants with m-ref,
+        // including those inside nested m-for loops. This caused:
+        // 1. Outer loop to manage/sort refs belonging to inner loops
+        // 2. Sorting conflicts between parent and child loops
+        // 3. O(N) performance degradation in deep trees
+        //
+        // FIX: Use findScopedMRefs which stops traversal at nested m-for/m-if boundaries.
+        // This ensures each m-for only manages its own direct refs, not refs from nested loops.
+        const scopedRefs = findScopedMRefs(rowNode as Element);
+        refElements.push(...scopedRefs);
 
         // Register each ref element in our scoped storage and update map
         for (const refElement of refElements) {

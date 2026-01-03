@@ -327,3 +327,73 @@ export function sortRefsByDOM(refArray: Element[]): void {
     return (position & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1;
   });
 }
+
+/**
+ * CRITICAL FIX (Audit Issue #4): Scoped m-ref Collection
+ *
+ * Find all m-ref elements within a root element, stopping traversal at nested
+ * structural directive boundaries (m-for, m-if).
+ *
+ * PREVIOUS BUG: `querySelectorAll('[m-ref]')` selects ALL descendants with m-ref,
+ * including those inside nested m-for loops. This caused:
+ * 1. Outer loop to manage/sort refs belonging to inner loops
+ * 2. Sorting conflicts between parent and child loops
+ * 3. O(N) performance degradation in deep trees
+ *
+ * FIX: Use TreeWalker with a filter that stops at nested structural directive
+ * boundaries. This ensures each m-for only manages its own direct refs.
+ *
+ * @param root - The root element to search within
+ * @returns Array of elements with m-ref attribute that belong to this scope
+ */
+export function findScopedMRefs(root: Element): Element[] {
+  const results: Element[] = [];
+
+  // Check if root element itself has m-ref
+  if (root.hasAttribute && root.hasAttribute('m-ref')) {
+    results.push(root);
+  }
+
+  // If no children or not an element, return early
+  if (!root.childNodes || root.childNodes.length === 0) {
+    return results;
+  }
+
+  // Use iterative traversal to avoid stack overflow on deep trees
+  // and to properly handle scope boundaries
+  const stack: Element[] = [];
+
+  // Initialize stack with direct children that are elements
+  for (let i = root.childNodes.length - 1; i >= 0; i--) {
+    const child = root.childNodes[i];
+    if (child.nodeType === 1) { // Element node
+      stack.push(child as Element);
+    }
+  }
+
+  while (stack.length > 0) {
+    const el = stack.pop()!;
+
+    // CRITICAL: Stop traversal if this element has m-for or m-if
+    // These create their own scope boundaries and manage their own refs
+    if (el.hasAttribute('m-for') || el.hasAttribute('m-if')) {
+      // Don't include this element's refs or its descendants
+      continue;
+    }
+
+    // Check if this element has m-ref
+    if (el.hasAttribute('m-ref')) {
+      results.push(el);
+    }
+
+    // Add children to stack (in reverse order for correct traversal)
+    for (let i = el.childNodes.length - 1; i >= 0; i--) {
+      const child = el.childNodes[i];
+      if (child.nodeType === 1) { // Element node
+        stack.push(child as Element);
+      }
+    }
+  }
+
+  return results;
+}
