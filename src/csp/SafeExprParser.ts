@@ -1117,7 +1117,12 @@ export class SafeExprParser {
           const key = prop.computed
             ? this._evaluate(prop.key, state, context, $event, $el, reflex)
             : prop.key;
-          // No blacklist check needed - object literals are safe by construction
+          // CRITICAL FIX (Audit Issue #2): Prevent prototype pollution via computed keys
+          // Even though object literals seem "safe by construction", computed keys like
+          // { ["__proto__"]: { polluted: true } } can pollute the created object's prototype
+          if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+            throw new Error(`Reflex Security: Prototype pollution via object literal key '${key}'`);
+          }
           obj[key] = this._evaluate(prop.value, state, context, $event, $el, reflex);
         }
         return obj;
@@ -1192,12 +1197,23 @@ export class SafeExprParser {
             ? this._evaluate(node.left.property, state, context, $event, $el, reflex)
             : node.left.property;
 
-          // SECURITY: Only allow assignment to own properties (WHITE-LIST ONLY)
-          // This prevents prototype pollution via obj.__proto__ = evil or obj.constructor = evil
+          // CRITICAL FIX (Audit Issue #3): Enforce whitelist for inherited properties
+          // The previous logic only blocked __proto__/constructor/prototype but allowed
+          // assignment to ANY other inherited property (e.g., toString, valueOf, DOM methods).
+          // This contradicts the strict whitelist used in the 'get' trap.
+          // Now: inherited properties must be in SAFE_DOM_PROPERTIES to allow assignment.
           if (!Object.prototype.hasOwnProperty.call(obj, prop)) {
-            // Allow creating new own properties, but not setting prototype chain properties
-            if (typeof prop === 'string' && (prop === '__proto__' || prop === 'constructor' || prop === 'prototype')) {
-              throw new Error(`Reflex Security: Cannot assign to dangerous property '${prop}'`);
+            // For non-own properties, check the whitelist
+            if (typeof prop === 'string') {
+              // Always block dangerous prototype properties
+              if (prop === '__proto__' || prop === 'constructor' || prop === 'prototype') {
+                throw new Error(`Reflex Security: Cannot assign to dangerous property '${prop}'`);
+              }
+              // For inherited properties, only allow if in SAFE_DOM_PROPERTIES whitelist
+              // This aligns assignment behavior with the strict read behavior
+              if (!SAFE_DOM_PROPERTIES[prop]) {
+                throw new Error(`Reflex Security: Cannot assign to non-whitelisted inherited property '${prop}'`);
+              }
             }
           }
 
