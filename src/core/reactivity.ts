@@ -237,15 +237,22 @@ export const ArrayHandler: ProxyHandler<any[]> = {
     const meta = (o as ReactiveTarget)[META] as ReactiveMeta;
     const engine = meta.engine;
 
-    // CRITICAL FIX (Audit Issue #1): Array Truncation via defineProperty
-    // Object.defineProperty(arr, 'length', { value: 0 }) is a common pattern to clear arrays
-    // Without this check, watchers on deleted indices are never notified, causing stale UI
-    // Port the array truncation logic from the 'set' trap to handle this case
+    // CRITICAL FIX (Audit Issue #4): Reactivity Blindness with Accessor Descriptors
+    // PREVIOUS BUG: Only checked for 'value' in desc:
+    //   const newLength = k === 'length' && 'value' in desc ? Number(desc.value) : -1;
+    // This failed for accessor descriptors like { get: () => 0 }, causing truncation
+    // watchers to never fire when using Object.defineProperty(arr, 'length', { get: () => 0 })
+    //
+    // FIX: Capture oldLength BEFORE the operation, then check actual length AFTER.
+    // This works regardless of whether a value or accessor descriptor is used.
     const oldLength = k === 'length' ? o.length : -1;
-    const newLength = k === 'length' && 'value' in desc ? Number(desc.value) : -1;
 
     const res = Reflect.defineProperty(o, k, desc);
     if (!res) return false;
+
+    // CRITICAL FIX (Audit Issue #4): Check actual length AFTER operation
+    // This detects truncation from accessor descriptors (getter-based length)
+    const actualNewLength = k === 'length' ? o.length : -1;
 
     // CRITICAL FIX: Version Counter - Only increment if not in a batch
     // Same logic as set handler: avoid double increment when in batched operations
@@ -253,10 +260,10 @@ export const ArrayHandler: ProxyHandler<any[]> = {
       meta.v++; // Increment version on mutation
     }
 
-    // CRITICAL FIX (Audit Issue #1): Array Truncation Batch Notifications
-    // When truncating arrays via defineProperty (e.g., Object.defineProperty(arr, 'length', { value: 0 })),
-    // we must trigger watchers on all deleted indices, not just 'length' and ITERATE
-    if (k === 'length' && newLength < oldLength && newLength >= 0) {
+    // CRITICAL FIX (Audit Issue #4): Array Truncation Batch Notifications
+    // Trigger watchers when array is truncated, using actual length after operation
+    // Works for both value descriptors and accessor descriptors
+    if (k === 'length' && actualNewLength < oldLength && actualNewLength >= 0) {
       // Use batching to prevent UI freeze on large array truncation
       engine._b++;
       try {
@@ -274,7 +281,7 @@ export const ArrayHandler: ProxyHandler<any[]> = {
           if (typeof key !== 'string') continue;
           const idx = Number(key);
           // Check if this is a numeric array index that was deleted
-          if (Number.isInteger(idx) && idx >= newLength && idx < oldLength && depSet.size > 0) {
+          if (Number.isInteger(idx) && idx >= actualNewLength && idx < oldLength && depSet.size > 0) {
             ks.add(key);
           }
         }
@@ -738,15 +745,28 @@ export const ReactivityMixin = {
       if (obj == null || typeof obj !== 'object') continue;
       if (seen.has(obj)) continue;
 
-      // CRITICAL: Check node limit to prevent DoS
+      // CRITICAL FIX (Audit Issue #6): API Contract Violation - DoS Protection
+      // PREVIOUS BUG: When node limit was exceeded, returned topRaw which may still
+      // contain nested reactive proxies. This violated the API contract because:
+      // 1. Callers expect toRawDeep to return a fully unwrapped object
+      // 2. External APIs (JSON.stringify, etc.) may crash on Proxies
+      // 3. Returning proxies disguised as raw objects causes subtle bugs
+      //
+      // FIX: Throw an explicit error to halt the operation. This ensures:
+      // 1. Callers know immediately that the operation failed
+      // 2. No partially-processed objects are returned
+      // 3. The failure is visible and debuggable
+      //
+      // Alternative considered: Return the partially-processed structure from `seen`.
+      // Rejected because: Partial results could cause data corruption if some
+      // branches are processed and others are not.
       if (++nodeCount > MAX_NODES) {
-        console.error(
+        throw new Error(
           `Reflex: toRawDeep exceeded maximum node limit (${MAX_NODES}).\n` +
           `This usually means you're trying to deep-clone a massive structure.\n` +
-          `Consider using toRaw() for single-level unwrapping or restructuring your data.`
+          `Consider using toRaw() for single-level unwrapping or restructuring your data.\n` +
+          `If you need to process larger structures, use toRaw() and handle nesting manually.`
         );
-        // Return the top-level raw object without deep cloning
-        return topRaw as T;
       }
 
       // Unwrap proxy if needed

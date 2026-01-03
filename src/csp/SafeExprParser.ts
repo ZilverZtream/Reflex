@@ -350,6 +350,96 @@ const SAFE_ACCESSORS: { [key: string]: 1 } = {
 } as any;
 
 /**
+ * CRITICAL FIX (Audit Issue #5): Safe DOM Properties for Assignment
+ *
+ * DOM element properties like `value`, `checked`, `textContent` are inherited
+ * from prototypes (HTMLInputElement.prototype, etc.), not own properties.
+ * The strict hasOwnProperty check was blocking standard DOM interactivity:
+ *   @click="$el.value = ''"        // Failed: value not own property
+ *   @input="user.name = $el.value" // Failed: can't read $el.value
+ *
+ * This whitelist allows assignment to these standard DOM properties while
+ * still blocking dangerous prototype chain properties.
+ *
+ * Security considerations:
+ * - innerHTML is included but MUST be used with DOMPurify sanitization
+ * - outerHTML is intentionally excluded (can replace entire elements)
+ * - Dangerous properties (__proto__, constructor, prototype) are still blocked
+ */
+const SAFE_DOM_PROPERTIES: { [key: string]: 1 } = {
+  __proto__: null,
+
+  // Form element properties (HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement)
+  value: 1,
+  checked: 1,
+  selected: 1,
+  disabled: 1,
+  readOnly: 1,
+  required: 1,
+  multiple: 1,
+  placeholder: 1,
+  min: 1,
+  max: 1,
+  step: 1,
+  pattern: 1,
+  maxLength: 1,
+  minLength: 1,
+  selectionStart: 1,
+  selectionEnd: 1,
+  defaultValue: 1,
+  defaultChecked: 1,
+  indeterminate: 1,
+
+  // Content properties (safe for assignment)
+  textContent: 1,
+  innerText: 1,
+  innerHTML: 1,  // SECURITY: Must be sanitized by DOMPurify when used with m-html
+
+  // Attributes that are commonly set
+  id: 1,
+  name: 1,
+  title: 1,
+  lang: 1,
+  dir: 1,
+  tabIndex: 1,
+  accessKey: 1,
+  draggable: 1,
+  hidden: 1,
+  contentEditable: 1,
+  spellcheck: 1,
+
+  // Style and class
+  className: 1,
+  classList: 1,  // For classList.add/remove/toggle
+
+  // Dataset (data-* attributes)
+  dataset: 1,
+
+  // Media elements
+  src: 1,
+  href: 1,
+  currentTime: 1,
+  volume: 1,
+  muted: 1,
+  playbackRate: 1,
+  autoplay: 1,
+  loop: 1,
+  controls: 1,
+  poster: 1,
+
+  // Canvas
+  width: 1,
+  height: 1,
+
+  // Scroll properties
+  scrollTop: 1,
+  scrollLeft: 1,
+
+  // Focus management
+  autofocus: 1
+} as any;
+
+/**
  * CSP-Safe Expression Parser
  *
  * Implements a recursive descent parser supporting:
@@ -918,11 +1008,13 @@ export class SafeExprParser {
           ? this._evaluate(node.property, state, context, $event, $el, reflex)
           : node.property;
 
-        // WHITE-LIST ONLY: Check if property is own, safe method, or safe accessor
+        // WHITE-LIST ONLY: Check if property is own, safe method, safe accessor, or safe DOM property
         // This blocks prototype chain traversal implicitly
+        // CRITICAL FIX (Audit Issue #5): Include SAFE_DOM_PROPERTIES to allow DOM interactivity
         if (!Object.prototype.hasOwnProperty.call(obj, prop) &&
             !SAFE_METHODS[prop] &&
-            !SAFE_ACCESSORS[prop]) {
+            !SAFE_ACCESSORS[prop] &&
+            !SAFE_DOM_PROPERTIES[prop]) {
           return undefined;
         }
 
@@ -940,10 +1032,12 @@ export class SafeExprParser {
             ? this._evaluate(node.callee.property, state, context, $event, $el, reflex)
             : node.callee.property;
 
-          // WHITE-LIST ONLY: Only allow own properties, safe methods, or safe accessors
+          // WHITE-LIST ONLY: Only allow own properties, safe methods, safe accessors, or safe DOM properties
+          // CRITICAL FIX (Audit Issue #5): Include SAFE_DOM_PROPERTIES for DOM method calls
           if (!Object.prototype.hasOwnProperty.call(thisArg, prop) &&
               !SAFE_METHODS[prop] &&
-              !SAFE_ACCESSORS[prop]) {
+              !SAFE_ACCESSORS[prop] &&
+              !SAFE_DOM_PROPERTIES[prop]) {
             return undefined;
           }
 
@@ -1222,11 +1316,13 @@ export class SafeExprParser {
   private _wrapResult(result: any): any {
     return new Proxy(result, {
       get(target, key) {
-        // WHITE-LIST: Only allow own properties, safe methods, or safe accessors
+        // WHITE-LIST: Only allow own properties, safe methods, safe accessors, or safe DOM properties
+        // CRITICAL FIX (Audit Issue #5): Include SAFE_DOM_PROPERTIES
         if (typeof key === 'string') {
           if (!Object.prototype.hasOwnProperty.call(target, key) &&
               !SAFE_METHODS[key] &&
-              !SAFE_ACCESSORS[key]) {
+              !SAFE_ACCESSORS[key] &&
+              !SAFE_DOM_PROPERTIES[key]) {
             return undefined;
           }
         }
