@@ -47,9 +47,8 @@ export {
   RUNNING,
   QUEUED,
   RESERVED,
-  UNSAFE_PROPS,
-  UNSAFE_URL_RE,
-  UNSAFE_EXPR_RE
+  SAFE_URL_RE,
+  RELATIVE_URL_RE
 } from './core/symbols.js';
 
 // Renderer exports (for pluggable architecture)

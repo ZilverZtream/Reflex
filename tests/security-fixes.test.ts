@@ -138,8 +138,8 @@ describe('Security Vulnerability Fixes', () => {
     });
   });
 
-  describe('Issue 9: Fragile Security Reliance on UNSAFE_PROPS Blacklist', () => {
-    it('should block dangerous property patterns not in blacklist', () => {
+  describe('Issue 9: White-List Only Security Model (replaces fragile blacklist)', () => {
+    it('should return undefined for non-existent properties (white-list approach)', () => {
       const parser = new SafeExprParser();
 
       // Mock Reflex instance
@@ -154,23 +154,22 @@ describe('Security Vulnerability Fixes', () => {
       const state = {};
       const context = null;
 
-      // Test various dangerous patterns
-      const dangerousExpressions = [
-        '__custom_proto__',  // Should match __ pattern
-        'CONSTRUCTOR',       // Should match 'constructor' pattern (case-insensitive)
-        'evalSomething'      // Should match 'eval' pattern
+      // With white-list model, these expressions simply return undefined
+      // because they don't exist as own properties on state or context
+      // No pattern matching needed - only own properties are allowed
+      const unknownExpressions = [
+        '__custom_proto__',  // Not an own property
+        'CONSTRUCTOR',       // Not an own property
+        'evalSomething'      // Not an own property
       ];
 
-      for (const expr of dangerousExpressions) {
+      for (const expr of unknownExpressions) {
         const ast = parser.parse(expr);
         const result = parser._evaluate(ast, state, context, null, null, mockReflex);
 
-        // Should return undefined due to pattern matching
+        // Should return undefined because property doesn't exist as own property
+        // This is the secure default with white-list approach
         expect(result).toBeUndefined();
-        expect(consoleWarnSpy).toHaveBeenCalledWith(
-          'Reflex: Blocked access to unsafe property:',
-          expect.any(String)
-        );
       }
     });
 
