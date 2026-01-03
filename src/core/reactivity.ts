@@ -676,6 +676,14 @@ export const ReactivityMixin = {
     // Track seen objects to handle circular references
     const seen = new Map<object, any>();
 
+    // CRITICAL FIX (SEC-FINAL-004 Issue #4): DoS Protection via Node Limit
+    //
+    // Without a limit, toRawDeep can freeze the main thread when processing
+    // massive recursive structures (e.g., large JSON payloads, deeply nested state).
+    // Limit to 100,000 nodes to prevent UI freezing while supporting most use cases.
+    const MAX_NODES = 100000;
+    let nodeCount = 0;
+
     // ITERATIVE APPROACH: Two-pass stack-based processing (no recursion)
     // Pass 1: Create result shells and build seen map
     // Pass 2: Fill in the values using the seen map
@@ -687,6 +695,17 @@ export const ReactivityMixin = {
 
       if (obj == null || typeof obj !== 'object') continue;
       if (seen.has(obj)) continue;
+
+      // CRITICAL: Check node limit to prevent DoS
+      if (++nodeCount > MAX_NODES) {
+        console.error(
+          `Reflex: toRawDeep exceeded maximum node limit (${MAX_NODES}).\n` +
+          `This usually means you're trying to deep-clone a massive structure.\n` +
+          `Consider using toRaw() for single-level unwrapping or restructuring your data.`
+        );
+        // Return the top-level raw object without deep cloning
+        return topRaw as T;
+      }
 
       // Unwrap proxy if needed
       const unwrapped = this.toRaw(obj);
