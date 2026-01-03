@@ -57,7 +57,7 @@ interface ReactivityEngine {
     isMap: boolean
   ) => (...args: any[]) => any;
   toRaw: <T>(value: T) => T;
-  toRawDeep: <T>(value: T) => T;  // CRITICAL FIX: Recursive deep unwrap for nested proxies
+  toRawDeep: <T>(value: T, options?: { force?: boolean }) => T;  // CRITICAL FIX: Recursive deep unwrap for nested proxies
   _recursionDepth: number;  // CRITICAL: Track recursion depth to prevent infinite loops
 }
 
@@ -702,7 +702,18 @@ export const ReactivityMixin = {
    * Performance: Uses iterative approach to avoid stack overflow on deeply nested structures.
    * Cycle-safe: Tracks seen objects to handle circular references.
    *
+   * CRITICAL FIX (Audit Issue #5): Graceful Failure for Node Limit
+   * When the node limit is exceeded:
+   * - Logs a warning (instead of throwing an error)
+   * - Returns the partially-processed structure or raw fallback
+   * - Prevents application crashes in data-heavy dashboards
+   *
+   * Use the `force: true` option to disable the limit for valid use cases like
+   * exporting large datasets.
+   *
    * @param v - Value to deeply unwrap (may be a nested reactive structure)
+   * @param options - Optional configuration
+   * @param options.force - If true, disable the node limit (use for large dataset export)
    * @returns A deeply unwrapped copy with all proxies replaced by their raw targets
    *
    * @example
@@ -714,8 +725,12 @@ export const ReactivityMixin = {
    * @example
    * // Safe JSON serialization
    * const snapshot = JSON.stringify(app.toRawDeep(app.s));
+   *
+   * @example
+   * // Force processing of large datasets (use with caution)
+   * const largeExport = app.toRawDeep(state.bigData, { force: true });
    */
-  toRawDeep<T>(v: T): T {
+  toRawDeep<T>(v: T, options?: { force?: boolean }): T {
     // Primitives and null/undefined pass through
     if (v == null || typeof v !== 'object') return v;
 
@@ -730,8 +745,14 @@ export const ReactivityMixin = {
     // Without a limit, toRawDeep can freeze the main thread when processing
     // massive recursive structures (e.g., large JSON payloads, deeply nested state).
     // Limit to 100,000 nodes to prevent UI freezing while supporting most use cases.
+    //
+    // CRITICAL FIX (Audit Issue #5): Graceful Failure
+    // - Use `force: true` to disable the limit for large dataset exports
+    // - When limit is exceeded without force, warn and return partial result
     const MAX_NODES = 100000;
+    const forceNoLimit = options?.force === true;
     let nodeCount = 0;
+    let limitExceeded = false;
 
     // ITERATIVE APPROACH: Two-pass stack-based processing (no recursion)
     // Pass 1: Create result shells and build seen map
@@ -745,28 +766,36 @@ export const ReactivityMixin = {
       if (obj == null || typeof obj !== 'object') continue;
       if (seen.has(obj)) continue;
 
-      // CRITICAL FIX (Audit Issue #6): API Contract Violation - DoS Protection
-      // PREVIOUS BUG: When node limit was exceeded, returned topRaw which may still
-      // contain nested reactive proxies. This violated the API contract because:
-      // 1. Callers expect toRawDeep to return a fully unwrapped object
-      // 2. External APIs (JSON.stringify, etc.) may crash on Proxies
-      // 3. Returning proxies disguised as raw objects causes subtle bugs
+      // CRITICAL FIX (Audit Issue #5): Graceful Failure for Node Limit
       //
-      // FIX: Throw an explicit error to halt the operation. This ensures:
-      // 1. Callers know immediately that the operation failed
-      // 2. No partially-processed objects are returned
-      // 3. The failure is visible and debuggable
+      // PREVIOUS BUG: Throwing an error crashed the entire application when
+      // toRawDeep was used in logging, telemetry, or reactivity hooks.
       //
-      // Alternative considered: Return the partially-processed structure from `seen`.
-      // Rejected because: Partial results could cause data corruption if some
-      // branches are processed and others are not.
-      if (++nodeCount > MAX_NODES) {
-        throw new Error(
-          `Reflex: toRawDeep exceeded maximum node limit (${MAX_NODES}).\n` +
-          `This usually means you're trying to deep-clone a massive structure.\n` +
-          `Consider using toRaw() for single-level unwrapping or restructuring your data.\n` +
-          `If you need to process larger structures, use toRaw() and handle nesting manually.`
-        );
+      // FIX: Warn and stop processing, returning the partial result.
+      // - The `seen` map contains all nodes processed so far
+      // - Unprocessed nodes will fall back to their raw targets
+      // - Use `force: true` to disable the limit for large exports
+      //
+      // This ensures:
+      // 1. Application doesn't crash on large datasets
+      // 2. Partial results are still usable (better than nothing)
+      // 3. Warning alerts developers to potential issues
+      // 4. `force` option available for legitimate large dataset needs
+      if (!forceNoLimit && ++nodeCount > MAX_NODES) {
+        if (!limitExceeded) {
+          limitExceeded = true;
+          console.warn(
+            `Reflex: toRawDeep exceeded maximum node limit (${MAX_NODES}).\n` +
+            `Processing stopped to prevent UI freeze. Partial result returned.\n\n` +
+            `Options:\n` +
+            `  1. Use toRaw() for single-level unwrapping\n` +
+            `  2. Use toRawDeep(value, { force: true }) to process all nodes\n` +
+            `  3. Restructure data to reduce nesting depth\n\n` +
+            `Note: force: true may cause performance issues with very large structures.`
+          );
+        }
+        // Stop processing this branch - it will use raw fallback in Pass 2
+        continue;
       }
 
       // Unwrap proxy if needed
@@ -835,12 +864,24 @@ export const ReactivityMixin = {
 
       if (!result) continue;
 
+      // CRITICAL FIX (Audit Issue #1): Map Key Consistency in toRawDeep
+      //
+      // PREVIOUS BUG: Pass 1 stores shells using the original object (potentially a Proxy) as key:
+      //   seen.set(obj, result)  // obj may be a Proxy
+      // Pass 2 looked up using the RAW target:
+      //   seen.get(this.toRaw(child))  // returns undefined if child was stored as Proxy
+      //
+      // This caused seen.get() to return undefined, and the fallback returned the raw target
+      // instead of the cloned shell. Result: mixed graph of shells and raw targets.
+      //
+      // FIX: Use the original value (which may be a Proxy) as the lookup key in Pass 2,
+      // matching how it was stored in Pass 1. Only fall back to raw if not found.
       if (Array.isArray(unwrapped)) {
         for (let i = 0; i < unwrapped.length; i++) {
           const child = unwrapped[i];
           if (child != null && typeof child === 'object') {
-            const childRaw = this.toRaw(child);
-            result[i] = seen.get(childRaw) ?? childRaw;
+            // CRITICAL FIX: Look up using original value (child), not toRaw(child)
+            result[i] = seen.get(child) ?? this.toRaw(child);
             fillStack.push(child);
           } else {
             result[i] = child;
@@ -848,18 +889,17 @@ export const ReactivityMixin = {
         }
       } else if (unwrapped instanceof Map) {
         unwrapped.forEach((value, key) => {
-          const keyRaw = this.toRaw(key);
-          const valueRaw = this.toRaw(value);
-          const processedKey = (key != null && typeof key === 'object') ? (seen.get(keyRaw) ?? keyRaw) : key;
-          const processedValue = (value != null && typeof value === 'object') ? (seen.get(valueRaw) ?? valueRaw) : value;
+          // CRITICAL FIX: Look up using original values, not toRaw versions
+          const processedKey = (key != null && typeof key === 'object') ? (seen.get(key) ?? this.toRaw(key)) : key;
+          const processedValue = (value != null && typeof value === 'object') ? (seen.get(value) ?? this.toRaw(value)) : value;
           result.set(processedKey, processedValue);
           if (key != null && typeof key === 'object') fillStack.push(key);
           if (value != null && typeof value === 'object') fillStack.push(value);
         });
       } else if (unwrapped instanceof Set) {
         unwrapped.forEach(value => {
-          const valueRaw = this.toRaw(value);
-          const processedValue = (value != null && typeof value === 'object') ? (seen.get(valueRaw) ?? valueRaw) : value;
+          // CRITICAL FIX: Look up using original value, not toRaw version
+          const processedValue = (value != null && typeof value === 'object') ? (seen.get(value) ?? this.toRaw(value)) : value;
           result.add(processedValue);
           if (value != null && typeof value === 'object') fillStack.push(value);
         });
@@ -869,8 +909,8 @@ export const ReactivityMixin = {
           if (Object.prototype.hasOwnProperty.call(unwrapped, key)) {
             const child = unwrapped[key];
             if (child != null && typeof child === 'object') {
-              const childRaw = this.toRaw(child);
-              result[key] = seen.get(childRaw) ?? childRaw;
+              // CRITICAL FIX: Look up using original value (child), not toRaw(child)
+              result[key] = seen.get(child) ?? this.toRaw(child);
               fillStack.push(child);
             } else {
               result[key] = child;
@@ -1203,32 +1243,29 @@ export const ReactivityMixin = {
         self.trackDependency(meta, ITERATE);
         const it = fn.call(t);
 
-        // CRITICAL FIX #1: Map/Set Iterator Data Corruption
+        // CRITICAL FIX (Audit Issue #2): Iterator Protocol Violation
         //
-        // PREVIOUS BUG: Reused the same array instance for all iterations to reduce allocations
-        // This caused data corruption when using spread operator or Array.from() on reactive Maps
-        // All entries in the resulting array would point to the same reference, containing the last value
+        // PREVIOUS BUG: Reused the same result object { done, value } for every next() call.
+        // This violates the Iterator protocol because consumers that store iterator results
+        // see all stored results mutated to the last value.
         //
-        // SOLUTION: Create a new array for each iteration to ensure distinct references
-        // While this has a performance cost for very large Maps (100k+ items), correctness is critical
-        // Users can use Map.get() in a loop for performance-critical large Map iterations
+        // Example of broken behavior:
+        //   const it = map.values();
+        //   const [a, b] = [it.next(), it.next()];
+        //   // a.value === b.value === lastValue (WRONG!)
         //
-        // OPTIMIZATION: Map/Set Iteration Garbage Generation
-        // To reduce GC pressure while maintaining correctness:
-        // 1. Reuse the iterator result object { done, value } by mutating it
-        // 2. For single-value methods (keys/values), minimize allocations
-        // 3. Entry arrays [k, v] must still be newly allocated for correctness
-
-        // Reusable result object - mutate instead of creating new objects
-        // This reduces garbage from O(2n) to O(n) for entries, O(1) for keys/values
-        const result = { done: false, value: undefined as any };
-        const doneResult = { done: true, value: undefined };
+        // The ES6 Iterator protocol requires each next() call to return a NEW object.
+        // While reusing objects reduces GC pressure, correctness MUST take precedence.
+        //
+        // FIX: Allocate a new result object for each next() call.
+        // Performance impact is minimal for typical use cases (< 10k items).
+        // For large datasets, use forEach() or toRaw() + native iteration.
 
         return {
           [Symbol.iterator]() { return this; },
           next() {
             const n = it.next();
-            if (n.done) return doneResult;
+            if (n.done) return { done: true, value: undefined };
 
             // CRITICAL FIX #6: Iteration Allocation Storm
             // Only wrap values that need wrapping (objects). Primitives pass through.
@@ -1236,8 +1273,8 @@ export const ReactivityMixin = {
             if (isMap) {
               if (m === 'keys' || m === 'values') {
                 const val = n.value;
-                result.value = (val !== null && typeof val === 'object') ? self._wrap(val) : val;
-                return result;
+                // CRITICAL FIX (Audit Issue #2): Return NEW object for each next() call
+                return { done: false, value: (val !== null && typeof val === 'object') ? self._wrap(val) : val };
               }
               // TASK 13.6: Map entries iteration - correctness over performance
               // For entries/default iteration, create a NEW array for each iteration
@@ -1272,13 +1309,12 @@ export const ReactivityMixin = {
               const [k, v] = n.value;
               const wrappedK = (k !== null && typeof k === 'object') ? self._wrap(k) : k;
               const wrappedV = (v !== null && typeof v === 'object') ? self._wrap(v) : v;
-              // Create a new array instance for each iteration (fixes data corruption)
-              result.value = [wrappedK, wrappedV];
-              return result;
+              // CRITICAL FIX (Audit Issue #2): Return NEW object and array for each next() call
+              return { done: false, value: [wrappedK, wrappedV] };
             }
             const val = n.value;
-            result.value = (val !== null && typeof val === 'object') ? self._wrap(val) : val;
-            return result;
+            // CRITICAL FIX (Audit Issue #2): Return NEW object for each next() call
+            return { done: false, value: (val !== null && typeof val === 'object') ? self._wrap(val) : val };
           },
           return(v) { return it.return ? it.return(v) : { done: true, value: v }; }
         };
