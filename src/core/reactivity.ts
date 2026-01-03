@@ -628,7 +628,14 @@ export const ReactivityMixin = {
   },
 
   /**
-   * CRITICAL FIX: Incomplete toRaw Handling - Recursive Deep Unwrap
+   * CRITICAL FIX (SEC-2026-003 Issue #6): Recursive Stack Overflow in toRawDeep
+   *
+   * VULNERABILITY: Previous implementation used recursion which crashes on deeply nested objects.
+   * A JSON tree with 5000+ depth (from an API or deeply nested state) causes:
+   * "RangeError: Maximum call stack size exceeded"
+   *
+   * FIX: Rewrite to use iterative stack-based approach (similar to _trv and _clone).
+   * This can handle arbitrary depth without stack overflow.
    *
    * Recursively unwraps all reactive proxies in a nested object structure.
    * This is essential for:
@@ -664,70 +671,135 @@ export const ReactivityMixin = {
     if (v == null || typeof v !== 'object') return v;
 
     // First, unwrap the top-level proxy if it is one
-    let raw = this.toRaw(v);
+    const topRaw = this.toRaw(v);
 
     // Track seen objects to handle circular references
     const seen = new Map<object, any>();
 
-    // Iterative approach to avoid stack overflow
-    const process = (obj: any): any => {
-      if (obj == null || typeof obj !== 'object') return obj;
+    // ITERATIVE APPROACH: Two-pass stack-based processing (no recursion)
+    // Pass 1: Create result shells and build seen map
+    // Pass 2: Fill in the values using the seen map
 
-      // Check if already processed (circular reference)
-      if (seen.has(obj)) return seen.get(obj);
+    // Pass 1: Build structure shells
+    const stack = [topRaw];
+    while (stack.length > 0) {
+      const obj = stack.pop()!;
 
-      // Unwrap if it's a proxy
+      if (obj == null || typeof obj !== 'object') continue;
+      if (seen.has(obj)) continue;
+
+      // Unwrap proxy if needed
       const unwrapped = this.toRaw(obj);
 
-      // Handle different collection types
-      if (Array.isArray(unwrapped)) {
-        const result: any[] = [];
-        seen.set(obj, result);
-        for (let i = 0; i < unwrapped.length; i++) {
-          result[i] = process(unwrapped[i]);
-        }
-        return result;
-      }
-
-      if (unwrapped instanceof Map) {
-        const result = new Map();
-        seen.set(obj, result);
-        unwrapped.forEach((value, key) => {
-          result.set(process(key), process(value));
-        });
-        return result;
-      }
-
-      if (unwrapped instanceof Set) {
-        const result = new Set();
-        seen.set(obj, result);
-        unwrapped.forEach(value => {
-          result.add(process(value));
-        });
-        return result;
-      }
-
-      // Skip non-plain objects that shouldn't be cloned (Date, RegExp, etc.)
-      // These are already skipped by _r() so they're never proxied
+      // Skip non-plain objects (Date, RegExp, etc.)
       if (unwrapped instanceof Date || unwrapped instanceof RegExp ||
           unwrapped instanceof Error || unwrapped instanceof Promise ||
           (typeof WeakMap !== 'undefined' && unwrapped instanceof WeakMap) ||
-          (typeof WeakSet !== 'undefined' && unwrapped instanceof WeakSet)) {
-        return unwrapped;
+          (typeof WeakSet !== 'undefined' && unwrapped instanceof WeakSet) ||
+          (typeof File !== 'undefined' && unwrapped instanceof File) ||
+          (typeof Blob !== 'undefined' && unwrapped instanceof Blob)) {
+        seen.set(obj, unwrapped);
+        continue;
       }
 
-      // Handle plain objects
-      const result: Record<string, any> = {};
-      seen.set(obj, result);
-      for (const key in unwrapped) {
-        if (Object.prototype.hasOwnProperty.call(unwrapped, key)) {
-          result[key] = process(unwrapped[key]);
+      // Create result shell based on type
+      if (Array.isArray(unwrapped)) {
+        const result: any[] = [];
+        seen.set(obj, result);
+        // Queue children for processing
+        for (let i = 0; i < unwrapped.length; i++) {
+          stack.push(unwrapped[i]);
+        }
+      } else if (unwrapped instanceof Map) {
+        const result = new Map();
+        seen.set(obj, result);
+        // Queue children for processing
+        unwrapped.forEach((value, key) => {
+          stack.push(key);
+          stack.push(value);
+        });
+      } else if (unwrapped instanceof Set) {
+        const result = new Set();
+        seen.set(obj, result);
+        // Queue children for processing
+        unwrapped.forEach(value => {
+          stack.push(value);
+        });
+      } else {
+        // Plain object
+        const result: Record<string, any> = {};
+        seen.set(obj, result);
+        // Queue children for processing
+        for (const key in unwrapped) {
+          if (Object.prototype.hasOwnProperty.call(unwrapped, key)) {
+            stack.push(unwrapped[key]);
+          }
         }
       }
-      return result;
-    };
+    }
 
-    return process(raw) as T;
+    // Pass 2: Fill in values using the seen map
+    const fillStack = [topRaw];
+    const filled = new Set();
+
+    while (fillStack.length > 0) {
+      const obj = fillStack.pop()!;
+
+      if (obj == null || typeof obj !== 'object') continue;
+      if (filled.has(obj)) continue;
+      filled.add(obj);
+
+      const unwrapped = this.toRaw(obj);
+      const result = seen.get(obj);
+
+      if (!result) continue;
+
+      if (Array.isArray(unwrapped)) {
+        for (let i = 0; i < unwrapped.length; i++) {
+          const child = unwrapped[i];
+          if (child != null && typeof child === 'object') {
+            const childRaw = this.toRaw(child);
+            result[i] = seen.get(childRaw) ?? childRaw;
+            fillStack.push(child);
+          } else {
+            result[i] = child;
+          }
+        }
+      } else if (unwrapped instanceof Map) {
+        unwrapped.forEach((value, key) => {
+          const keyRaw = this.toRaw(key);
+          const valueRaw = this.toRaw(value);
+          const processedKey = (key != null && typeof key === 'object') ? (seen.get(keyRaw) ?? keyRaw) : key;
+          const processedValue = (value != null && typeof value === 'object') ? (seen.get(valueRaw) ?? valueRaw) : value;
+          result.set(processedKey, processedValue);
+          if (key != null && typeof key === 'object') fillStack.push(key);
+          if (value != null && typeof value === 'object') fillStack.push(value);
+        });
+      } else if (unwrapped instanceof Set) {
+        unwrapped.forEach(value => {
+          const valueRaw = this.toRaw(value);
+          const processedValue = (value != null && typeof value === 'object') ? (seen.get(valueRaw) ?? valueRaw) : value;
+          result.add(processedValue);
+          if (value != null && typeof value === 'object') fillStack.push(value);
+        });
+      } else {
+        // Plain object
+        for (const key in unwrapped) {
+          if (Object.prototype.hasOwnProperty.call(unwrapped, key)) {
+            const child = unwrapped[key];
+            if (child != null && typeof child === 'object') {
+              const childRaw = this.toRaw(child);
+              result[key] = seen.get(childRaw) ?? childRaw;
+              fillStack.push(child);
+            } else {
+              result[key] = child;
+            }
+          }
+        }
+      }
+    }
+
+    return seen.get(topRaw) as T ?? topRaw as T;
   },
 
   /**
@@ -953,6 +1025,33 @@ export const ReactivityMixin = {
         if (!ks) self.pendingTriggers.set(meta, ks = new Set());
         ks.add(ITERATE);
         ks.add('length');
+
+        // CRITICAL FIX (SEC-2026-003 Issue #4): Reactivity Blindness for push/pop
+        //
+        // VULNERABILITY: push/pop trigger ITERATE and length, but NOT specific indices.
+        // Result: {{ list[2] }} doesn't update when list.push(item) adds item at index 2.
+        //
+        // FIX: For push, trigger the new indices that were added.
+        //      For pop, trigger the index that was removed.
+        //
+        // Example: list = [1, 2]; list.push(3, 4) → trigger indices "2" and "3"
+        if (m === 'push' && rawArgs.length > 0) {
+          // Push adds items starting at oldLength
+          // Trigger all new indices: oldLength, oldLength+1, ..., oldLength+N-1
+          for (let i = 0; i < rawArgs.length; i++) {
+            const newIndex = String(oldLength + i);
+            // Only trigger if there are watchers on this index (O(1) lookup)
+            if (meta.d.has(newIndex)) {
+              ks.add(newIndex);
+            }
+          }
+        } else if (m === 'pop' && oldLength > 0) {
+          // Pop removes the last item (index oldLength - 1)
+          const removedIndex = String(oldLength - 1);
+          if (meta.d.has(removedIndex)) {
+            ks.add(removedIndex);
+          }
+        }
 
         // CRITICAL FIX: Array Mutation Index Blindness
         // For reorder methods, trigger updates for specific indices that have watchers.

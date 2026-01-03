@@ -446,6 +446,20 @@ function createCachedFunctionWrapper(fn: Function, thisArg: any, bindNative = fa
 
 /**
  * Safe DOM properties that can be READ on $el
+ *
+ * CRITICAL SECURITY (SEC-2026-003 Issue #1): XSS via setAttribute Method Call Bypass
+ *
+ * VULNERABILITY: The membrane blocks property SETTING (set trap) but allows METHOD RETRIEVAL (get trap).
+ * Attack vector: {{ $el.setAttribute('onclick', 'alert(1)') }}
+ *
+ * FIX: Remove dangerous write methods from read whitelist:
+ * - setAttribute, setAttributeNode (can inject event handlers, javascript: URLs)
+ * - outerHTML (can replace entire element with malicious markup)
+ *
+ * These methods bypass the property set trap because they're CALLED, not ASSIGNED.
+ * If setAttribute is strictly needed, a safe wrapper must validate:
+ * - Attribute name (block on*, style for certain properties)
+ * - Attribute value (block javascript:, data: URLs, event handler code)
  */
 const SAFE_DOM_READ_PROPS: { [key: string]: 1 } = {
   __proto__: null,
@@ -453,9 +467,9 @@ const SAFE_DOM_READ_PROPS: { [key: string]: 1 } = {
   id: 1, className: 1, tagName: 1, nodeName: 1, nodeType: 1,
   textContent: 1, innerHTML: 1, innerText: 1, value: 1,
   checked: 1, disabled: 1, selected: 1, hidden: 1,
-  // Attributes
-  getAttribute: 1, setAttribute: 1, removeAttribute: 1, hasAttribute: 1,
-  getAttributeNode: 1, setAttributeNode: 1,
+  // Attributes (SECURITY: Only READ methods allowed, NO setAttribute/setAttributeNode)
+  getAttribute: 1, /* setAttribute: BLOCKED */, removeAttribute: 1, hasAttribute: 1,
+  getAttributeNode: 1, /* setAttributeNode: BLOCKED */,
   // Classes
   classList: 1,
   // Style
