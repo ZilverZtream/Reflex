@@ -202,10 +202,25 @@ export class Reflex {
     this._acp = new Map();    // Async Component Factories
     this._cd = new Map();     // Custom Directives
     this._refs = {};          // $refs registry
-    this._parser = null;      // CSP parser (lazy-loaded)
     this._plugins = new Set(); // Installed plugins (per-instance)
     this._m = false;          // Mounted flag (prevents double-mount)
     this._fileInputsWarned = new WeakSet(); // Track file inputs that have been warned (prevents spam)
+
+    // === PARSER (REQUIRED - SEC-FINAL-005) ===
+    // SECURITY: Standard mode with `new Function()` has been removed.
+    // All expression compilation now requires the SafeExprParser.
+    if (!options.parser) {
+      throw new Error(
+        'Reflex Security Error: Expression parser is REQUIRED.\n\n' +
+        'Standard mode with `new Function()` has been removed due to unfixable RCE vulnerability.\n' +
+        'You MUST configure a parser:\n\n' +
+        '  import { Reflex } from \'reflex\';\n' +
+        '  import { SafeExprParser } from \'reflex/csp\';\n\n' +
+        '  const app = new Reflex({ count: 0 }, { parser: new SafeExprParser() });\n\n' +
+        'See: https://reflex.dev/security/csp-mode'
+      );
+    }
+    this._parser = options.parser;
 
     // === FLAT SCOPE REGISTRY ===
     // BREAKING CHANGE: Replaces prototype-based scope chains
@@ -256,39 +271,6 @@ export class Reflex {
       // Helps detect "stale UI" bugs in large data applications (e.g., data grids)
       onDeepWatchLimit: null
     };
-
-    // === AUTO-CSP DETECTION ===
-    // CRITICAL FIX (Issue #5): Improved CSP detection with actionable guidance
-    // Try to detect CSP restrictions and automatically enable safe mode
-    // Only run auto-detection if cspSafe wasn't explicitly set in options
-    if (!this.cfg.cspSafe) {
-      try {
-        // Attempt to create a function - this will fail in strict CSP environments
-        new Function('');
-      } catch (e) {
-        // CSP violation detected - switch to safe mode automatically
-        this.cfg.cspSafe = true;
-        if (typeof console !== 'undefined' && console.warn) {
-          console.warn(
-            '┌─────────────────────────────────────────────────────────────────┐\n' +
-            '│ Reflex: CSP (Content Security Policy) Restriction Detected      │\n' +
-            '├─────────────────────────────────────────────────────────────────┤\n' +
-            '│ Your environment blocks \'unsafe-eval\', which is required for   │\n' +
-            '│ Reflex\'s standard expression compiler.                          │\n' +
-            '│                                                                 │\n' +
-            '│ Reflex has automatically switched to CSP-safe mode.            │\n' +
-            '│                                                                 │\n' +
-            '│ TO FIX: Configure the SafeExprParser:                          │\n' +
-            '│                                                                 │\n' +
-            '│   import { SafeExprParser } from \'reflex/csp\';                  │\n' +
-            '│   app.configure({ cspSafe: true, parser: new SafeExprParser() });│\n' +
-            '│                                                                 │\n' +
-            '│ Without a parser, expressions won\'t work correctly.            │\n' +
-            '└─────────────────────────────────────────────────────────────────┘'
-          );
-        }
-      }
-    }
 
     // TASK 10: Handle legacy { el, state } API
     // Support both:
