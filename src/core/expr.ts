@@ -213,202 +213,31 @@ export const ExprMixin = {
       }
     }
 
-    // CSP-safe mode: use external parser
-    if (this.cfg.cspSafe) {
-      try {
-        const fn = this._getParser().compile(exp, this);
-        return this._ec.set(k, fn);
-      } catch (err) {
-        console.warn('Reflex: CSP-safe compile error:', exp, err);
-        return this._ec.set(k, () => undefined);
-      }
-    }
-
-    // Standard mode: use new Function (faster but requires unsafe-eval CSP)
+    // CRITICAL SECURITY FIX (SEC-FINAL-004 Issue #1): Standard Mode Eliminated
     //
-    // ⚠️ CRITICAL SECURITY WARNING (SEC-2026-003 Issue #2): RCE via Literal Constructor
+    // Standard mode using `new Function()` was FUNDAMENTALLY INSECURE and has been REMOVED.
+    // The exploit {{ (function(){}).constructor('alert(1)')() }} bypassed all security measures
+    // because the Global Barrier only intercepts variable lookups, not property access on
+    // native objects created inside the expression.
     //
-    // VULNERABILITY: Standard Mode using `new Function()` is FUNDAMENTALLY INSECURE.
-    // The Global Barrier (_g) only intercepts VARIABLE LOOKUPS, not property access
-    // on objects created INSIDE the expression.
+    // CSP-SAFE MODE IS NOW MANDATORY
+    // Reflex now requires the SafeExprParser which operates at the AST level and can block
+    // dangerous property access on ALL objects, including literals.
     //
-    // EXPLOIT: {{ (function(){}).constructor('return process')().env }}
-    //          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    //          Creates native function → .constructor → global Function → RCE
+    // To use Reflex, you MUST configure a parser:
+    //   import { Reflex } from 'reflex';
+    //   import { SafeExprParser } from 'reflex/csp';
+    //   const app = new Reflex({ count: 0 });
+    //   app.configure({ parser: new SafeExprParser() });
     //
-    // The membrane CANNOT protect against this because literals ([{}, [], function(){}])
-    // created inside `new Function()` are NATIVE OBJECTS with access to global constructors.
-    //
-    // RECOMMENDED FIX: Deprecate Standard Mode entirely. Force CSP Mode for ALL deployments.
-    // CSP Mode uses SafeExprParser which operates at the AST level and can block
-    // `.constructor` access on ALL objects, including literals.
-    //
-    // TEMPORARY MITIGATION: Use CSP Mode in production:
-    //   app.configure({ cspSafe: true, parser: new SafeExprParser() })
-    //
-    // WARNING: This violates strict Content Security Policy (CSP) headers.
-    // Enterprise environments (banks, gov, healthcare) often block 'unsafe-eval'.
-    // For CSP-compliant deployments, use: app.configure({ cspSafe: true, parser: SafeExprParser })
-    //
-    // TODO (Breaking Change v2.0): Remove Standard Mode, make CSP Mode mandatory
-    const magicArgs = 'var $refs=_r,$dispatch=_d,$nextTick=_n,$el=_el;';
-
-    // SECURITY AUDIT WARNING: Log deprecation warning in development
-    if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
-      if (!this._standardModeWarningShown) {
-        this._standardModeWarningShown = true;
-        console.warn(
-          '🚨 Reflex Security Warning: Standard Mode is DEPRECATED due to unfixable RCE vulnerability.\n' +
-          '   Attack vector: {{ (function(){}).constructor(\'...\')() }}\n' +
-          '   STRONGLY RECOMMENDED: Use CSP-safe mode in production:\n' +
-          '   app.configure({ cspSafe: true, parser: new SafeExprParser() })\n' +
-          '   See: https://reflex.dev/security/csp-mode'
-        );
-      }
-    }
-
-    // Detect CSP violations and provide helpful error message
-    let rawFn;
-    const self = this;
-
-    if (isH) {
-      // Handler mode: use 'with' to allow mutations like count++
-      // First check if there's a context (c), fall back to state (s)
-
-      // Auto-call simple function references: "onEnter" -> "onEnter()"
-      // This handles the common pattern @click="handler" (without parentheses)
-      let handlerExp = exp;
-      let useReturn = false;
-
-      if (/^[a-z_$][\w$.]*$/i.test(exp) && !exp.includes('.')) {
-        // Simple identifier - auto-call it
-        handlerExp = `${exp}($event)`;
-        useReturn = true; // Single function call can return cleanup
-      } else if (/^[a-z_$][\w$.]+$/i.test(exp) && exp.includes('.') && !exp.includes(';')) {
-        // Method path like obj.method - auto-call it
-        handlerExp = `${exp}($event)`;
-        useReturn = true; // Single function call can return cleanup
-      } else if (!exp.includes(';')) {
-        // Single expression without semicolons - can safely return
-        useReturn = true;
-      }
-
-      // For single expressions (like function calls), add return to capture cleanup
-      // For multi-statement expressions (with ;), don't add return
-      // SECURITY NOTE: Cannot use 'use strict' with 'with' statements (SyntaxError)
-      // Instead, we rely on the Iron Membrane (createMembrane) for runtime security
-      // The membrane blocks dangerous property access ('constructor', '__proto__', etc)
-      //
-      // CRITICAL SECURITY FIX (Issue #1): Global Barrier prevents RCE via global scope escape
-      // Without the barrier: {{ window.location.href = 'evil.com' }} enables RCE
-      // The barrier intercepts global lookups and only allows safe globals (Math, Date, etc.)
-      const body = useReturn
-        ? `${magicArgs}with(_g){with(c||{}){with(s){return(${handlerExp})}}}`
-        : `${magicArgs}with(_g){with(c||{}){with(s){${handlerExp}}}}`;
-      try {
-        rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el', '_g', body);
-        return this._ec.set(k, (s, c, e, el) => {
-          try {
-            // CRITICAL SECURITY FIX: Wrap $el in element membrane to prevent sandbox escape
-            // Without this, {{ $el.ownerDocument.defaultView.alert('pwned') }} enables full RCE
-            return rawFn(
-              createMembrane(s), createMembrane(c || {}), e,
-              self._refs,
-              self._dispatch.bind(self),
-              self.nextTick.bind(self),
-              createElementMembrane(el),
-              createGlobalBarrier()
-            );
-          } catch (err) {
-            // Membrane security errors - silently return undefined to prevent code execution
-            if (err instanceof Error && err.message.includes('Reflex Security')) {
-              if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
-                console.error(err.message);
-              }
-              return undefined;
-            }
-            throw err;
-          }
-        });
-      } catch (err) {
-        // Check if this is a CSP violation
-        if (err instanceof EvalError || (err.message && err.message.includes('unsafe-eval'))) {
-          const cspError = new Error(
-            'Reflex: CSP VIOLATION - new Function() is blocked by Content Security Policy.\n' +
-            'Your environment blocks \'unsafe-eval\'. To fix this:\n' +
-            '1. Enable CSP-safe mode: app.configure({ cspSafe: true, parser: SafeExprParser })\n' +
-            '2. Import the parser: import { SafeExprParser } from \'reflex/csp\'\n' +
-            '3. Or update CSP headers to allow \'unsafe-eval\' (NOT recommended)\n' +
-            'Expression: ' + exp
-          );
-          console.error(cspError);
-          throw cspError;
-        }
-        console.warn('Reflex compile error:', exp, err);
-        return this._ec.set(k, () => undefined);
-      }
-    }
-
-    // Read mode: extract variables for better performance
-    const vars = new Set();
-    let m;
-    ID_RE.lastIndex = 0;
-    while ((m = ID_RE.exec(exp))) {
-      if (!RESERVED[m[1]]) vars.add(m[1]);
-    }
-
-    const arg = Array.from(vars).map(v =>
-      `var ${v}=(c&&(${JSON.stringify(v)} in c))?c.${v}:s.${v};`
-    ).join('');
-
-    // CRITICAL SECURITY FIX (Issue #1): Use Global Barrier instead of 'use strict'
-    // - 'use strict' prevented {{ this.alert(1) }} but couldn't prevent {{ window.alert(1) }}
-    // - Global Barrier wraps execution in with(_g) to intercept ALL global lookups
-    // - Only allows safe globals (Math, Date, etc.) - blocks window, process, fetch, etc.
-    // NOTE: Cannot use 'use strict' with 'with' statements (SyntaxError)
-    const body = `${magicArgs}${arg}with(_g){return(${exp});}`;
+    // This change eliminates the RCE vulnerability entirely at the cost of requiring
+    // an external parser. The performance difference is negligible for most applications.
 
     try {
-      rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el', '_g', body);
-      // Wrap to inject magic properties and apply security membrane
-      return this._ec.set(k, (s, c, e, el) => {
-        try {
-          // CRITICAL SECURITY FIX: Wrap $el in element membrane to prevent sandbox escape
-          // Without this, {{ $el.ownerDocument.defaultView.alert('pwned') }} enables full RCE
-          return rawFn(
-            createMembrane(s), createMembrane(c), e,
-            self._refs,
-            self._dispatch.bind(self),
-            self.nextTick.bind(self),
-            createElementMembrane(el),
-            createGlobalBarrier()
-          );
-        } catch (err) {
-          // Membrane security errors - silently return undefined to prevent code execution
-          if (err instanceof Error && err.message.includes('Reflex Security')) {
-            if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
-              console.error(err.message);
-            }
-            return undefined;
-          }
-          throw err;
-        }
-      });
+      const fn = this._getParser().compile(exp, this);
+      return this._ec.set(k, fn);
     } catch (err) {
-      // Check if this is a CSP violation
-      if (err instanceof EvalError || (err.message && err.message.includes('unsafe-eval'))) {
-        const cspError = new Error(
-          'Reflex: CSP VIOLATION - new Function() is blocked by Content Security Policy.\n' +
-          'Your environment blocks \'unsafe-eval\'. To fix this:\n' +
-          '1. Enable CSP-safe mode: app.configure({ cspSafe: true, parser: SafeExprParser })\n' +
-          '2. Import the parser: import { SafeExprParser } from \'reflex/csp\'\n' +
-          '3. Or update CSP headers to allow \'unsafe-eval\' (NOT recommended)\n' +
-          'Expression: ' + exp
-        );
-        console.error(cspError);
-        throw cspError;
-      }
-      console.warn('Reflex compile error:', exp, err);
+      console.warn('Reflex: Expression compile error:', exp, err);
       return this._ec.set(k, () => undefined);
     }
   },
@@ -423,13 +252,15 @@ export const ExprMixin = {
   },
 
   /**
-   * Get CSP parser (must be injected via configure)
+   * Get parser (MANDATORY - Standard Mode has been removed for security)
    */
   _getParser() {
     if (!this._parser) {
       throw new Error(
-        'Reflex: CSP mode requires a parser. Use configure({ parser: new SafeExprParser() }). ' +
-        'Import SafeExprParser from \'reflex/csp\' or provide a custom parser with compile(exp, reflex) method.'
+        'Reflex: Expression parser is REQUIRED. Standard mode has been removed due to unfixable RCE vulnerability.\n' +
+        'Configure a parser with: app.configure({ parser: new SafeExprParser() })\n' +
+        'Import with: import { SafeExprParser } from \'reflex/csp\'\n' +
+        'See: https://reflex.dev/security/csp-mode'
       );
     }
     return this._parser;

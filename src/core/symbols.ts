@@ -269,8 +269,12 @@ export function createMembrane(target: any): any {
           return createCachedFunctionWrapper(value, obj, true);
         }
 
-        // For non-native objects, wrap the function
-        return createFunctionWrapper(value, obj);
+        // CRITICAL FIX (SEC-FINAL-004 Issue #2): Method Identity Stability for Non-Native Objects
+        // Previously, non-native objects used createFunctionWrapper which creates a fresh closure
+        // on every access, breaking identity checks: state.user.getName !== state.user.getName
+        // This causes infinite render loops in React (PureComponent, memo, useEffect dependencies)
+        // Fix: Use cached wrapper for ALL objects, not just native ones
+        return createCachedFunctionWrapper(value, obj, false);
       }
 
       // 5. DENY: Everything else
@@ -350,10 +354,21 @@ export function createMembrane(target: any): any {
       return Reflect.deleteProperty(obj, key);
     },
 
-    // Block getPrototypeOf to prevent prototype chain manipulation
-    getPrototypeOf() {
-      // Return null to hide the prototype chain
-      return null;
+    // CRITICAL FIX (SEC-FINAL-004 Issue #3): Allow Safe Prototypes for instanceof
+    //
+    // Previously returned null to prevent prototype pollution, but this breaks instanceof:
+    //   {{ user instanceof User }} → false (should be true)
+    //
+    // Security is maintained through multiple layers:
+    // 1. The 'get' trap blocks access to 'constructor', '__proto__', 'prototype'
+    // 2. The 'set' trap blocks setting these dangerous properties
+    // 3. The 'defineProperty' trap blocks defining these properties
+    // 4. The 'setPrototypeOf' trap prevents prototype chain manipulation
+    //
+    // By returning the real prototype, instanceof works correctly while security
+    // is enforced by the other traps that block dangerous property access.
+    getPrototypeOf(target) {
+      return Reflect.getPrototypeOf(target);
     },
 
     // Block setPrototypeOf to prevent prototype chain manipulation
