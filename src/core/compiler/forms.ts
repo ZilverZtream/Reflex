@@ -606,7 +606,7 @@ export const FormsMixin = {
       }
 
       // CRITICAL SECURITY FIX: Check finalKey AFTER evaluation for dynamic segments
-      // The initial check at line 3128 only validates the raw expression string.
+      // The initial isProtoProperty check above only validates the raw expression string.
       // For dynamic keys (e.g., m-model="data[dynamicKey]"), we must also validate
       // the evaluated value to prevent prototype pollution via runtime-controlled keys.
       if (isProtoProperty(finalKey)) {
