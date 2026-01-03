@@ -526,7 +526,19 @@ export class Reflex {
 
     // Register the node with the FinalizationRegistry
     // When the node is GC'd, the callback will delete all these IDs from _scopeRegistry
-    this._gcRegistry.register(node, scopeIds, node);
+    //
+    // CRITICAL FIX (Audit Issue #1): Memory Leak via Circular Reference
+    // PREVIOUS BUG: Used `node` as the unregister token (3rd argument):
+    //   this._gcRegistry.register(node, scopeIds, node);
+    // This created a strong reference cycle: FinalizationRegistry holds a strong
+    // reference to the unregister token (node), but the node is also the target
+    // being observed for GC. This prevented the node from ever being collected.
+    //
+    // FIX: Use the scopeIds array as the unregister token instead.
+    // The scopeIds array is a separate object that doesn't reference the node,
+    // breaking the circular reference. If unregistration is needed later,
+    // we can store the scopeIds reference and call this._gcRegistry.unregister(scopeIds).
+    this._gcRegistry.register(node, scopeIds, scopeIds);
   }
 
   /**
@@ -614,22 +626,49 @@ export class Reflex {
     ]);
 
     if (svgElements.has(rootTag)) {
-      // CRITICAL FIX: Parse SVG elements with proper namespace
-      // Create an actual SVG element, use its innerHTML to parse content with proper namespace
-      const svgContainer = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      // Temporarily add to document to ensure proper parsing context
-      const tempDiv = document.createElement('div');
-      tempDiv.style.display = 'none';
-      document.body.appendChild(tempDiv);
-      tempDiv.appendChild(svgContainer);
+      // CRITICAL FIX (Audit Issue #2): XSS via Live DOM Parsing
+      // PREVIOUS BUG: Appended tempDiv to document.body BEFORE setting innerHTML.
+      // This caused SVG event handlers (onload, onerror) to execute immediately
+      // during parsing, even if sanitization was enabled but bypassed/failed.
+      //
+      // FIX: Use DOMParser to parse SVG in a completely detached context.
+      // DOMParser creates an inert document that doesn't execute scripts or handlers.
+      const parser = new DOMParser();
+      const svgDoc = parser.parseFromString(
+        `<svg xmlns="http://www.w3.org/2000/svg">${template}</svg>`,
+        'image/svg+xml'
+      );
 
-      try {
-        svgContainer.innerHTML = template;
-        const actualElement = svgContainer.firstElementChild;
+      // Check for parse errors (DOMParser returns error document on failure)
+      const parseError = svgDoc.querySelector('parsererror');
+      if (parseError) {
+        console.warn('Reflex: SVG parsing failed:', parseError.textContent);
+        // Fallback to HTML parsing
+        t.innerHTML = template;
+        this._cp.set(name, {
+          _t: t.content.firstElementChild,
+          p: def.props || [],
+          s: def.setup
+        });
+      } else {
+        const svgContainer = svgDoc.documentElement;
 
-        if (actualElement) {
-          // Clone to break connection with temporary container
-          const cloned = actualElement.cloneNode(true);
+        // CRITICAL FIX (Audit Issue #3): SVG Fragment Data Loss
+        // PREVIOUS BUG: Only extracted firstElementChild, discarding siblings.
+        // FIX: Collect ALL children and use DocumentFragment for multiple elements.
+        const children = Array.from(svgContainer.children);
+
+        if (children.length === 0) {
+          // Empty SVG - fallback
+          t.innerHTML = template;
+          this._cp.set(name, {
+            _t: t.content.firstElementChild,
+            p: def.props || [],
+            s: def.setup
+          });
+        } else if (children.length === 1) {
+          // Single SVG element - use directly (existing behavior)
+          const cloned = document.importNode(children[0], true);
           t.content.appendChild(cloned);
           this._cp.set(name, {
             _t: cloned,
@@ -637,19 +676,20 @@ export class Reflex {
             s: def.setup
           });
         } else {
-          // Fallback
-          t.innerHTML = template;
+          // CRITICAL FIX (Audit Issue #3): Multiple SVG elements (fragment)
+          // Store as DocumentFragment to preserve all siblings
+          const fragment = document.createDocumentFragment();
+          for (const child of children) {
+            fragment.appendChild(document.importNode(child, true));
+          }
           this._cp.set(name, {
-            _t: t.content.firstElementChild,
+            _t: fragment,
             p: def.props || [],
             s: def.setup
           });
         }
-      } finally {
-        // Clean up temporary container
-        tempDiv.remove();
       }
-    } else{
+    } else {
       t.innerHTML = template;
 
       // CRITICAL FIX #7: Component Fragment Support (Multi-root components)
@@ -1344,19 +1384,38 @@ export class Reflex {
       ]);
 
       if (svgElements.has(rootTag)) {
-        // CRITICAL FIX: Parse SVG elements with proper namespace (same as sync components)
-        const svgContainer = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-        const tempDiv = document.createElement('div');
-        tempDiv.style.display = 'none';
-        document.body.appendChild(tempDiv);
-        tempDiv.appendChild(svgContainer);
+        // CRITICAL FIX (Audit Issue #2): XSS via Live DOM Parsing (async components)
+        // Same fix as sync components - use DOMParser instead of live DOM
+        const parser = new DOMParser();
+        const svgDoc = parser.parseFromString(
+          `<svg xmlns="http://www.w3.org/2000/svg">${template}</svg>`,
+          'image/svg+xml'
+        );
 
-        try {
-          svgContainer.innerHTML = template;
-          const actualElement = svgContainer.firstElementChild;
+        const parseError = svgDoc.querySelector('parsererror');
+        if (parseError) {
+          console.warn('Reflex: SVG parsing failed:', parseError.textContent);
+          t.innerHTML = template;
+          self._cp.set(tag, {
+            _t: t.content.firstElementChild,
+            p: def.props || [],
+            s: def.setup
+          });
+        } else {
+          const svgContainer = svgDoc.documentElement;
 
-          if (actualElement) {
-            const cloned = actualElement.cloneNode(true);
+          // CRITICAL FIX (Audit Issue #3): SVG Fragment Data Loss (async components)
+          const children = Array.from(svgContainer.children);
+
+          if (children.length === 0) {
+            t.innerHTML = template;
+            self._cp.set(tag, {
+              _t: t.content.firstElementChild,
+              p: def.props || [],
+              s: def.setup
+            });
+          } else if (children.length === 1) {
+            const cloned = document.importNode(children[0], true);
             t.content.appendChild(cloned);
             self._cp.set(tag, {
               _t: cloned,
@@ -1364,15 +1423,17 @@ export class Reflex {
               s: def.setup
             });
           } else {
-            t.innerHTML = template;
+            // Multiple SVG elements - use DocumentFragment
+            const fragment = document.createDocumentFragment();
+            for (const child of children) {
+              fragment.appendChild(document.importNode(child, true));
+            }
             self._cp.set(tag, {
-              _t: t.content.firstElementChild,
+              _t: fragment,
               p: def.props || [],
               s: def.setup
             });
           }
-        } finally {
-          tempDiv.remove();
         }
       } else {
         t.innerHTML = template;
