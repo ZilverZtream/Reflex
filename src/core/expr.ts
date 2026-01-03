@@ -119,8 +119,31 @@ export const ExprMixin = {
 
     // === FAST PATH OPTIMIZATIONS ===
     // Skip new Function/regex for common simple expressions
-    // SECURITY: Prototype-related properties that bypass membrane protection
-    const PROTO_PROPS_FAST: { [key: string]: 1 } = { constructor: 1, '__proto__': 1, prototype: 1 };
+    // SECURITY (SEC-2026-003 Issue #5): Fast Path Security Bypass
+    //
+    // VULNERABILITY: Fast path regex `^[a-z_$][\w$.]*$` allows accessing any property
+    // including Object.prototype methods (toString, valueOf, etc.) which could be used
+    // for gadget chains or to bypass the membrane.
+    //
+    // FIX: Expand PROTO_PROPS_FAST to include ALL known Object.prototype methods.
+    // This ensures fast paths fall through to the membrane for dangerous properties.
+    //
+    // Alternative: Remove fast paths entirely and rely solely on the membrane.
+    // Trade-off: Fast paths provide ~5x performance boost for simple expressions,
+    // so we keep them but block ALL prototype methods, not just the dangerous three.
+    const PROTO_PROPS_FAST: { [key: string]: 1 } = {
+      // Dangerous prototype chain properties
+      constructor: 1, '__proto__': 1, prototype: 1,
+      // Object.prototype methods (could be used for gadgets)
+      toString: 1, valueOf: 1, toLocaleString: 1,
+      isPrototypeOf: 1, propertyIsEnumerable: 1,
+      hasOwnProperty: 1, // Already safe in membrane but block in fast path
+      // Function.prototype (if accessed on function values)
+      call: 1, apply: 1, bind: 1,
+      // Additional potential vectors
+      __defineGetter__: 1, __defineSetter__: 1,
+      __lookupGetter__: 1, __lookupSetter__: 1
+    };
     const hasProtoProperty = (parts: string[]) => parts.some(p => PROTO_PROPS_FAST[p]);
 
     // Fast path 1: Simple negation (!isActive, !user.verified)
@@ -202,10 +225,47 @@ export const ExprMixin = {
     }
 
     // Standard mode: use new Function (faster but requires unsafe-eval CSP)
+    //
+    // ⚠️ CRITICAL SECURITY WARNING (SEC-2026-003 Issue #2): RCE via Literal Constructor
+    //
+    // VULNERABILITY: Standard Mode using `new Function()` is FUNDAMENTALLY INSECURE.
+    // The Global Barrier (_g) only intercepts VARIABLE LOOKUPS, not property access
+    // on objects created INSIDE the expression.
+    //
+    // EXPLOIT: {{ (function(){}).constructor('return process')().env }}
+    //          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    //          Creates native function → .constructor → global Function → RCE
+    //
+    // The membrane CANNOT protect against this because literals ([{}, [], function(){}])
+    // created inside `new Function()` are NATIVE OBJECTS with access to global constructors.
+    //
+    // RECOMMENDED FIX: Deprecate Standard Mode entirely. Force CSP Mode for ALL deployments.
+    // CSP Mode uses SafeExprParser which operates at the AST level and can block
+    // `.constructor` access on ALL objects, including literals.
+    //
+    // TEMPORARY MITIGATION: Use CSP Mode in production:
+    //   app.configure({ cspSafe: true, parser: new SafeExprParser() })
+    //
     // WARNING: This violates strict Content Security Policy (CSP) headers.
     // Enterprise environments (banks, gov, healthcare) often block 'unsafe-eval'.
     // For CSP-compliant deployments, use: app.configure({ cspSafe: true, parser: SafeExprParser })
+    //
+    // TODO (Breaking Change v2.0): Remove Standard Mode, make CSP Mode mandatory
     const magicArgs = 'var $refs=_r,$dispatch=_d,$nextTick=_n,$el=_el;';
+
+    // SECURITY AUDIT WARNING: Log deprecation warning in development
+    if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+      if (!this._standardModeWarningShown) {
+        this._standardModeWarningShown = true;
+        console.warn(
+          '🚨 Reflex Security Warning: Standard Mode is DEPRECATED due to unfixable RCE vulnerability.\n' +
+          '   Attack vector: {{ (function(){}).constructor(\'...\')() }}\n' +
+          '   STRONGLY RECOMMENDED: Use CSP-safe mode in production:\n' +
+          '   app.configure({ cspSafe: true, parser: new SafeExprParser() })\n' +
+          '   See: https://reflex.dev/security/csp-mode'
+        );
+      }
+    }
 
     // Detect CSP violations and provide helpful error message
     let rawFn;
