@@ -399,4 +399,13 @@ export interface RendererOptions {
     scheduleUpdate: (node: VNode) => void;
     flushUpdates: () => void;
   };
+
+  /** Expression parser (REQUIRED - SEC-FINAL-005) */
+  parser?: any;
+
+  /** Enable CSP-safe mode */
+  cspSafe?: boolean;
+
+  /** Auto-mount on DOM ready */
+  autoMount?: boolean;
 }
