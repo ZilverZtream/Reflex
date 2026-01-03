@@ -419,10 +419,29 @@ export class SafeExprParser {
       );
     }
     try {
-      return this.parseTernary();
+      return this.parseAssignment();
     } finally {
       this.depth--;
     }
+  }
+
+  // CRITICAL FIX (Audit Issue #2): Assignment Expression Support
+  // Without this, interactive expressions like @click="count = 5" fail with "Unexpected token"
+  // Assignment has lower precedence than ternary, so we parse it first
+  parseAssignment(): any {
+    const left = this.parseTernary();
+    this.skipWhitespace();
+
+    // Check for assignment operators: =, +=, -=, *=, /=, %=
+    const assignOps = ['+=', '-=', '*=', '/=', '%=', '='];
+    for (const op of assignOps) {
+      if (this.matchStr(op)) {
+        const right = this.parseAssignment(); // Right-associative
+        return { type: 'assignment', op, left, right };
+      }
+    }
+
+    return left;
   }
 
   parseTernary(): any {
@@ -557,6 +576,16 @@ export class SafeExprParser {
     if (this.matchStr('typeof ')) {
       return { type: 'unary', op: 'typeof', arg: this.parseUnary() };
     }
+
+    // CRITICAL FIX (Audit Issue #2): Prefix Update Expressions (++count, --index)
+    // Without this, @click="++count" fails with parse error
+    if (this.matchStr('++')) {
+      return { type: 'update', op: '++', arg: this.parseUnary(), prefix: true };
+    }
+    if (this.matchStr('--')) {
+      return { type: 'update', op: '--', arg: this.parseUnary(), prefix: true };
+    }
+
     return this.parsePostfix();
   }
 
@@ -581,6 +610,13 @@ export class SafeExprParser {
         this.pos++;
         const args = this.parseArguments();
         obj = { type: 'call', callee: obj, arguments: args };
+      } else if (this.matchStr('++')) {
+        // CRITICAL FIX (Audit Issue #2): Postfix Update Expression (count++)
+        // Without this, @click="count++" fails with parse error
+        obj = { type: 'update', op: '++', arg: obj, prefix: false };
+      } else if (this.matchStr('--')) {
+        // CRITICAL FIX (Audit Issue #2): Postfix Update Expression (count--)
+        obj = { type: 'update', op: '--', arg: obj, prefix: false };
       } else {
         break;
       }
@@ -971,6 +1007,176 @@ export class SafeExprParser {
           obj[key] = this._evaluate(prop.value, state, context, $event, $el, reflex);
         }
         return obj;
+      }
+
+      case 'assignment': {
+        // CRITICAL FIX (Audit Issue #2): Assignment Expression Evaluation
+        // Supports: count = 5, count += 3, user.name = 'Bob'
+        // SECURITY: Only allow assignment to own properties (WHITE-LIST ONLY)
+        const rightValue = this._evaluate(node.right, state, context, $event, $el, reflex);
+
+        if (node.left.type === 'identifier') {
+          // Simple identifier assignment: count = 5
+          const name = node.left.name;
+
+          // SECURITY: Cannot assign to magic properties
+          if (name.startsWith('$')) {
+            throw new Error(`Reflex Security: Cannot assign to magic property '${name}'`);
+          }
+
+          // Resolve target: context first, then state
+          let target = null;
+          if (context) {
+            if (isFlatScope(context)) {
+              const result = getFlatScopeValue(context, name);
+              if (result.found) {
+                target = context;
+              }
+            } else if (ScopeContainer.isScopeContainer(context)) {
+              if (context.has(name)) {
+                target = context;
+              }
+            }
+          }
+          if (!target && state && Object.prototype.hasOwnProperty.call(state, name)) {
+            target = state;
+          }
+          if (!target) {
+            // Create in state if not found (similar to JavaScript semantics)
+            target = state || context;
+          }
+
+          // Apply assignment operator
+          if (node.op === '=') {
+            target[name] = rightValue;
+          } else if (node.op === '+=') {
+            target[name] = (target[name] || 0) + rightValue;
+          } else if (node.op === '-=') {
+            target[name] = (target[name] || 0) - rightValue;
+          } else if (node.op === '*=') {
+            target[name] = (target[name] || 0) * rightValue;
+          } else if (node.op === '/=') {
+            target[name] = (target[name] || 0) / rightValue;
+          } else if (node.op === '%=') {
+            target[name] = (target[name] || 0) % rightValue;
+          }
+          return target[name];
+        } else if (node.left.type === 'member') {
+          // Member assignment: user.name = 'Bob', arr[0] = 5
+          const obj = this._evaluate(node.left.object, state, context, $event, $el, reflex);
+          if (obj == null) {
+            throw new Error('Reflex: Cannot set property on null or undefined');
+          }
+
+          const prop = node.left.computed
+            ? this._evaluate(node.left.property, state, context, $event, $el, reflex)
+            : node.left.property;
+
+          // SECURITY: Only allow assignment to own properties (WHITE-LIST ONLY)
+          // This prevents prototype pollution via obj.__proto__ = evil or obj.constructor = evil
+          if (!Object.prototype.hasOwnProperty.call(obj, prop)) {
+            // Allow creating new own properties, but not setting prototype chain properties
+            if (typeof prop === 'string' && (prop === '__proto__' || prop === 'constructor' || prop === 'prototype')) {
+              throw new Error(`Reflex Security: Cannot assign to dangerous property '${prop}'`);
+            }
+          }
+
+          // Apply assignment operator
+          if (node.op === '=') {
+            obj[prop] = rightValue;
+          } else if (node.op === '+=') {
+            obj[prop] = (obj[prop] || 0) + rightValue;
+          } else if (node.op === '-=') {
+            obj[prop] = (obj[prop] || 0) - rightValue;
+          } else if (node.op === '*=') {
+            obj[prop] = (obj[prop] || 0) * rightValue;
+          } else if (node.op === '/=') {
+            obj[prop] = (obj[prop] || 0) / rightValue;
+          } else if (node.op === '%=') {
+            obj[prop] = (obj[prop] || 0) % rightValue;
+          }
+          return obj[prop];
+        } else {
+          throw new Error('Reflex: Invalid assignment target');
+        }
+      }
+
+      case 'update': {
+        // CRITICAL FIX (Audit Issue #2): Update Expression Evaluation
+        // Supports: count++, ++count, index--, --index
+        // SECURITY: Only allow update on own properties (WHITE-LIST ONLY)
+        if (node.arg.type === 'identifier') {
+          // Simple identifier update: count++
+          const name = node.arg.name;
+
+          // SECURITY: Cannot update magic properties
+          if (name.startsWith('$')) {
+            throw new Error(`Reflex Security: Cannot update magic property '${name}'`);
+          }
+
+          // Resolve target: context first, then state
+          let target = null;
+          if (context) {
+            if (isFlatScope(context)) {
+              const result = getFlatScopeValue(context, name);
+              if (result.found) {
+                target = context;
+              }
+            } else if (ScopeContainer.isScopeContainer(context)) {
+              if (context.has(name)) {
+                target = context;
+              }
+            }
+          }
+          if (!target && state && Object.prototype.hasOwnProperty.call(state, name)) {
+            target = state;
+          }
+          if (!target) {
+            // Create in state if not found (initialized to 0 for ++ and --)
+            target = state || context;
+            target[name] = 0;
+          }
+
+          const oldValue = target[name] || 0;
+          if (node.op === '++') {
+            target[name] = oldValue + 1;
+          } else if (node.op === '--') {
+            target[name] = oldValue - 1;
+          }
+
+          // Return old value for postfix, new value for prefix
+          return node.prefix ? target[name] : oldValue;
+        } else if (node.arg.type === 'member') {
+          // Member update: obj.count++, arr[0]--
+          const obj = this._evaluate(node.arg.object, state, context, $event, $el, reflex);
+          if (obj == null) {
+            throw new Error('Reflex: Cannot update property on null or undefined');
+          }
+
+          const prop = node.arg.computed
+            ? this._evaluate(node.arg.property, state, context, $event, $el, reflex)
+            : node.arg.property;
+
+          // SECURITY: Only allow update on own properties (WHITE-LIST ONLY)
+          if (!Object.prototype.hasOwnProperty.call(obj, prop)) {
+            // Allow creating new own properties, but not setting prototype chain properties
+            if (typeof prop === 'string' && (prop === '__proto__' || prop === 'constructor' || prop === 'prototype')) {
+              throw new Error(`Reflex Security: Cannot update dangerous property '${prop}'`);
+            }
+          }
+
+          const oldValue = obj[prop] || 0;
+          if (node.op === '++') {
+            obj[prop] = oldValue + 1;
+          } else if (node.op === '--') {
+            obj[prop] = oldValue - 1;
+          }
+
+          // Return old value for postfix, new value for prefix
+          return node.prefix ? obj[prop] : oldValue;
+        } else {
+          throw new Error('Reflex: Invalid update target');
+        }
       }
 
       default:

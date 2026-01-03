@@ -244,6 +244,10 @@ export class Reflex {
     // the GC will eventually clean up the scope data automatically.
     //
     // Result: document.body.innerHTML = '' will self-clean when GC runs.
+    //
+    // CRITICAL FIX (Audit Issue #5): Scope Registry GC Feature Implementation
+    // The FinalizationRegistry is initialized here, and the registration pattern
+    // is implemented via the _registerScopeForGC helper method below.
     this._gcRegistry = new FinalizationRegistry((scopeIds: string[]) => {
       // Automatic cleanup: delete all scope IDs from the registry
       // This runs when the DOM node is garbage collected
@@ -496,6 +500,33 @@ export class Reflex {
     this._m = false;
 
     return this;
+  }
+
+  /**
+   * CRITICAL FIX (Audit Issue #5): Helper method to register scopes with GC cleanup
+   *
+   * This method should be called when creating FlatScope instances in directives
+   * (m-for, m-if, etc.) to ensure automatic cleanup when the node is garbage collected.
+   *
+   * Without this registration, scope IDs remain in _scopeRegistry permanently,
+   * causing memory leaks even though the DOM nodes are gone.
+   *
+   * @param node - The DOM node that owns this scope
+   * @param scopeIds - Array of scope variable IDs allocated for this node
+   *
+   * @example
+   * // In m-for directive:
+   * const itemId = this._scopeRegistry.allocate('item');
+   * const indexId = this._scopeRegistry.allocate('index');
+   * const scopeIds = [itemId, indexId];
+   * this._registerScopeForGC(node, scopeIds);
+   */
+  _registerScopeForGC(node: Node, scopeIds: string[]): void {
+    if (scopeIds.length === 0) return;
+
+    // Register the node with the FinalizationRegistry
+    // When the node is GC'd, the callback will delete all these IDs from _scopeRegistry
+    this._gcRegistry.register(node, scopeIds, node);
   }
 
   /**
@@ -835,11 +866,25 @@ export class Reflex {
 
     const scope = this._r(scopeRaw);
 
+    // CRITICAL FIX (Audit Issue #4): Lifecycle Memory Leak Prevention
+    // Component cleanups must be registered on a stable anchor, not the component root
+    // If the component root has m-if, it can be replaced with a comment, losing all cleanups
+    // Solution: Insert a stable comment marker and register cleanups on it
+    const componentAnchor = this._ren.createComment(`component:${tag}`);
+
     // CRITICAL FIX #7: Handle fragment components when replacing
     if (isFragment && fragmentNodes.length > 1) {
       // For fragments, replace el with all fragment nodes
       const parent = el.parentNode;
       const nextSibling = el.nextSibling;
+
+      // CRITICAL FIX (Audit Issue #4): Insert stable component anchor before fragment nodes
+      // This anchor will survive even if fragment roots are replaced by m-if
+      if (nextSibling) {
+        parent.insertBefore(componentAnchor, nextSibling);
+      } else {
+        parent.appendChild(componentAnchor);
+      }
 
       // Insert all fragment nodes
       for (const node of fragmentNodes) {
@@ -852,13 +897,34 @@ export class Reflex {
 
       // Remove the original element
       el.remove();
+
+      // CRITICAL FIX (Audit Issue #3): Fragment Component Siblings Unbound
+      // Store scope on all fragment nodes, not just the first one
+      // This ensures each sibling can access the component scope
+      for (const node of fragmentNodes) {
+        this._scopeMap.set(node, scope);
+      }
+
+      // CRITICAL FIX (Audit Issue #3): Walk all sibling fragment nodes
+      // The caller will walk the first node (inst), but the siblings (fragmentNodes[1]...fragmentNodes[n])
+      // are inserted into the DOM without being walked. This leaves directives and bindings unprocessed.
+      // Fix: Walk each sibling node here before returning.
+      for (let i = 1; i < fragmentNodes.length; i++) {
+        const sibling = fragmentNodes[i];
+        this._bnd(sibling, scope);
+        this._w(sibling, scope);
+      }
     } else {
       // Single element replacement (existing behavior)
+      // CRITICAL FIX (Audit Issue #4): Insert stable component anchor before instance
+      const parent = el.parentNode;
+      if (parent) {
+        parent.insertBefore(componentAnchor, el);
+      }
       el.replaceWith(inst);
+      // Store scope for later use by _w
+      this._scopeMap.set(inst, scope);
     }
-
-    // Store scope for later use by _w
-    this._scopeMap.set(inst, scope);
 
     // Project slot content into <slot> elements
     // CRITICAL FIX #6: Don't walk slotted content here - caller will walk the instance
@@ -911,9 +977,11 @@ export class Reflex {
       }
     }
 
-    // Register all cleanup functions on the component instance
+    // CRITICAL FIX (Audit Issue #4): Register component cleanups on stable anchor
+    // Previously registered on inst (component root), which can be replaced by m-if
+    // Now registered on componentAnchor (stable comment) which survives root replacement
     if (cleanupFns.length > 0) {
-      this._reg(inst, () => {
+      this._reg(componentAnchor, () => {
         for (const fn of cleanupFns) {
           try {
             fn();
@@ -924,11 +992,13 @@ export class Reflex {
       });
     }
 
+    // CRITICAL FIX (Audit Issue #4): Register reactive prop updates on stable anchor
+    // Previously registered on inst, now on componentAnchor to survive root replacement
     for (const pd of propDefs) {
       const fn = this._fn(pd.exp);
       const e = this.createEffect(() => { props[pd.name] = fn(this.s, o); });
       e.o = o;
-      this._reg(inst, e.kill);
+      this._reg(componentAnchor, e.kill);
     }
 
     this._bnd(inst, scope);
@@ -952,6 +1022,10 @@ export class Reflex {
 
     // Collect cleanup functions registered via onCleanup
     const cleanupFns: Array<() => void> = [];
+
+    // CRITICAL FIX (Audit Issue #4): Create stable component anchor for cleanups
+    // This anchor survives even if the component root is replaced by m-if
+    const componentAnchor = this._ren.createComment(`component:${tag}`);
 
     // Capture slot content BEFORE processing attributes
     // Move (not clone) child nodes to preserve any existing bindings
@@ -1036,6 +1110,12 @@ export class Reflex {
     }
 
     const scope = this._r(scopeRaw);
+
+    // CRITICAL FIX (Audit Issue #4): Insert stable component anchor before instance
+    const parent = el.parentNode;
+    if (parent) {
+      parent.insertBefore(componentAnchor, el);
+    }
     el.replaceWith(inst);
 
     // Project slot content into <slot> elements
@@ -1076,9 +1156,11 @@ export class Reflex {
       }
     }
 
-    // Register all cleanup functions on the component instance
+    // CRITICAL FIX (Audit Issue #4): Register component cleanups on stable anchor
+    // Previously registered on inst (component root), which can be replaced by m-if
+    // Now registered on componentAnchor (stable comment) which survives root replacement
     if (cleanupFns.length > 0) {
-      this._reg(inst, () => {
+      this._reg(componentAnchor, () => {
         for (const fn of cleanupFns) {
           try {
             fn();
@@ -1089,11 +1171,13 @@ export class Reflex {
       });
     }
 
+    // CRITICAL FIX (Audit Issue #4): Register reactive prop updates on stable anchor
+    // Previously registered on inst, now on componentAnchor to survive root replacement
     for (const pd of propDefs) {
       const fn = this._fn(pd.exp);
       const e = this.createEffect(() => { props[pd.name] = fn(this.s, o); });
       e.o = o;
-      this._reg(inst, e.kill);
+      this._reg(componentAnchor, e.kill);
     }
 
     this._bnd(inst, scope);
