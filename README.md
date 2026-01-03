@@ -13,10 +13,11 @@ Reflex separates the *Core Logic* from the *Renderer*, allowing it to run anywhe
 * **Server/Tests:** Uses `VirtualRenderer` for blazing fast SSR and headless unit testing.
 * **Native:** Ready for custom adapters (Canvas, WebGL, Mobile).
 
-### 2. Enterprise-Grade Security ("Iron Membrane")
-We don't just rely on Regex. Reflex uses a **Hybrid Security Model**:
-* **The Vault:** A native `Proxy` membrane with a `has` trap that prevents global scope leakage (`window` access).
-* **The Guard:** Early-exit Regex validation to stop dangerous keywords before compilation.
+### 2. Enterprise-Grade Security ("Iron Membrane" 2.0)
+Reflex uses a **White-List Only Security Model** - the most secure approach:
+* **The Vault:** A native `Proxy` membrane that ONLY allows own data properties and whitelisted safe methods.
+* **Default DENY:** Everything not explicitly whitelisted is blocked - prototype chain, unknown globals, future browser features.
+* **Future-Proof:** New JavaScript features or browser APIs are automatically blocked until explicitly whitelisted.
 * **CSP Ready:** Auto-detects Content Security Policy and switches to a Safe Parser automatically.
 
 ### 3. Next-Gen Performance

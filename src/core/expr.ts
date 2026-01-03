@@ -38,7 +38,7 @@
  * at build time instead of runtime.
  */
 
-import { META, RESERVED, UNSAFE_PROPS, UNSAFE_EXPR_RE, ID_RE, normalizeUnicodeEscapes, createMembrane, createElementMembrane } from './symbols.js';
+import { META, RESERVED, ID_RE, createMembrane, createElementMembrane } from './symbols.js';
 
 /**
  * Expression cache with LRU (Least Recently Used) eviction strategy.
@@ -110,15 +110,7 @@ export const ExprMixin = {
     const cached = this._ec.get(k);
     if (cached) return cached;
 
-    // SECURITY: Enforce regex check before compiling (defense-in-depth)
-    // Normalize Unicode escapes to prevent bypass attempts
-    const normalized = normalizeUnicodeEscapes(exp);
-    if (!this.cfg.cspSafe && UNSAFE_EXPR_RE.test(normalized)) {
-      console.warn('Reflex: unsafe expression blocked:', exp);
-      return this._ec.set(k, () => {});
-    }
-
-    // SECURITY NOTE: Standard mode now uses "The Iron Membrane" - an unbypassable
+    // SECURITY NOTE: Standard mode now uses "The Iron Membrane 2.0" - a white-list only
     // runtime Proxy sandbox that provides defense-in-depth against code injection.
     // The membrane wraps state and context objects, blocking access to dangerous
     // properties like 'constructor', '__proto__', 'prototype', and global objects.
@@ -127,80 +119,75 @@ export const ExprMixin = {
 
     // === FAST PATH OPTIMIZATIONS ===
     // Skip new Function/regex for common simple expressions
+    // SECURITY: Prototype-related properties that bypass membrane protection
+    const PROTO_PROPS_FAST: { [key: string]: 1 } = { constructor: 1, '__proto__': 1, prototype: 1 };
+    const hasProtoProperty = (parts: string[]) => parts.some(p => PROTO_PROPS_FAST[p]);
 
     // Fast path 1: Simple negation (!isActive, !user.verified)
+    // SECURITY: Skip fast path for prototype-related properties
     if (!isH && exp.charCodeAt(0) === 33 && /^![a-z_$][\w$.]*$/i.test(exp)) {
       const inner = exp.slice(1);
       const p = inner.split('.');
-      for (const seg of p) {
-        if (UNSAFE_PROPS[seg]) {
-          console.warn('Reflex: Blocked access to unsafe property:', seg);
-          return this._ec.set(k, () => undefined);
-        }
+      // SECURITY: Skip fast path for dangerous properties - use slow path with membrane
+      if (hasProtoProperty(p)) {
+        // Fall through to slow path
+      } else {
+        const self = this;
+        return this._ec.set(k, (s, o) => {
+          if (o) { const meta = o[META] || self._mf.get(o); if (meta) self.trackDependency(meta, p[0]); }
+          let v = (o && p[0] in o) ? o : s;
+          for (const pk of p) { if (v == null) return true; v = v[pk]; }
+          return !v;
+        });
       }
-      const self = this;
-      return this._ec.set(k, (s, o) => {
-        if (o) { const meta = o[META] || self._mf.get(o); if (meta) self.trackDependency(meta, p[0]); }
-        let v = (o && p[0] in o) ? o : s;
-        for (const pk of p) { if (v == null) return true; v = v[pk]; }
-        return !v;
-      });
     }
 
     // Fast path 2: Simple property path (count, user.name, user.profile.avatar)
+    // SECURITY: Skip fast path for prototype-related properties
     if (!isH && /^[a-z_$][\w$.]*$/i.test(exp)) {
       const p = exp.split('.');
-      for (const seg of p) {
-        if (UNSAFE_PROPS[seg]) {
-          console.warn('Reflex: Blocked access to unsafe property:', seg);
-          return this._ec.set(k, () => undefined);
+      // SECURITY: Skip fast path for dangerous properties - use slow path with membrane
+      if (!hasProtoProperty(p)) {
+        const self = this;
+        // Optimization: specialize for single-segment paths (most common)
+        if (p.length === 1) {
+          const key = p[0];
+          return this._ec.set(k, (s, o) => {
+            if (o) { const meta = o[META] || self._mf.get(o); if (meta) self.trackDependency(meta, key); }
+            return (o && key in o) ? o[key] : s[key];
+          });
         }
-      }
-      const self = this;
-      // Optimization: specialize for single-segment paths (most common)
-      if (p.length === 1) {
-        const key = p[0];
         return this._ec.set(k, (s, o) => {
-          if (o) { const meta = o[META] || self._mf.get(o); if (meta) self.trackDependency(meta, key); }
-          return (o && key in o) ? o[key] : s[key];
+          if (o) { const meta = o[META] || self._mf.get(o); if (meta) self.trackDependency(meta, p[0]); }
+          let v = (o && p[0] in o) ? o : s;
+          for (const pk of p) { if (v == null) return; v = v[pk]; }
+          return v;
         });
       }
-      return this._ec.set(k, (s, o) => {
-        if (o) { const meta = o[META] || self._mf.get(o); if (meta) self.trackDependency(meta, p[0]); }
-        let v = (o && p[0] in o) ? o : s;
-        for (const pk of p) { if (v == null) return; v = v[pk]; }
-        return v;
-      });
     }
 
     // Fast path 3: Simple array access with numeric literal (items[0], users[1].name)
+    // SECURITY: Skip fast path for prototype-related properties
     const arrMatch = !isH && /^([a-z_$][\w$]*)\[(\d+)\](\.[\w$.]+)?$/i.exec(exp);
     if (arrMatch) {
       const arrName = arrMatch[1], idx = parseInt(arrMatch[2], 10), rest = arrMatch[3];
-      if (UNSAFE_PROPS[arrName]) {
-        console.warn('Reflex: Blocked access to unsafe property:', arrName);
-        return this._ec.set(k, () => undefined);
-      }
       const restParts = rest ? rest.slice(1).split('.') : null;
-      if (restParts) {
-        for (const seg of restParts) {
-          if (UNSAFE_PROPS[seg]) {
-            console.warn('Reflex: Blocked access to unsafe property:', seg);
-            return this._ec.set(k, () => undefined);
+      // SECURITY: Skip fast path for dangerous properties - use slow path with membrane
+      if (restParts && hasProtoProperty(restParts)) {
+        // Fall through to slow path
+      } else {
+        const self = this;
+        return this._ec.set(k, (s, o) => {
+          if (o) { const meta = o[META] || self._mf.get(o); if (meta) self.trackDependency(meta, arrName); }
+          let arr = (o && arrName in o) ? o[arrName] : s[arrName];
+          if (arr == null) return;
+          let v = arr[idx];
+          if (restParts) {
+            for (const pk of restParts) { if (v == null) return; v = v[pk]; }
           }
-        }
+          return v;
+        });
       }
-      const self = this;
-      return this._ec.set(k, (s, o) => {
-        if (o) { const meta = o[META] || self._mf.get(o); if (meta) self.trackDependency(meta, arrName); }
-        let arr = (o && arrName in o) ? o[arrName] : s[arrName];
-        if (arr == null) return;
-        let v = arr[idx];
-        if (restParts) {
-          for (const pk of restParts) { if (v == null) return; v = v[pk]; }
-        }
-        return v;
-      });
     }
 
     // CSP-safe mode: use external parser

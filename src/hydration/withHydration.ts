@@ -30,7 +30,19 @@
  * app.hydrate(document.getElementById('app'));
  */
 
-import { META, ITERATE, SKIP, UNSAFE_PROPS } from '../core/symbols.js';
+import { META, ITERATE, SKIP } from '../core/symbols.js';
+
+// SECURITY: Prototype-related properties that should be blocked when setting
+const PROTO_PROPS = Object.assign(Object.create(null), {
+  constructor: 1,
+  '__proto__': 1,
+  prototype: 1
+});
+
+// Helper to check if a property is prototype-related
+const isProtoProperty = (k: string): boolean => {
+  return PROTO_PROPS[k] === 1;
+};
 import { runTransition, cloneNodeWithProps } from '../core/compiler.js';
 import { resolveDuplicateKey } from '../core/reconcile.js';
 import { ScopeContainer } from '../csp/SafeExprParser.js';
@@ -484,7 +496,7 @@ const HydrationMixin = {
 
             // CRITICAL SECURITY FIX: Prototype Pollution Prevention
             // Block unsafe properties to prevent attacks like m-model="constructor.prototype.isAdmin"
-            if (UNSAFE_PROPS[finalKey]) {
+            if (isProtoProperty(finalKey)) {
               console.warn('Reflex Hydration: Blocked attempt to set unsafe property:', finalKey);
               return;
             }
@@ -493,7 +505,7 @@ const HydrationMixin = {
 
             for (const segment of pathSegments) {
               // CRITICAL SECURITY FIX: Check each segment for prototype pollution
-              if (UNSAFE_PROPS[segment]) {
+              if (isProtoProperty(segment)) {
                 console.warn('Reflex Hydration: Blocked attempt to traverse unsafe property:', segment);
                 return;
               }

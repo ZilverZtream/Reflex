@@ -12,11 +12,24 @@
 import {
   META, ITERATE, SKIP,
   ACTIVE, RUNNING,
-  ARRAY_MUTATORS, REORDER_METHODS, COLLECTION_METHODS,
-  UNSAFE_PROPS
+  ARRAY_MUTATORS, REORDER_METHODS, COLLECTION_METHODS
 } from './symbols.js';
 
 type ReactiveKey = PropertyKey;
+
+// SECURITY: Prototype-related properties that should be blocked when setting
+// These properties could lead to prototype pollution attacks if allowed
+// Note: Using Object.create(null) to avoid __proto__ issues
+const PROTO_PROPS = Object.assign(Object.create(null), {
+  constructor: 1,
+  '__proto__': 1,
+  prototype: 1
+});
+
+// Helper to check if a property is prototype-related
+const isProtoProperty = (k: PropertyKey): boolean => {
+  return typeof k === 'string' && PROTO_PROPS[k] === 1;
+};
 
 interface ReactiveEffect {
   f: number;
@@ -78,12 +91,9 @@ export const ArrayHandler: ProxyHandler<any[]> = {
     // Fast path for symbols
     if (typeof k === 'symbol') return Reflect.get(o, k, rec);
 
-    // Security: Block access to dangerous properties at runtime
-    // This prevents dynamic property access bypasses like obj[dynamicKey]
-    if (UNSAFE_PROPS[k]) {
-      console.warn('Reflex: Blocked runtime access to unsafe property:', k);
-      return undefined;
-    }
+    // SECURITY: White-list security is now handled by createMembrane()
+    // The membrane wraps objects before they're exposed to expressions,
+    // blocking prototype chain access through own property checks.
 
     const engine = meta.engine;
 
@@ -103,9 +113,12 @@ export const ArrayHandler: ProxyHandler<any[]> = {
     const meta = (o as ReactiveTarget)[META] as ReactiveMeta;
     const engine = meta.engine;
 
-    // Security: Block setting dangerous properties
-    if (typeof k === 'string' && UNSAFE_PROPS[k]) {
-      throw new Error(`Reflex: Cannot set unsafe property '${k}'`);
+    // SECURITY: Block setting prototype-related properties (defense in depth)
+    if (isProtoProperty(k)) {
+      throw new Error(
+        `Reflex Security: Cannot set property "${String(k)}". ` +
+        `This could lead to prototype pollution attacks.`
+      );
     }
 
     const raw = engine.toRaw(v);
@@ -213,10 +226,13 @@ export const ArrayHandler: ProxyHandler<any[]> = {
 
   // CRITICAL SECURITY FIX: Prevent sandbox escape via Object.defineProperty
   // Without this trap, Object.defineProperty(proxy, 'constructor', {...}) bypasses
-  // the 'set' trap's UNSAFE_PROPS check, allowing prototype pollution
+  // the 'set' trap check, allowing prototype pollution
   defineProperty(o, k, desc) {
-    if (typeof k === 'string' && UNSAFE_PROPS[k]) {
-      throw new Error(`Reflex: Cannot define unsafe property '${k}'`);
+    if (isProtoProperty(k)) {
+      throw new Error(
+        `Reflex Security: Cannot define property "${String(k)}". ` +
+        `This could lead to prototype pollution attacks.`
+      );
     }
     const meta = (o as ReactiveTarget)[META] as ReactiveMeta;
     const engine = meta.engine;
@@ -257,10 +273,10 @@ export const ArrayHandler: ProxyHandler<any[]> = {
 
   // CRITICAL SECURITY FIX #8: Inconsistent Sandbox Visibility
   // The 'has' trap ensures ("__proto__" in obj) returns false consistently
-  // Without this, ("__proto__" in obj) returns true but obj.__proto__ returns undefined
+  // With white-list security, we hide prototype-related properties
   has(o, k) {
-    // Block unsafe properties from 'in' operator
-    if (typeof k === 'string' && UNSAFE_PROPS[k]) {
+    // Hide prototype-related properties from 'in' operator
+    if (isProtoProperty(k)) {
       return false;
     }
     return Reflect.has(o, k);
@@ -291,12 +307,10 @@ export const ObjectHandler: ProxyHandler<ReactiveTarget> = {
     // Fast path for symbols
     if (typeof k === 'symbol') return Reflect.get(o, k, rec);
 
-    // Security: Block access to dangerous properties at runtime
-    // This prevents dynamic property access bypasses like obj[dynamicKey]
-    if (UNSAFE_PROPS[k]) {
-      console.warn('Reflex: Blocked runtime access to unsafe property:', k);
-      return undefined;
-    }
+    // SECURITY: White-list security is now handled by createMembrane()
+    // The membrane wraps objects before they're exposed to expressions,
+    // blocking prototype chain access (constructor, __proto__, etc.)
+    // through its own property + safe methods whitelist approach.
 
     const engine = meta.engine;
     engine.trackDependency(meta, k);
@@ -308,9 +322,13 @@ export const ObjectHandler: ProxyHandler<ReactiveTarget> = {
     const meta = o[META] as ReactiveMeta;
     const engine = meta.engine;
 
-    // Security: Block setting dangerous properties
-    if (typeof k === 'string' && UNSAFE_PROPS[k]) {
-      throw new Error(`Reflex: Cannot set unsafe property '${k}'`);
+    // SECURITY: Block setting prototype-related properties (defense in depth)
+    const kStr = String(k);
+    if (kStr === '__proto__' || kStr === 'constructor' || kStr === 'prototype') {
+      throw new Error(
+        `Reflex Security: Cannot set property "${kStr}". ` +
+        `This could lead to prototype pollution attacks.`
+      );
     }
 
     const raw = engine.toRaw(v);
@@ -362,10 +380,13 @@ export const ObjectHandler: ProxyHandler<ReactiveTarget> = {
 
   // CRITICAL SECURITY FIX: Prevent sandbox escape via Object.defineProperty
   // Without this trap, Object.defineProperty(proxy, 'constructor', {...}) bypasses
-  // the 'set' trap's UNSAFE_PROPS check, allowing prototype pollution
+  // the 'set' trap check, allowing prototype pollution
   defineProperty(o, k, desc) {
-    if (typeof k === 'string' && UNSAFE_PROPS[k]) {
-      throw new Error(`Reflex: Cannot define unsafe property '${k}'`);
+    if (isProtoProperty(k)) {
+      throw new Error(
+        `Reflex Security: Cannot define property "${String(k)}". ` +
+        `This could lead to prototype pollution attacks.`
+      );
     }
     const meta = o[META] as ReactiveMeta;
     const res = Reflect.defineProperty(o, k, desc);
@@ -401,10 +422,10 @@ export const ObjectHandler: ProxyHandler<ReactiveTarget> = {
 
   // CRITICAL SECURITY FIX #8: Inconsistent Sandbox Visibility
   // The 'has' trap ensures ("__proto__" in obj) returns false consistently
-  // Without this, ("__proto__" in obj) returns true but obj.__proto__ returns undefined
+  // With white-list security, we hide prototype-related properties
   has(o, k) {
-    // Block unsafe properties from 'in' operator
-    if (typeof k === 'string' && UNSAFE_PROPS[k]) {
+    // Hide prototype-related properties from 'in' operator
+    if (isProtoProperty(k)) {
       return false;
     }
     return Reflect.has(o, k);
@@ -422,11 +443,7 @@ export const MapHandler: ProxyHandler<Map<any, any>> = {
       return Reflect.get(o, k, rec);
     }
 
-    // Security: Block access to dangerous properties at runtime
-    if (typeof k === 'string' && UNSAFE_PROPS[k]) {
-      console.warn('Reflex: Blocked runtime access to unsafe property:', k);
-      return undefined;
-    }
+    // SECURITY: White-list security is now handled by createMembrane()
 
     const engine = meta.engine;
 
@@ -460,11 +477,7 @@ export const SetHandler: ProxyHandler<Set<any>> = {
       return Reflect.get(o, k, rec);
     }
 
-    // Security: Block access to dangerous properties at runtime
-    if (typeof k === 'string' && UNSAFE_PROPS[k]) {
-      console.warn('Reflex: Blocked runtime access to unsafe property:', k);
-      return undefined;
-    }
+    // SECURITY: White-list security is now handled by createMembrane()
 
     const engine = meta.engine;
 

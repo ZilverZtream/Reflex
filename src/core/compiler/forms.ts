@@ -4,7 +4,6 @@
  * Two-way binding with m-model directive.
  */
 
-import { UNSAFE_PROPS } from '../symbols.js';
 import { ScopeContainer } from '../../csp/SafeExprParser.js';
 import { SafeHTML } from '../safe-html.js';
 import {
@@ -12,6 +11,19 @@ import {
   getFlatScopeValue,
 } from '../scope-registry.js';
 import { getRawValue, parsePath } from './utils.js';
+
+// SECURITY: Prototype-related properties that should be blocked when setting
+// These properties could lead to prototype pollution attacks if allowed
+const PROTO_PROPS = Object.assign(Object.create(null), {
+  constructor: 1,
+  '__proto__': 1,
+  prototype: 1
+});
+
+// Helper to check if a property is prototype-related
+const isProtoProperty = (k: string): boolean => {
+  return PROTO_PROPS[k] === 1;
+};
 
 /**
  * FormsMixin for Reflex class.
@@ -509,7 +521,7 @@ export const FormsMixin = {
       }
 
       // Security: prevent prototype pollution
-      if (UNSAFE_PROPS[endSegment.key]) {
+      if (isProtoProperty(endSegment.key)) {
         console.warn('Reflex: Blocked attempt to set unsafe property:', endSegment.key);
         return;
       }
@@ -546,7 +558,7 @@ export const FormsMixin = {
           }
         }
 
-        if (UNSAFE_PROPS[key]) {
+        if (isProtoProperty(key)) {
           console.warn('Reflex: Blocked attempt to traverse unsafe property:', key);
           return;
         }
@@ -597,7 +609,7 @@ export const FormsMixin = {
       // The initial check at line 3128 only validates the raw expression string.
       // For dynamic keys (e.g., m-model="data[dynamicKey]"), we must also validate
       // the evaluated value to prevent prototype pollution via runtime-controlled keys.
-      if (UNSAFE_PROPS[finalKey]) {
+      if (isProtoProperty(finalKey)) {
         console.warn('Reflex: Blocked attempt to set unsafe property:', finalKey);
         return;
       }

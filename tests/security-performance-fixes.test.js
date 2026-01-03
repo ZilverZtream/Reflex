@@ -276,17 +276,19 @@ describe('Security & Performance Fixes - Regression Tests', () => {
     });
   });
 
-  // Test #10: Blacklist Probing
-  describe('Fix #10: SafeExprParser Blacklist Probing', () => {
-    it('throws error on unsafe property check', () => {
+  // Test #10: White-List Property Check (replaces blacklist probing)
+  describe('Fix #10: White-List Property Check', () => {
+    it('returns false for prototype properties (white-list model)', () => {
       const app = new Reflex({}, { cspSafe: true });
       app.configure({ parser: new SafeExprParser() });
       const div = document.createElement('div');
       div.innerHTML = '<div>{{ "constructor" in {} }}</div>';
       document.body.appendChild(div);
+      app.mount(div);
 
-      // Should throw error, not just return false
-      expect(() => app.mount(div)).toThrow(/unsafe property/);
+      // With white-list model, 'in' operator uses hasOwnProperty
+      // So "constructor" in {} returns false (it's not an own property)
+      expect(div.textContent).toBe('false');
       div.remove();
     });
 

@@ -1,6 +1,96 @@
 # Security and Bug Fixes - Comprehensive Audit Response
 
-This document details the fixes applied to address 10 critical security vulnerabilities and bugs identified in a deep security audit of the Reflex framework.
+This document details the fixes applied to address critical security vulnerabilities and bugs identified in security audits of the Reflex framework.
+
+## Major Security Upgrade: White-List Only Security Model (SEC-2025-001)
+
+**Status:** IMPLEMENTED
+**Priority:** Critical
+
+### The Problem with Blacklists
+
+The original security model relied on blacklists to block dangerous properties:
+- `UNSAFE_PROPS`: Listed dangerous properties like `constructor`, `__proto__`
+- `DANGEROUS_GLOBALS`: Listed dangerous globals like `Reflect`, `Function`
+- `UNSAFE_EXPR_RE`: Regex to catch dangerous patterns
+
+**Blacklist Weaknesses:**
+1. New dangerous properties in JavaScript won't be blocked
+2. Browser extensions and polyfills can add exploitable accessors
+3. Attackers can find creative bypasses (Unicode escapes, string concatenation)
+4. Default action is ALLOW, which is inherently insecure
+
+### The Solution: White-List Only ("Iron Membrane" 2.0)
+
+We replaced the entire blacklist-based security model with a strict white-list approach:
+
+```
+1. ALLOWS: Own data properties (via hasOwnProperty - NOT 'in' operator)
+2. ALLOWS: Safe standard methods (map, filter, etc. from SAFE_METHODS)
+3. ALLOWS: Well-known symbols (iterators, toPrimitive)
+4. DENIES: Everything else
+```
+
+**Why This Is More Secure:**
+- **Default DENY:** Unknown properties return `undefined` instead of being allowed
+- **Future-Proof:** New JavaScript features are blocked until explicitly whitelisted
+- **Implicit Blocking:** `constructor`, `__proto__`, `prototype` are blocked because they're inherited, not own properties
+- **No Bypass Possible:** No regex to bypass, no string concatenation tricks work
+
+### Files Modified
+
+- `src/core/symbols.ts`: Complete rewrite of `createMembrane()` and `createElementMembrane()`
+- `src/core/expr.ts`: Removed `UNSAFE_EXPR_RE` checks, rely on membrane
+- `src/csp/SafeExprParser.ts`: Removed all blacklist logic, implemented white-list checks
+- `tests/security.test.js`: Updated to test white-list behavior
+
+### Deleted Code
+
+The following blacklist-related code was completely removed:
+
+**From `src/core/symbols.ts`:**
+- `UNSAFE_PROPS` object
+- `DANGEROUS_GLOBALS` object
+- `DANGEROUS_DOM_PROPS` object
+- `UNSAFE_EXPR_RE` regex
+- `normalizeUnicodeEscapes()` function
+
+**From `src/csp/SafeExprParser.ts`:**
+- `DANGEROUS_PROPS` object
+- `UNSAFE_PROPS` object
+- `UNSAFE_OBJECT_METHODS` object
+- `UNSAFE_METHODS` object
+- `isDangerousPropertyPattern()` function
+
+### How It Works
+
+The new `createMembrane()` function:
+
+```typescript
+get(obj, key) {
+  // 1. ALLOW: Well-Known Symbols (Iterators)
+  if (typeof key === 'symbol') {
+    if (key === Symbol.iterator || ...) return Reflect.get(obj, key);
+    return undefined;
+  }
+
+  // 2. ALLOW: Own Data Properties (The User's Data)
+  // MUST use hasOwnProperty, NOT 'in' operator
+  if (Object.prototype.hasOwnProperty.call(obj, keyStr)) {
+    return createMembrane(Reflect.get(obj, key));
+  }
+
+  // 3. ALLOW: Safe Standard Methods
+  if (SAFE_METHODS[keyStr] && typeof obj[key] === 'function') {
+    return wrapMethod(obj[key], obj);
+  }
+
+  // 4. DENY: Everything else
+  return undefined;
+}
+```
+
+---
 
 ## Critical Security Fixes
 
