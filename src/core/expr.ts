@@ -38,7 +38,7 @@
  * at build time instead of runtime.
  */
 
-import { META, RESERVED, ID_RE, createMembrane, createElementMembrane } from './symbols.js';
+import { META, RESERVED, ID_RE, createMembrane, createElementMembrane, createGlobalBarrier } from './symbols.js';
 
 /**
  * Expression cache with LRU (Least Recently Used) eviction strategy.
@@ -238,11 +238,15 @@ export const ExprMixin = {
       // SECURITY NOTE: Cannot use 'use strict' with 'with' statements (SyntaxError)
       // Instead, we rely on the Iron Membrane (createMembrane) for runtime security
       // The membrane blocks dangerous property access ('constructor', '__proto__', etc)
+      //
+      // CRITICAL SECURITY FIX (Issue #1): Global Barrier prevents RCE via global scope escape
+      // Without the barrier: {{ window.location.href = 'evil.com' }} enables RCE
+      // The barrier intercepts global lookups and only allows safe globals (Math, Date, etc.)
       const body = useReturn
-        ? `${magicArgs}with(c||{}){with(s){return(${handlerExp})}}`
-        : `${magicArgs}with(c||{}){with(s){${handlerExp}}}`;
+        ? `${magicArgs}with(_g){with(c||{}){with(s){return(${handlerExp})}}}`
+        : `${magicArgs}with(_g){with(c||{}){with(s){${handlerExp}}}}`;
       try {
-        rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el', body);
+        rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el', '_g', body);
         return this._ec.set(k, (s, c, e, el) => {
           try {
             // CRITICAL SECURITY FIX: Wrap $el in element membrane to prevent sandbox escape
@@ -252,7 +256,8 @@ export const ExprMixin = {
               self._refs,
               self._dispatch.bind(self),
               self.nextTick.bind(self),
-              createElementMembrane(el)
+              createElementMembrane(el),
+              createGlobalBarrier()
             );
           } catch (err) {
             // Membrane security errors - silently return undefined to prevent code execution
@@ -296,12 +301,15 @@ export const ExprMixin = {
       `var ${v}=(c&&(${JSON.stringify(v)} in c))?c.${v}:s.${v};`
     ).join('');
 
-    // CRITICAL SECURITY FIX: Add 'use strict' to prevent 'this' from defaulting to global object
-    // Without strict mode, {{ this.alert(1) }} can access window.alert
-    const body = `"use strict";${magicArgs}${arg}return(${exp});`;
+    // CRITICAL SECURITY FIX (Issue #1): Use Global Barrier instead of 'use strict'
+    // - 'use strict' prevented {{ this.alert(1) }} but couldn't prevent {{ window.alert(1) }}
+    // - Global Barrier wraps execution in with(_g) to intercept ALL global lookups
+    // - Only allows safe globals (Math, Date, etc.) - blocks window, process, fetch, etc.
+    // NOTE: Cannot use 'use strict' with 'with' statements (SyntaxError)
+    const body = `${magicArgs}${arg}with(_g){return(${exp});}`;
 
     try {
-      rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el', body);
+      rawFn = new Function('s', 'c', '$event', '_r', '_d', '_n', '_el', '_g', body);
       // Wrap to inject magic properties and apply security membrane
       return this._ec.set(k, (s, c, e, el) => {
         try {
@@ -312,7 +320,8 @@ export const ExprMixin = {
             self._refs,
             self._dispatch.bind(self),
             self.nextTick.bind(self),
-            createElementMembrane(el)
+            createElementMembrane(el),
+            createGlobalBarrier()
           );
         } catch (err) {
           // Membrane security errors - silently return undefined to prevent code execution

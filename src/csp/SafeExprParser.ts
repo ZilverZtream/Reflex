@@ -273,11 +273,15 @@ export class ScopeContainer {
 }
 
 // Safe globals accessible in expressions (WHITE-LIST)
+// CRITICAL FIX (Issue #6): Align with Standard Mode globals for consistency
 const SAFE_GLOBALS: { [key: string]: any } = {
   __proto__: null,
   Math, Date, Array, Number, String, Boolean, JSON,
+  Promise, Symbol, BigInt, Map, Set, WeakMap, WeakSet, RegExp, Error,
   parseInt, parseFloat, isNaN, isFinite, NaN, Infinity,
-  true: true, false: false, null: null, undefined: undefined
+  true: true, false: false, null: null, undefined: undefined,
+  // Console for logging (matches Standard Mode)
+  console: typeof console !== 'undefined' ? console : undefined
 };
 
 // Create a safe Object wrapper that only exposes safe methods
@@ -326,11 +330,23 @@ const SAFE_METHODS: { [key: string]: 1 } = {
   setUTCFullYear: 1, setUTCMonth: 1, setUTCDate: 1,
   setUTCHours: 1, setUTCMinutes: 1, setUTCSeconds: 1, setUTCMilliseconds: 1,
   // Map/Set methods
-  keys: 1, values: 1, entries: 1, get: 1, has: 1, set: 1, add: 1, delete: 1, clear: 1, size: 1,
+  keys: 1, values: 1, entries: 1, get: 1, has: 1, set: 1, add: 1, delete: 1, clear: 1,
+  // Promise methods (CRITICAL FIX: Issue #5 - Promises were unusable)
+  then: 1, catch: 1, finally: 1,
   // RegExp methods
   test: 1, exec: 1,
   // Length property
   length: 1
+} as any;
+
+/**
+ * Safe Accessor Properties - getters/setters that are safe to access.
+ * These are typically on prototypes and return primitive values or safe objects.
+ */
+const SAFE_ACCESSORS: { [key: string]: 1 } = {
+  __proto__: null,
+  // Map/Set size property (getter on prototype)
+  size: 1
 } as any;
 
 /**
@@ -846,9 +862,11 @@ export class SafeExprParser {
           ? this._evaluate(node.property, state, context, $event, $el, reflex)
           : node.property;
 
-        // WHITE-LIST ONLY: Check if property is own or safe method
+        // WHITE-LIST ONLY: Check if property is own, safe method, or safe accessor
         // This blocks prototype chain traversal implicitly
-        if (!Object.prototype.hasOwnProperty.call(obj, prop) && !SAFE_METHODS[prop]) {
+        if (!Object.prototype.hasOwnProperty.call(obj, prop) &&
+            !SAFE_METHODS[prop] &&
+            !SAFE_ACCESSORS[prop]) {
           return undefined;
         }
 
@@ -866,8 +884,10 @@ export class SafeExprParser {
             ? this._evaluate(node.callee.property, state, context, $event, $el, reflex)
             : node.callee.property;
 
-          // WHITE-LIST ONLY: Only allow own properties or safe methods
-          if (!Object.prototype.hasOwnProperty.call(thisArg, prop) && !SAFE_METHODS[prop]) {
+          // WHITE-LIST ONLY: Only allow own properties, safe methods, or safe accessors
+          if (!Object.prototype.hasOwnProperty.call(thisArg, prop) &&
+              !SAFE_METHODS[prop] &&
+              !SAFE_ACCESSORS[prop]) {
             return undefined;
           }
 
@@ -964,9 +984,11 @@ export class SafeExprParser {
   private _wrapResult(result: any): any {
     return new Proxy(result, {
       get(target, key) {
-        // WHITE-LIST: Only allow own properties or safe methods
+        // WHITE-LIST: Only allow own properties, safe methods, or safe accessors
         if (typeof key === 'string') {
-          if (!Object.prototype.hasOwnProperty.call(target, key) && !SAFE_METHODS[key]) {
+          if (!Object.prototype.hasOwnProperty.call(target, key) &&
+              !SAFE_METHODS[key] &&
+              !SAFE_ACCESSORS[key]) {
             return undefined;
           }
         }
