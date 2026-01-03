@@ -273,14 +273,14 @@ export class ScopeContainer {
 }
 
 // Safe globals accessible in expressions (WHITE-LIST)
-// CRITICAL FIX (Issue #6): Align with Standard Mode globals for consistency
+// CRITICAL FIX (Issue #6): Safe globals for expression evaluation
 const SAFE_GLOBALS: { [key: string]: any } = {
   __proto__: null,
   Math, Date, Array, Number, String, Boolean, JSON,
   Promise, Symbol, BigInt, Map, Set, WeakMap, WeakSet, RegExp, Error,
   parseInt, parseFloat, isNaN, isFinite, NaN, Infinity,
   true: true, false: false, null: null, undefined: undefined,
-  // Console for logging (matches Standard Mode)
+  // Console for logging (safe, read-only)
   console: typeof console !== 'undefined' ? console : undefined
 };
 
@@ -846,7 +846,7 @@ export class SafeExprParser {
         if (name === '$dispatch') return reflex._dispatch.bind(reflex);
         if (name === '$nextTick') return reflex.nextTick.bind(reflex);
 
-        // Context Lookup (FlatScope or ScopeContainer)
+        // Context Lookup (FlatScope, ScopeContainer, or Reactive Proxy)
         if (context) {
           if (isFlatScope(context)) {
             const result = getFlatScopeValue(context, name);
@@ -867,12 +867,32 @@ export class SafeExprParser {
               }
               return value;
             }
+          } else if (context[META] || reflex._mf.get(context)) {
+            // CRITICAL FIX (Audit Issue #5): Support reactive proxies as context
+            // Components create scopes via this._r(scopeRaw) which returns a reactive proxy.
+            // Previously, this would throw a security error because reactive proxies
+            // are neither FlatScope nor ScopeContainer. Now we detect reactive proxies
+            // by checking for META symbol and look up properties directly on the proxy.
+            // Security is maintained because:
+            // 1. The reactive proxy's get trap enforces own-property checks
+            // 2. Prototype-related properties are blocked by the proxy handlers
+            if (Object.prototype.hasOwnProperty.call(context, name)) {
+              const value = context[name];
+              if (value !== null && typeof value === 'object') {
+                const meta = value[META] || reflex._mf.get(value);
+                if (meta) reflex.trackDependency(meta, name);
+              }
+              // Track dependency on the context itself for reactivity
+              const contextMeta = context[META] || reflex._mf.get(context);
+              if (contextMeta) reflex.trackDependency(contextMeta, name);
+              return value;
+            }
           } else if (typeof context === 'object' && Object.keys(context).length === 0) {
             // Allow empty plain objects as equivalent to no context
           } else {
             throw new TypeError(
-              `Reflex Security: BREAKING CHANGE - Context must be a FlatScope or ScopeContainer instance. ` +
-              `Plain objects are no longer allowed for security reasons.`
+              `Reflex Security: BREAKING CHANGE - Context must be a FlatScope, ScopeContainer, ` +
+              `or reactive proxy. Plain objects are no longer allowed for security reasons.`
             );
           }
         }
@@ -1036,6 +1056,12 @@ export class SafeExprParser {
               if (context.has(name)) {
                 target = context;
               }
+            } else if (context[META] || reflex._mf.get(context)) {
+              // CRITICAL FIX (Audit Issue #5): Support reactive proxies as context
+              // Components create scopes via this._r(scopeRaw) which returns a reactive proxy
+              if (Object.prototype.hasOwnProperty.call(context, name)) {
+                target = context;
+              }
             }
           }
           if (!target && state && Object.prototype.hasOwnProperty.call(state, name)) {
@@ -1124,6 +1150,12 @@ export class SafeExprParser {
               }
             } else if (ScopeContainer.isScopeContainer(context)) {
               if (context.has(name)) {
+                target = context;
+              }
+            } else if (context[META] || reflex._mf.get(context)) {
+              // CRITICAL FIX (Audit Issue #5): Support reactive proxies as context
+              // Components create scopes via this._r(scopeRaw) which returns a reactive proxy
+              if (Object.prototype.hasOwnProperty.call(context, name)) {
                 target = context;
               }
             }
