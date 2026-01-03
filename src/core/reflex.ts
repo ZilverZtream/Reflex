@@ -1053,8 +1053,31 @@ export class Reflex {
    */
   _comp(el: Element, tag: string, o: any): Element {
     const def = this._cp.get(tag);
-    // TASK 6: Pass _nodeState WeakMap to preserve node state
-    const inst = cloneNodeWithProps(def._t, true, this._nodeState) as Element;
+
+    // CRITICAL FIX (Audit Issue #1): Handle fragment components (multi-root templates)
+    // If _t is a DocumentFragment, we need to clone all children and handle them properly
+    // This mirrors the fix in _compNoRecurse for consistency
+    let inst: Element | DocumentFragment;
+    let isFragment = false;
+    const fragmentNodes: Element[] = [];
+
+    if (def._t instanceof DocumentFragment) {
+      // Fragment component - clone and collect all children
+      isFragment = true;
+      // TASK 6: Pass _nodeState WeakMap to preserve node state
+      const cloned = cloneNodeWithProps(def._t, true, this._nodeState) as DocumentFragment;
+      // Collect all element children (ignore text nodes for structural purposes)
+      Array.from(cloned.children).forEach(child => {
+        fragmentNodes.push(child as Element);
+      });
+      // Use the first element as the primary instance for compatibility
+      inst = fragmentNodes[0] || cloned;
+    } else {
+      // Single element component (existing behavior)
+      // TASK 6: Pass _nodeState WeakMap to preserve node state
+      inst = cloneNodeWithProps(def._t, true, this._nodeState) as Element;
+    }
+
     const props = this._r({});
     const propDefs = [];
     const hostHandlers = Object.create(null);
@@ -1087,7 +1110,13 @@ export class Reflex {
     }
 
     const emit = (event, detail) => {
-      inst.dispatchEvent(new CustomEvent(event, { detail, bubbles: true }));
+      // CRITICAL FIX (Audit Issue #1): For fragments, dispatch on first element child
+      // DocumentFragment.dispatchEvent would dispatch on detached node after replaceWith
+      // so we must dispatch on the first actual element in the DOM
+      const eventTarget = isFragment && fragmentNodes.length > 0
+        ? fragmentNodes[0]
+        : inst;
+      eventTarget.dispatchEvent(new CustomEvent(event, { detail, bubbles: true }));
       const h = hostHandlers[event];
       if (h) h(this.s, o, detail);
     };
@@ -1156,28 +1185,52 @@ export class Reflex {
     if (parent) {
       parent.insertBefore(componentAnchor, el);
     }
-    el.replaceWith(inst);
+
+    // CRITICAL FIX (Audit Issue #1): Handle fragment insertion properly
+    // For fragments, insert all children into DOM (not the DocumentFragment itself)
+    if (isFragment && fragmentNodes.length > 0) {
+      // Insert all fragment nodes in order, replacing the original element
+      el.replaceWith(...fragmentNodes);
+    } else {
+      el.replaceWith(inst);
+    }
 
     // Project slot content into <slot> elements
     // The slotted content uses the PARENT scope (o), not the component scope
+    // CRITICAL FIX (Audit Issue #1): For fragments, search across all fragment nodes
     if (slotContent.length > 0) {
-      const slots = inst.querySelectorAll('slot');
-      if (slots.length > 0) {
+      // Collect all slot elements from component nodes
+      const allSlots: Element[] = [];
+      if (isFragment) {
+        for (const node of fragmentNodes) {
+          // Check if node itself is a slot
+          if (node.tagName?.toLowerCase() === 'slot') {
+            allSlots.push(node);
+          }
+          // Also check descendants
+          allSlots.push(...Array.from(node.querySelectorAll('slot')));
+        }
+      } else {
+        allSlots.push(...Array.from((inst as Element).querySelectorAll('slot')));
+      }
+
+      if (allSlots.length > 0) {
         // Find default slot (no name attribute) or first slot
-        const defaultSlot = Array.from(slots).find(s => !s.hasAttribute('name')) || slots[0];
+        const defaultSlot = allSlots.find(s => !s.hasAttribute('name')) || allSlots[0];
         if (defaultSlot) {
           // Move slot content into the slot location
-          const parent = defaultSlot.parentNode;
+          const slotParent = defaultSlot.parentNode;
           for (const node of slotContent) {
-            parent.insertBefore(node, defaultSlot);
+            slotParent.insertBefore(node, defaultSlot);
           }
           // Remove the <slot> placeholder
           defaultSlot.remove();
         }
       } else {
-        // No <slot> in template - append content to component root
+        // No <slot> in template - append content to first fragment node or component root
+        const appendTarget = isFragment && fragmentNodes.length > 0 ? fragmentNodes[0] : inst;
         for (const node of slotContent) {
-          inst.appendChild(node);
+          appendTarget.appendChild(node);
         }
       }
 
@@ -1220,10 +1273,23 @@ export class Reflex {
       this._reg(componentAnchor, e.kill);
     }
 
-    this._bnd(inst, scope);
-    this._w(inst, scope);
+    // CRITICAL FIX (Audit Issue #1): For fragments, bind and walk EACH node
+    // Previously only walked `inst`, which for fragments is an empty DocumentFragment after replaceWith
+    // Now we iterate over all fragment nodes to ensure all bindings and directives are processed
+    if (isFragment && fragmentNodes.length > 0) {
+      for (const node of fragmentNodes) {
+        // Register scope for each fragment node
+        this._scopeMap.set(node, scope);
+        this._bnd(node, scope);
+        this._w(node, scope);
+      }
+    } else {
+      this._bnd(inst as Element, scope);
+      this._w(inst, scope);
+    }
 
-    return inst;
+    // Return the first fragment node or inst for compatibility
+    return (isFragment && fragmentNodes.length > 0 ? fragmentNodes[0] : inst) as Element;
   }
 
   /**
