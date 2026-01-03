@@ -264,8 +264,8 @@ export const DOMRenderer: IRendererAdapter = {
       'feGaussianBlur', 'feImage', 'feMerge', 'feMergeNode', 'feMorphology',
       'feOffset', 'feSpecularLighting', 'feTile', 'feTurbulence',
       'feDistantLight', 'fePointLight', 'feSpotLight',
-      // Metadata
-      'desc', 'title', 'metadata',
+      // Metadata (NOTE: 'title' moved to ambiguousTags - exists in both HTML and SVG)
+      'desc', 'metadata',
       // Scripting - NOTE: Removed from main list, handled as ambiguous tags
       // Additional elements
       'view', 'cursor'
@@ -273,7 +273,22 @@ export const DOMRenderer: IRendererAdapter = {
 
     // Ambiguous tags that exist in both HTML and SVG
     // Must check parent context to determine correct namespace
-    const ambiguousTags = new Set(['a', 'script', 'style']);
+    //
+    // CRITICAL FIX (SEC-2026-003 Issue #4): Added 'title' to ambiguous tags
+    //
+    // VULNERABILITY: <title> was only in svgTags, causing createElement('title')
+    // to ALWAYS return an SVGTitleElement, even when used for the HTML page title.
+    //
+    // Impact:
+    //   - Appending SVGTitleElement to <head> is invalid HTML
+    //   - Breaks SEO (search engines expect HTMLTitleElement)
+    //   - Screen readers may not announce page title correctly
+    //   - document.title getter/setter may not work as expected
+    //
+    // FIX: Move 'title' to ambiguousTags so it checks parent namespace:
+    //   - Inside <svg> → creates SVGTitleElement (for SVG accessible name)
+    //   - Inside <head> or other HTML → creates HTMLTitleElement
+    const ambiguousTags = new Set(['a', 'script', 'style', 'title']);
 
     const tag = tagName.toLowerCase();
 
@@ -381,54 +396,53 @@ export const DOMRenderer: IRendererAdapter = {
     node.nodeValue = text;
   },
 
-  setInnerHTML(node: Element, html: SafeHTML | string): void {
-    // SECURITY: Check for dangerous patterns in raw strings
+  setInnerHTML(node: Element, html: SafeHTML): void {
+    // CRITICAL SECURITY FIX (SEC-2026-003 Issue #2): Removed String Support Entirely
+    //
+    // VULNERABILITY: The previous implementation accepted raw strings with a regex blacklist.
+    // Regex blacklists are fundamentally bypassable using HTML entity encoding:
+    //   - Input: '<button formaction="&#106;avascript:alert(1)">X</button>'
+    //   - Regex /javascript:/i does NOT match "&#106;avascript:"
+    //   - Browser decodes &#106; to 'j' BEFORE executing, triggering XSS
+    //
+    // Other bypass vectors that regex cannot reliably block:
+    //   - Unicode normalization: "ｊａｖａｓｃｒｉｐｔ:" (fullwidth chars)
+    //   - Case variations: "JaVaScRiPt:" (already handled, but shows the pattern)
+    //   - Nested encoding: "&#x6A;avascript:" (hex entities)
+    //   - NULL byte injection: "java\0script:"
+    //   - Protocol-relative: "//evil.com/xss.js"
+    //   - SVG/MathML context switching
+    //
+    // SOLUTION: The Iron Membrane security model MUST NOT rely on regex blacklists.
+    // Only SafeHTML instances (created via DOMPurify sanitization) are accepted.
+    // This is a BREAKING CHANGE but is required for enterprise security compliance.
+    //
+    // MIGRATION:
+    //   1. Install DOMPurify: npm install dompurify @types/dompurify
+    //   2. Configure once: SafeHTML.configureSanitizer(DOMPurify);
+    //   3. Sanitize input: renderer.setInnerHTML(el, SafeHTML.sanitize(userInput));
+    //   4. For trusted static HTML: SafeHTML.unsafe(trustedStaticString)
+    //
+    // Type guard: Reject strings at runtime (TypeScript catch at compile-time)
     if (typeof html === 'string') {
-      // Check for dangerous XSS patterns
-      const dangerousPatterns = [
-        /<script[^>]*>[\s\S]*?<\/script>/i,  // Script tags
-        /javascript:/i,                       // javascript: protocol
-        /data:text\/html/i,                  // data:text/html URIs (can execute scripts)
-        /on\w+\s*=/i,                        // Event handlers (onclick, onerror, etc)
-        /<object[^>]*>/i,                    // Object tags
-        /<embed[^>]*>/i,                     // Embed tags
-        /<iframe[^>]*>/i                     // Iframe tags
-      ];
-
-      for (const pattern of dangerousPatterns) {
-        if (pattern.test(html)) {
-          throw new Error(
-            `SECURITY ERROR: Dangerous pattern detected in HTML content.\n` +
-            `setInnerHTML() requires SafeHTML instances for untrusted content.\n\n` +
-            `Migration:\n` +
-            `  1. Install: npm install dompurify @types/dompurify\n` +
-            `  2. Configure: SafeHTML.configureSanitizer(DOMPurify);\n` +
-            `  3. Use: renderer.setInnerHTML(el, SafeHTML.sanitize(html));\n\n` +
-            `For static trusted strings: SafeHTML.unsafe(staticString)`
-          );
-        }
-      }
-
-      // Warn in development mode about using raw strings
-      if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
-        console.warn(
-          'Reflex Security Warning: Using setInnerHTML with raw string.\n' +
-          'Consider using DOMPurify for better XSS protection:\n' +
-          '  SafeHTML.configureSanitizer(DOMPurify);\n' +
-          '  setInnerHTML(el, SafeHTML.sanitize(html));'
-        );
-      }
-
-      node.innerHTML = html;
-      return;
+      throw new TypeError(
+        `Reflex Security: setInnerHTML() no longer accepts raw strings.\n` +
+        `Received: string\n\n` +
+        `BREAKING CHANGE (SEC-2026-003): Raw strings are rejected to prevent XSS.\n` +
+        `The previous regex-based blacklist was bypassable via HTML entity encoding.\n\n` +
+        `Migration:\n` +
+        `  1. Install: npm install dompurify @types/dompurify\n` +
+        `  2. Configure: SafeHTML.configureSanitizer(DOMPurify);\n` +
+        `  3. Use: renderer.setInnerHTML(el, SafeHTML.sanitize(html));\n\n` +
+        `For static trusted strings: SafeHTML.unsafe(staticString)`
+      );
     }
 
-    // BREAKING CHANGE: Only SafeHTML accepted
+    // Validate SafeHTML instance
     if (!SafeHTML.isSafeHTML(html)) {
       throw new TypeError(
         `Reflex Security: setInnerHTML() requires SafeHTML instance.\n` +
         `Received: ${typeof html}\n\n` +
-        `BREAKING CHANGE: Raw strings are no longer accepted.\n\n` +
         `Migration:\n` +
         `  1. Install: npm install dompurify @types/dompurify\n` +
         `  2. Configure: SafeHTML.configureSanitizer(DOMPurify);\n` +

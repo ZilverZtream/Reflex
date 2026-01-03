@@ -125,19 +125,38 @@ function parseHTML(html: string): VNode[] {
             break;
           }
 
-          // Parse attribute - handle escaped quotes in values
+          // Parse attribute values according to HTML specification
+          // CRITICAL SECURITY FIX (SEC-2026-003 Issue #3): Removed Backslash Escape Handling
+          //
+          // VULNERABILITY: The previous implementation supported backslash escapes in attributes:
+          //   - Regex: (?:[^"\\]|\\.)*  (matches backslash-escaped chars)
+          //   - Code: attrValue.replace(/\\"/g, '"')  (unescapes backslashes)
+          //
+          // This is NON-STANDARD. HTML does NOT support backslash escaping in attributes.
+          // Only HTML entities (&quot;, &lt;, etc.) are valid escape sequences.
+          //
+          // HYDRATION MISMATCH ATTACK:
+          //   Input: <div data-val="foo\"bar">
+          //   Browser (correct): data-val = "foo\" (literal backslash, then bar"> breaks structure)
+          //   Virtual (previous): data-val = "foo"bar" (treated as escape sequence)
+          //
+          // This divergence could enable XSS where the server (Virtual) considers content safe,
+          // but the browser parses it differently, allowing script injection.
+          //
+          // FIX: Parse attributes strictly according to HTML spec:
+          //   - Quoted values end at the first unescaped quote of the same type
+          //   - Backslashes have NO special meaning in HTML attributes
+          //   - Only HTML entities are decoded (handled separately by entity decoding)
+          //
           // CRITICAL FIX: Use ([^\s/>]+) for unquoted values instead of ([^\s>]+)
           // Previously, unquoted values consumed the trailing slash in self-closing tags
           // e.g., <div val=1/> would capture "1/" as the value, breaking the /> detection
-          const attrMatch = html.slice(pos).match(/^([^\s=/>]+)(?:\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|([^\s/>]+)))?/);
+          const attrMatch = html.slice(pos).match(/^([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s/>]+)))?/);
           if (attrMatch) {
             const attrName = attrMatch[1];
-            // Unescape quotes in attribute values
-            let attrValue = attrMatch[2] ?? attrMatch[3] ?? attrMatch[4] ?? '';
-            if (attrMatch[2] !== undefined || attrMatch[3] !== undefined) {
-              // Unescape common escape sequences in quoted attributes
-              attrValue = attrValue.replace(/\\"/g, '"').replace(/\\'/g, "'").replace(/\\\\/g, '\\');
-            }
+            // Use raw attribute value - NO backslash unescaping (HTML spec compliant)
+            // HTML entities will be decoded separately if needed
+            const attrValue = attrMatch[2] ?? attrMatch[3] ?? attrMatch[4] ?? '';
             attrs.push([attrName, attrValue]);
             pos += attrMatch[0].length;
           } else {

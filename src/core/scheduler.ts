@@ -71,6 +71,20 @@ const MAX_FLUSH_ITERATIONS = 100;
 // 5ms leaves ~11ms for browser rendering in a 60fps frame (16.67ms total)
 const YIELD_THRESHOLD = 5;
 
+// CRITICAL FIX (SEC-2026-003 Issue #5): Maximum TOTAL batch time in milliseconds
+// This prevents slow infinite loops that yield on every iteration from running forever.
+//
+// VULNERABILITY: The previous fix reset _flushIterations on yield to prevent false positives
+// on large renders. However, this allowed a malicious/buggy job that re-queues itself every
+// 6ms to run indefinitely, effectively creating a DoS that never triggers the iteration limit.
+//
+// FIX: Implement a timestamp-based deadline for the ENTIRE batch (across all yields).
+// If the total time exceeds MAX_BATCH_TIME, we abort the batch as a likely infinite loop.
+//
+// Value: 10000ms (10 seconds) is long enough for legitimate large renders but short enough
+// to catch infinite loops before they cause significant UX degradation.
+const MAX_BATCH_TIME = 10000;
+
 type EffectRunner = (() => any) & {
   f: number;
   d: Array<Set<EffectRunner>>;
@@ -249,6 +263,13 @@ export const SchedulerMixin = {
     // to bypass the MAX_FLUSH_ITERATIONS safety check.
     if (!this._flushIterations) this._flushIterations = 0;
 
+    // CRITICAL FIX (SEC-2026-003 Issue #5): Track batch start time across yields
+    // If _batchStartTime is not set, this is the first flushQueue call for this batch
+    // Store the timestamp so we can enforce MAX_BATCH_TIME across all yields
+    if (!this._batchStartTime) {
+      this._batchStartTime = start;
+    }
+
     // Track errors for reporting to nextTick callers
     const errors: Error[] = [];
 
@@ -276,7 +297,39 @@ export const SchedulerMixin = {
         this._handleError(error, null);
         this._p = false;
         this._flushIterations = 0; // Reset counter after error
+        this._batchStartTime = 0; // Reset batch timer
         return { success: false, errors: [error] }; // Signal fatal error to callers
+      }
+
+      // CRITICAL FIX (SEC-2026-003 Issue #5): Check total batch time deadline
+      // This catches slow infinite loops that yield on each iteration, bypassing
+      // the iteration counter which resets on yield.
+      //
+      // VULNERABILITY: A job that takes >5ms and re-queues itself will:
+      //   1. Execute for 5ms, then yield (time slicing)
+      //   2. Reset _flushIterations to 0 (old "fix" for false positives)
+      //   3. Run again next tick, repeat forever
+      //
+      // FIX: Track the TOTAL time since the batch started. If we exceed MAX_BATCH_TIME,
+      // this is almost certainly an infinite loop (legitimate large renders complete faster).
+      const totalBatchTime = start - this._batchStartTime;
+      if (totalBatchTime > MAX_BATCH_TIME) {
+        // Clear remaining jobs to prevent further issues
+        q.length = 0;
+        const otherQ = this._qf ? this._qb : this._q;
+        otherQ.length = 0;
+
+        const error = new Error(
+          `Reflex: Maximum batch time exceeded (${MAX_BATCH_TIME}ms). ` +
+          'This is likely caused by a slow infinite loop where a job re-queues itself. ' +
+          'Check for watchers or effects that modify their own dependencies with expensive operations.'
+        );
+        console.error(error);
+        this._handleError(error, null);
+        this._p = false;
+        this._flushIterations = 0;
+        this._batchStartTime = 0; // Reset batch timer
+        return { success: false, errors: [error] };
       }
 
       // Process jobs one by one with time slicing
@@ -367,6 +420,7 @@ export const SchedulerMixin = {
     // All jobs processed
     this._p = false;
     this._flushIterations = 0; // Reset counter after successful flush
+    this._batchStartTime = 0; // Reset batch timer for next batch
     return { success: true, errors: errors.length > 0 ? errors : undefined };
   },
 
