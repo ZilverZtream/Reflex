@@ -236,17 +236,59 @@ export const ArrayHandler: ProxyHandler<any[]> = {
     }
     const meta = (o as ReactiveTarget)[META] as ReactiveMeta;
     const engine = meta.engine;
+
+    // CRITICAL FIX (Audit Issue #1): Array Truncation via defineProperty
+    // Object.defineProperty(arr, 'length', { value: 0 }) is a common pattern to clear arrays
+    // Without this check, watchers on deleted indices are never notified, causing stale UI
+    // Port the array truncation logic from the 'set' trap to handle this case
+    const oldLength = k === 'length' ? o.length : -1;
+    const newLength = k === 'length' && 'value' in desc ? Number(desc.value) : -1;
+
     const res = Reflect.defineProperty(o, k, desc);
-    if (res) {
-      // CRITICAL FIX: Version Counter - Only increment if not in a batch
-      // Same logic as set handler: avoid double increment when in batched operations
-      if (engine._b === 0) {
-        meta.v++; // Increment version on mutation
+    if (!res) return false;
+
+    // CRITICAL FIX: Version Counter - Only increment if not in a batch
+    // Same logic as set handler: avoid double increment when in batched operations
+    if (engine._b === 0) {
+      meta.v++; // Increment version on mutation
+    }
+
+    // CRITICAL FIX (Audit Issue #1): Array Truncation Batch Notifications
+    // When truncating arrays via defineProperty (e.g., Object.defineProperty(arr, 'length', { value: 0 })),
+    // we must trigger watchers on all deleted indices, not just 'length' and ITERATE
+    if (k === 'length' && newLength < oldLength && newLength >= 0) {
+      // Use batching to prevent UI freeze on large array truncation
+      engine._b++;
+      try {
+        let ks = engine.pendingTriggers.get(meta);
+        if (!ks) engine.pendingTriggers.set(meta, ks = new Set());
+
+        // Queue 'length' and ITERATE triggers
+        ks.add('length');
+        ks.add(ITERATE);
+
+        // CRITICAL: Iterate only over existing dependency keys in meta.d (O(D) not O(N))
+        // This prevents DoS on large arrays by only triggering indices that have active watchers
+        for (const [key, depSet] of meta.d) {
+          // Skip if this key is not a numeric index
+          if (typeof key !== 'string') continue;
+          const idx = Number(key);
+          // Check if this is a numeric array index that was deleted
+          if (Number.isInteger(idx) && idx >= newLength && idx < oldLength && depSet.size > 0) {
+            ks.add(key);
+          }
+        }
+      } finally {
+        if (--engine._b === 0) {
+          try { engine._fpt(); } catch (err) { console.error('Reflex: Error flushing pending triggers:', err); }
+        }
       }
+    } else {
+      // Normal path: trigger specific key change
       engine.triggerEffects(meta, k);
       engine.triggerEffects(meta, ITERATE);
     }
-    return res;
+    return true;
   },
 
   // CRITICAL SECURITY FIX: Prevent prototype pollution via Object.setPrototypeOf
