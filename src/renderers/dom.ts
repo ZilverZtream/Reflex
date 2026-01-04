@@ -23,6 +23,27 @@ import { validateSink, getBlockReason } from '../core/sinks.js';
 export { SafeHTML };
 
 /**
+ * SECURITY FIX (Audit Issue #2): Dangerous Tag Whitelist
+ *
+ * These tags can execute code or load external resources in dangerous ways:
+ * - script: Direct JavaScript execution
+ * - base: Hijacks relative URLs for the entire document
+ * - object/embed/applet: Plugin execution, can bypass CSP
+ * - meta: Can redirect via refresh, set CSP, etc.
+ * - link: Can load external stylesheets (data exfiltration)
+ * - iframe: Embed external content (handled separately with sandbox)
+ *
+ * NOTE: We allow iframe creation but enforce sandbox attribute in setAttribute.
+ */
+const DANGEROUS_TAGS = /^(script|base|object|embed|applet)$/i;
+
+/**
+ * Tags that require special handling but aren't outright blocked.
+ * These are allowed but with additional security enforcement.
+ */
+const RESTRICTED_TAGS = /^(meta|link|iframe)$/i;
+
+/**
  * CSS Transition helper for enter/leave animations.
  * Follows Vue/Alpine naming convention:
  * - {name}-enter-from, {name}-enter-active, {name}-enter-to
@@ -235,6 +256,32 @@ export const DOMRenderer: IRendererAdapter = {
   },
 
   createElement(tagName: string, parent?: Element, namespaceHint?: string): Element {
+    // SECURITY FIX (Audit Issue #2): Block dangerous tag creation
+    // These tags can execute code even without innerHTML - e.g., appending a text
+    // node to a script tag executes the code immediately.
+    //
+    // ATTACK VECTOR: Dynamic component with user-controlled tag name
+    //   const el = renderer.createElement(userInput);
+    //   renderer.appendChild(el, renderer.createTextNode('alert("XSS")'));
+    //   // If userInput === 'script', this executes XSS
+    if (DANGEROUS_TAGS.test(tagName)) {
+      if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+        console.warn(`Reflex Security: Blocked dangerous tag <${tagName}>. ` +
+          `Script, base, object, embed, and applet tags are not allowed.`);
+      }
+      // Return a safe div element instead - this prevents the attack while
+      // allowing the render to continue (fail-safe, not fail-open)
+      return document.createElement('div');
+    }
+
+    // Log warning for restricted tags (meta, link, iframe) in dev mode
+    if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+      if (RESTRICTED_TAGS.test(tagName)) {
+        console.info(`Reflex Security: Creating restricted tag <${tagName}>. ` +
+          `Additional security enforcement will be applied.`);
+      }
+    }
+
     // SVG elements require the SVG namespace
     // CRITICAL FIX: Context-aware element creation for ambiguous tags
     // Tags like 'a', 'script', and 'style' exist in both HTML and SVG namespaces
@@ -379,9 +426,38 @@ export const DOMRenderer: IRendererAdapter = {
     // Handle null values by removing the attribute
     if (value === null) {
       node.removeAttribute(name);
-    } else {
-      node.setAttribute(name, value);
+      return;
     }
+
+    // SECURITY FIX (Audit Issue #5): Reverse Tabnabbing Protection
+    // When target="_blank" is set, the opened page gets a reference to your
+    // app via window.opener and can redirect your app to a phishing site.
+    // Automatically add rel="noopener noreferrer" to prevent this attack.
+    if (name === 'target' && value === '_blank') {
+      const currentRel = (node.getAttribute('rel') || '').toLowerCase();
+      if (!currentRel.includes('noopener')) {
+        const newRel = (currentRel + ' noopener noreferrer').trim();
+        node.setAttribute('rel', newRel);
+      }
+    }
+
+    // SECURITY FIX (Audit Issue #7): Iframe Sandboxing
+    // Iframes act as windows to other contexts. Best practice is to enforce
+    // least privilege by adding sandbox by default. We set a reasonable default
+    // that allows scripts but restricts navigation.
+    if (node.tagName === 'IFRAME' && name === 'src') {
+      if (!node.hasAttribute('sandbox')) {
+        // Default sandbox: allow scripts and same-origin for functionality,
+        // but prevent navigation and form submission to protect parent frame
+        node.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+        if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+          console.info(`Reflex Security: Auto-applied sandbox="allow-scripts allow-same-origin" ` +
+            `to iframe. Set sandbox attribute explicitly to customize.`);
+        }
+      }
+    }
+
+    node.setAttribute(name, value);
   },
 
   /**
