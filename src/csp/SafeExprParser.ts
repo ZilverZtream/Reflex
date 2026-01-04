@@ -1233,15 +1233,30 @@ export class SafeExprParser {
             ? this._evaluate(node.left.property, state, context, $event, $el, reflex, depth + 1)
             : node.left.property;
 
-          // CRITICAL FIX (Audit Issue #3): Enforce whitelist for inherited properties
-          // The previous logic only blocked __proto__/constructor/prototype but allowed
-          // assignment to ANY other inherited property (e.g., toString, valueOf, DOM methods).
-          // This contradicts the strict whitelist used in the 'get' trap.
-          // Now: inherited properties must be in SAFE_DOM_PROPERTIES to allow assignment.
-
           // TRIFECTA PROTOCOL: Sink-Based Security
-          // Use the centralized validateSink for consistent security across
-          // Runtime (Web), Compiled (AOT), and Native (App) targets.
+          // This is THE new standard for security. We rely ONLY on:
+          // 1. Prototype pollution check (always block __proto__, constructor, prototype)
+          // 2. Centralized validateSink for consistent security across
+          //    Runtime (Web), Compiled (AOT), and Native (App) targets.
+          //
+          // CRITICAL FIX: Removed SAFE_DOM_PROPERTIES whitelist enforcement.
+          // The previous whitelist was causing architecture violations:
+          // - Even when validateSink said "Safe", the whitelist would block valid properties
+          // - Properties like `style`, `dataset`, etc. were blocked despite being safe
+          // - This forced developers to use insecure workarounds
+          //
+          // The sink-based approach is superior because it validates the VALUE, not just
+          // the property name. This allows safe values to any property while blocking
+          // dangerous values (like javascript: URLs or XSS payloads).
+
+          // 1. Always block prototype pollution
+          if (typeof prop === 'string') {
+            if (prop === '__proto__' || prop === 'constructor' || prop === 'prototype') {
+              throw new Error(`Reflex Security: Prototype assignment blocked for '${prop}'`);
+            }
+          }
+
+          // 2. Validate through centralized sink security
           if (typeof prop === 'string' && !validateSink(prop, rightValue)) {
             throw new Error(
               `Reflex Security: Assignment to dangerous sink '${prop}' blocked. ` +
@@ -1249,20 +1264,7 @@ export class SafeExprParser {
             );
           }
 
-          if (!Object.prototype.hasOwnProperty.call(obj, prop)) {
-            // For non-own properties, check the whitelist
-            if (typeof prop === 'string') {
-              // Always block dangerous prototype properties
-              if (prop === '__proto__' || prop === 'constructor' || prop === 'prototype') {
-                throw new Error(`Reflex Security: Cannot assign to dangerous property '${prop}'`);
-              }
-              // For inherited properties, only allow if in SAFE_DOM_PROPERTIES whitelist
-              // This aligns assignment behavior with the strict read behavior
-              if (!SAFE_DOM_PROPERTIES[prop]) {
-                throw new Error(`Reflex Security: Cannot assign to non-whitelisted inherited property '${prop}'`);
-              }
-            }
-          }
+          // No whitelist check - sink-based security is the new standard
 
           // Apply assignment operator
           if (node.op === '=') {
