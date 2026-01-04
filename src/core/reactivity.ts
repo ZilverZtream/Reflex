@@ -809,6 +809,10 @@ export const ReactivityMixin = {
           (typeof File !== 'undefined' && unwrapped instanceof File) ||
           (typeof Blob !== 'undefined' && unwrapped instanceof Blob)) {
         seen.set(obj, unwrapped);
+        // CRITICAL FIX (Audit Issue #5): Also map raw version to same result
+        if (obj !== unwrapped) {
+          seen.set(unwrapped, unwrapped);
+        }
         continue;
       }
 
@@ -816,6 +820,11 @@ export const ReactivityMixin = {
       if (Array.isArray(unwrapped)) {
         const result: any[] = [];
         seen.set(obj, result);
+        // CRITICAL FIX (Audit Issue #5): Map both proxy and raw to same clone
+        // This ensures Pass 2 can look up using either the original (proxy) or raw key
+        if (obj !== unwrapped) {
+          seen.set(unwrapped, result);
+        }
         // Queue children for processing
         for (let i = 0; i < unwrapped.length; i++) {
           stack.push(unwrapped[i]);
@@ -823,6 +832,10 @@ export const ReactivityMixin = {
       } else if (unwrapped instanceof Map) {
         const result = new Map();
         seen.set(obj, result);
+        // CRITICAL FIX (Audit Issue #5): Map both proxy and raw to same clone
+        if (obj !== unwrapped) {
+          seen.set(unwrapped, result);
+        }
         // Queue children for processing
         unwrapped.forEach((value, key) => {
           stack.push(key);
@@ -831,6 +844,10 @@ export const ReactivityMixin = {
       } else if (unwrapped instanceof Set) {
         const result = new Set();
         seen.set(obj, result);
+        // CRITICAL FIX (Audit Issue #5): Map both proxy and raw to same clone
+        if (obj !== unwrapped) {
+          seen.set(unwrapped, result);
+        }
         // Queue children for processing
         unwrapped.forEach(value => {
           stack.push(value);
@@ -839,6 +856,10 @@ export const ReactivityMixin = {
         // Plain object
         const result: Record<string, any> = {};
         seen.set(obj, result);
+        // CRITICAL FIX (Audit Issue #5): Map both proxy and raw to same clone
+        if (obj !== unwrapped) {
+          seen.set(unwrapped, result);
+        }
         // Queue children for processing
         for (const key in unwrapped) {
           if (Object.prototype.hasOwnProperty.call(unwrapped, key)) {
@@ -1247,6 +1268,15 @@ export const ReactivityMixin = {
             console.error('Reflex: Error flushing pending triggers:', err);
           }
         }
+      }
+
+      // CRITICAL FIX (Audit Issue #3): Wrap array mutator return values
+      // Methods like pop(), shift(), splice() return raw objects from the raw target.
+      // This creates inconsistency: state.items[0] returns a Proxy, but state.items.pop() returns Raw.
+      // Fix: Wrap the result before returning to maintain reactive consistency.
+      // For splice (returns array), wrap each element. For pop/shift (returns single value), wrap the value.
+      if (res !== null && typeof res === 'object') {
+        return Array.isArray(res) ? res.map(i => self._wrap(i)) : self._wrap(res);
       }
       return res;
     };

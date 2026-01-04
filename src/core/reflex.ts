@@ -642,14 +642,13 @@ export class Reflex {
       // Check for parse errors (DOMParser returns error document on failure)
       const parseError = svgDoc.querySelector('parsererror');
       if (parseError) {
-        console.warn('Reflex: SVG parsing failed:', parseError.textContent);
-        // Fallback to HTML parsing
-        t.innerHTML = template;
-        this._cp.set(name, {
-          _t: t.content.firstElementChild,
-          p: def.props || [],
-          s: def.setup
-        });
+        // CRITICAL FIX (Audit Issue #7): Remove dangerous fallback
+        // Falling back to HTML parsing corrupts SVG structure (creates HTMLUnknownElement)
+        // Fail closed with a clear error message instead of silently corrupting the component
+        throw new Error(
+          `Reflex: SVG component "${name}" parsing failed: ${parseError.textContent}\n` +
+          `Template: ${template.substring(0, 100)}...`
+        );
       } else {
         const svgContainer = svgDoc.documentElement;
 
@@ -808,9 +807,13 @@ export class Reflex {
    * CRITICAL FIX #6: Non-recursive version of _comp
    * This method sets up the component but doesn't walk it (no _w calls)
    * The caller is responsible for walking the returned instance
-   * @returns The component instance element to be walked by the caller
+   *
+   * CRITICAL FIX (Audit Issue #4): For fragment components (multi-root), this returns
+   * an array of all fragment nodes. The caller must walk each node.
+   *
+   * @returns The component instance element (or array of elements for fragments) to be walked by the caller
    */
-  _compNoRecurse(el: Element, tag: string, o: any): Element {
+  _compNoRecurse(el: Element, tag: string, o: any): Element | Element[] {
     const def = this._cp.get(tag);
 
     // CRITICAL FIX #7: Handle fragment components (multi-root templates)
@@ -945,14 +948,11 @@ export class Reflex {
         this._scopeMap.set(node, scope);
       }
 
-      // CRITICAL FIX (Audit Issue #3): Walk all sibling fragment nodes
-      // The caller will walk the first node (inst), but the siblings (fragmentNodes[1]...fragmentNodes[n])
-      // are inserted into the DOM without being walked. This leaves directives and bindings unprocessed.
-      // Fix: Walk each sibling node here before returning.
-      for (let i = 1; i < fragmentNodes.length; i++) {
-        const sibling = fragmentNodes[i];
-        this._bnd(sibling, scope);
-        this._w(sibling, scope);
+      // CRITICAL FIX (Audit Issue #4): Bind all sibling fragment nodes
+      // Don't walk them here - the caller will walk the returned array
+      // This keeps the function truly non-recursive
+      for (const node of fragmentNodes) {
+        this._bnd(node, scope);
       }
     } else {
       // Single element replacement (existing behavior)
@@ -1044,6 +1044,11 @@ export class Reflex {
     this._bnd(inst, scope);
     // CRITICAL FIX #6: Don't call _w here - caller will walk the returned instance
 
+    // CRITICAL FIX (Audit Issue #4): Return all fragment nodes for multi-root components
+    // The caller must walk each node in the array
+    if (isFragment && fragmentNodes.length > 0) {
+      return fragmentNodes;
+    }
     return inst;
   }
 
@@ -1460,13 +1465,12 @@ export class Reflex {
 
         const parseError = svgDoc.querySelector('parsererror');
         if (parseError) {
-          console.warn('Reflex: SVG parsing failed:', parseError.textContent);
-          t.innerHTML = template;
-          self._cp.set(tag, {
-            _t: t.content.firstElementChild,
-            p: def.props || [],
-            s: def.setup
-          });
+          // CRITICAL FIX (Audit Issue #7): Remove dangerous fallback
+          // Falling back to HTML parsing corrupts SVG structure
+          throw new Error(
+            `Reflex: SVG async component "${tag}" parsing failed: ${parseError.textContent}\n` +
+            `Template: ${template.substring(0, 100)}...`
+          );
         } else {
           const svgContainer = svgDoc.documentElement;
 
@@ -1581,67 +1585,58 @@ export class Reflex {
    * CRITICAL FIX: Also unmounts any child Reflex instances to prevent memory leaks.
    * CRITICAL FIX: Bottom-Up unmounting (children first) to prevent context collapse.
    * CRITICAL FIX: Iterative approach to prevent stack overflow on deep DOM trees.
-   * CRITICAL FIX #10: DOM Traversal Instability During Unmount
-   * Snapshot children using Array.from instead of linked list traversal
-   * This prevents issues if cleanup functions modify DOM structure during unmount
+   * CRITICAL FIX (Audit Issue #6): True post-order traversal without memory accumulation
+   * Uses lastVisited pointer instead of building a secondary nodesToKill array
+   * This eliminates O(N) memory spike when unmounting massive DOM trees
    */
   _kill(node) {
-    // CRITICAL FIX: Use iterative stack-based approach instead of recursion
-    // This prevents "Maximum Call Stack Size Exceeded" errors on deeply nested DOM
-    // (e.g., >10,000 levels from recursive components or large visualizations)
+    // CRITICAL FIX (Audit Issue #6): True iterative post-order traversal
+    // Uses a stack and lastVisited pointer to avoid accumulating all nodes in memory
+    // This prevents massive memory spikes when unmounting large trees (e.g., 500k nodes)
     const stack = [node];
+    let lastVisited: any = null;
 
-    // First pass: collect all nodes in post-order (children before parents)
-    // CRITICAL FIX #10: Snapshot children to prevent instability
-    // If cleanup functions modify DOM (remove siblings), linked list traversal can skip nodes
-    // Array.from creates a stable snapshot that won't be affected by DOM modifications
-    const nodesToKill: any[] = [];
     while (stack.length > 0) {
-      const current = stack.pop();
-      nodesToKill.push(current);
+      const current = stack[stack.length - 1]; // Peek, don't pop yet
 
-      // Snapshot children before iterating to prevent instability
-      // This ensures cleanup functions can safely modify DOM without breaking traversal
-      if (current.childNodes && current.childNodes.length > 0) {
+      // Determine if we should process this node or descend to children
+      const hasChildren = current.childNodes && current.childNodes.length > 0;
+      const childrenProcessed = !hasChildren || (lastVisited && current.contains(lastVisited));
+
+      if (childrenProcessed) {
+        // All children (if any) have been processed, now process this node
+        stack.pop(); // Remove from stack
+
+        // CRITICAL: Check for child Reflex app instances and unmount them
+        if (current && typeof current === 'object') {
+          const childApp = (current as any).__rfx_app;
+          if (childApp && childApp !== this && typeof childApp.unmount === 'function') {
+            try {
+              childApp.unmount();
+            } catch (err) {
+              console.warn('Reflex: Error unmounting child app:', err);
+            }
+            (current as any).__rfx_app = null;
+            delete (current as any).__rfx_app;
+          }
+        }
+
+        // Run this node's cleanups
+        const c = this._cl.get(current);
+        if (c) {
+          for (let i = 0; i < c.length; i++) {
+            try { c[i](); } catch {} // eslint-disable-line no-empty
+          }
+          this._cl.delete(current);
+        }
+
+        lastVisited = current;
+      } else {
+        // Descend to children (push in reverse order for correct traversal)
         const children = Array.from(current.childNodes);
-        // Push in reverse order to maintain correct post-order traversal
         for (let i = children.length - 1; i >= 0; i--) {
           stack.push(children[i]);
         }
-      }
-    }
-
-    // Second pass: kill nodes in reverse order (children first)
-    // This ensures child cleanups run before parent cleanups
-    for (let i = nodesToKill.length - 1; i >= 0; i--) {
-      const node = nodesToKill[i];
-
-      // CRITICAL: Check for child Reflex app instances and unmount them
-      // This prevents memory leaks when components with separate Reflex instances
-      // are removed via m-if or list reconciliation
-      if (node && typeof node === 'object') {
-        const childApp = (node as any).__rfx_app;
-        if (childApp && childApp !== this && typeof childApp.unmount === 'function') {
-          try {
-            childApp.unmount();
-          } catch (err) {
-            console.warn('Reflex: Error unmounting child app:', err);
-          }
-          // Clear the reference to allow garbage collection
-          (node as any).__rfx_app = null;
-          delete (node as any).__rfx_app;
-        }
-      }
-
-      // Run this node's cleanups
-      // Even if the node was removed from DOM by another cleanup, we still need to
-      // run its cleanup functions to prevent memory leaks (event listeners, effects, etc.)
-      const c = this._cl.get(node);
-      if (c) {
-        for (let i = 0; i < c.length; i++) {
-          try { c[i](); } catch {} // eslint-disable-line no-empty
-        }
-        this._cl.delete(node);
       }
     }
   }

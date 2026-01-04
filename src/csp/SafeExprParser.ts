@@ -135,8 +135,20 @@ export class ScopeContainer {
           throw new Error(`Cannot set dangerous property '${prop}' - prototype pollution attack blocked`);
         }
 
-        // Store in internal Map (safe - no prototype pollution possible)
-        target._data.set(prop, value);
+        // CRITICAL FIX (Audit Issue #1): Check parent scope to prevent shadowing
+        // If the variable exists in a parent scope, update it there instead of creating a local shadow
+        // This fixes the bug where `count = count + 1` in a child scope creates a new local variable
+        // instead of updating the parent's `count` variable
+        if (target._data.has(prop)) {
+          // Exists locally - update it
+          target._data.set(prop, value);
+        } else if (target._parent && target._parent.has(prop)) {
+          // Exists in parent - delegate to parent (recursive call to parent's set method)
+          target._parent.set(prop, value);
+        } else {
+          // Doesn't exist anywhere - create it locally
+          target._data.set(prop, value);
+        }
         return true;
       },
 
@@ -920,9 +932,27 @@ export class SafeExprParser {
 
   /**
    * Evaluate an AST node using WHITE-LIST ONLY security model.
+   *
+   * CRITICAL SECURITY FIX (Audit Issue #8): Runtime recursion depth limit
+   * While parseExpression has a depth limit, _evaluate could still overflow via:
+   * - Deep chains of member access (obj.a.b.c.d...)
+   * - Nested function calls
+   * - Complex ternary expressions
+   *
+   * @param depth - Current recursion depth (default 0). Internal parameter.
    */
-  _evaluate(node: any, state: any, context: any, $event: any, $el: any, reflex: any): any {
+  _evaluate(node: any, state: any, context: any, $event: any, $el: any, reflex: any, depth: number = 0): any {
     if (!node) return undefined;
+
+    // CRITICAL SECURITY FIX (Audit Issue #8): Prevent stack overflow DoS
+    // Limit evaluation depth to prevent malicious expressions from crashing the app
+    const MAX_EVAL_DEPTH = 100;
+    if (depth > MAX_EVAL_DEPTH) {
+      throw new Error(
+        `Reflex Security: Expression evaluation exceeds maximum depth (${MAX_EVAL_DEPTH}). ` +
+        `This may indicate a malicious expression or infinite recursion.`
+      );
+    }
 
     switch (node.type) {
       case 'literal':
@@ -1004,10 +1034,10 @@ export class SafeExprParser {
       }
 
       case 'member': {
-        const obj = this._evaluate(node.object, state, context, $event, $el, reflex);
+        const obj = this._evaluate(node.object, state, context, $event, $el, reflex, depth + 1);
         if (obj == null) return undefined;
         const prop = node.computed
-          ? this._evaluate(node.property, state, context, $event, $el, reflex)
+          ? this._evaluate(node.property, state, context, $event, $el, reflex, depth + 1)
           : node.property;
 
         // WHITE-LIST ONLY: Check if property is own, safe method, safe accessor, or safe DOM property
@@ -1028,10 +1058,10 @@ export class SafeExprParser {
       case 'call': {
         let callee, thisArg;
         if (node.callee.type === 'member') {
-          thisArg = this._evaluate(node.callee.object, state, context, $event, $el, reflex);
+          thisArg = this._evaluate(node.callee.object, state, context, $event, $el, reflex, depth + 1);
           if (thisArg == null) return undefined;
           const prop = node.callee.computed
-            ? this._evaluate(node.callee.property, state, context, $event, $el, reflex)
+            ? this._evaluate(node.callee.property, state, context, $event, $el, reflex, depth + 1)
             : node.callee.property;
 
           // WHITE-LIST ONLY: Only allow own properties, safe methods, safe accessors, or safe DOM properties
@@ -1045,11 +1075,11 @@ export class SafeExprParser {
 
           callee = thisArg[prop];
         } else {
-          callee = this._evaluate(node.callee, state, context, $event, $el, reflex);
+          callee = this._evaluate(node.callee, state, context, $event, $el, reflex, depth + 1);
           thisArg = undefined;
         }
         if (typeof callee !== 'function') return undefined;
-        const args = node.arguments.map((a: any) => this._evaluate(a, state, context, $event, $el, reflex));
+        const args = node.arguments.map((a: any) => this._evaluate(a, state, context, $event, $el, reflex, depth + 1));
 
         const result = callee.apply(thisArg, args);
 
@@ -1062,8 +1092,8 @@ export class SafeExprParser {
       }
 
       case 'binary': {
-        const left = () => this._evaluate(node.left, state, context, $event, $el, reflex);
-        const right = () => this._evaluate(node.right, state, context, $event, $el, reflex);
+        const left = () => this._evaluate(node.left, state, context, $event, $el, reflex, depth + 1);
+        const right = () => this._evaluate(node.right, state, context, $event, $el, reflex, depth + 1);
         switch (node.op) {
           case '+': return left() + right();
           case '-': return left() - right();
@@ -1093,7 +1123,7 @@ export class SafeExprParser {
       }
 
       case 'unary': {
-        const arg = this._evaluate(node.arg, state, context, $event, $el, reflex);
+        const arg = this._evaluate(node.arg, state, context, $event, $el, reflex, depth + 1);
         switch (node.op) {
           case '!': return !arg;
           case '-': return -arg;
@@ -1104,20 +1134,20 @@ export class SafeExprParser {
       }
 
       case 'ternary': {
-        const cond = this._evaluate(node.condition, state, context, $event, $el, reflex);
+        const cond = this._evaluate(node.condition, state, context, $event, $el, reflex, depth + 1);
         return cond
-          ? this._evaluate(node.consequent, state, context, $event, $el, reflex)
-          : this._evaluate(node.alternate, state, context, $event, $el, reflex);
+          ? this._evaluate(node.consequent, state, context, $event, $el, reflex, depth + 1)
+          : this._evaluate(node.alternate, state, context, $event, $el, reflex, depth + 1);
       }
 
       case 'array':
-        return node.elements.map((e: any) => this._evaluate(e, state, context, $event, $el, reflex));
+        return node.elements.map((e: any) => this._evaluate(e, state, context, $event, $el, reflex, depth + 1));
 
       case 'object': {
         const obj: { [key: string]: any } = {};
         for (const prop of node.properties) {
           const key = prop.computed
-            ? this._evaluate(prop.key, state, context, $event, $el, reflex)
+            ? this._evaluate(prop.key, state, context, $event, $el, reflex, depth + 1)
             : prop.key;
           // CRITICAL FIX (Audit Issue #2): Prevent prototype pollution via computed keys
           // Even though object literals seem "safe by construction", computed keys like
@@ -1125,7 +1155,7 @@ export class SafeExprParser {
           if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
             throw new Error(`Reflex Security: Prototype pollution via object literal key '${key}'`);
           }
-          obj[key] = this._evaluate(prop.value, state, context, $event, $el, reflex);
+          obj[key] = this._evaluate(prop.value, state, context, $event, $el, reflex, depth + 1);
         }
         return obj;
       }
@@ -1134,7 +1164,7 @@ export class SafeExprParser {
         // CRITICAL FIX (Audit Issue #2): Assignment Expression Evaluation
         // Supports: count = 5, count += 3, user.name = 'Bob'
         // SECURITY: Only allow assignment to own properties (WHITE-LIST ONLY)
-        const rightValue = this._evaluate(node.right, state, context, $event, $el, reflex);
+        const rightValue = this._evaluate(node.right, state, context, $event, $el, reflex, depth + 1);
 
         if (node.left.type === 'identifier') {
           // Simple identifier assignment: count = 5
@@ -1190,13 +1220,13 @@ export class SafeExprParser {
           return target[name];
         } else if (node.left.type === 'member') {
           // Member assignment: user.name = 'Bob', arr[0] = 5
-          const obj = this._evaluate(node.left.object, state, context, $event, $el, reflex);
+          const obj = this._evaluate(node.left.object, state, context, $event, $el, reflex, depth + 1);
           if (obj == null) {
             throw new Error('Reflex: Cannot set property on null or undefined');
           }
 
           const prop = node.left.computed
-            ? this._evaluate(node.left.property, state, context, $event, $el, reflex)
+            ? this._evaluate(node.left.property, state, context, $event, $el, reflex, depth + 1)
             : node.left.property;
 
           // CRITICAL FIX (Audit Issue #3): Enforce whitelist for inherited properties
@@ -1302,13 +1332,13 @@ export class SafeExprParser {
           return node.prefix ? target[name] : oldValue;
         } else if (node.arg.type === 'member') {
           // Member update: obj.count++, arr[0]--
-          const obj = this._evaluate(node.arg.object, state, context, $event, $el, reflex);
+          const obj = this._evaluate(node.arg.object, state, context, $event, $el, reflex, depth + 1);
           if (obj == null) {
             throw new Error('Reflex: Cannot update property on null or undefined');
           }
 
           const prop = node.arg.computed
-            ? this._evaluate(node.arg.property, state, context, $event, $el, reflex)
+            ? this._evaluate(node.arg.property, state, context, $event, $el, reflex, depth + 1)
             : node.arg.property;
 
           // SECURITY: Only allow update on own properties (WHITE-LIST ONLY)
