@@ -35,6 +35,9 @@ if (!fs.existsSync(path.join(distDir, 'hydration'))) {
 if (!fs.existsSync(path.join(distDir, 'scoped-css'))) {
   fs.mkdirSync(path.join(distDir, 'scoped-css'), { recursive: true });
 }
+if (!fs.existsSync(path.join(distDir, 'observer'))) {
+  fs.mkdirSync(path.join(distDir, 'observer'), { recursive: true });
+}
 
 const isWatch = process.argv.includes('--watch');
 
@@ -160,6 +163,20 @@ const builds = [
     outfile: path.join(distDir, 'scoped-css', 'index.cjs'),
     format: 'cjs',
     platform: 'node',
+  },
+  // Runtime Helpers - ESM (for AOT compiled mode)
+  {
+    ...commonOptions,
+    entryPoints: [path.join(srcDir, 'runtime-helpers.ts')],
+    outfile: path.join(distDir, 'runtime-helpers.esm.js'),
+    format: 'esm',
+  },
+  // Runtime Helpers - CJS
+  {
+    ...commonOptions,
+    entryPoints: [path.join(srcDir, 'runtime-helpers.ts')],
+    outfile: path.join(distDir, 'runtime-helpers.cjs'),
+    format: 'cjs',
   },
 ];
 
@@ -586,10 +603,52 @@ export declare function rollupScopedCSS(options?: RollupScopedCSSOptions): {
 };
 `;
 
+  const runtimeHelpersDts = `/**
+ * Reflex Runtime Helpers for AOT Compiled Mode
+ *
+ * Tree-shakeable runtime helpers used by compiled templates.
+ * Only included in bundle if used by compiled code.
+ */
+
+import type { IRendererAdapter } from './renderers/types';
+
+/**
+ * Create a keyed list with efficient reconciliation
+ */
+export declare function createKeyedList<T>(
+  ctx: any,
+  anchor: Comment | Node,
+  getItems: () => T[],
+  getKey: (item: T, index: number) => any,
+  renderItem: (item: T, index: number) => Node
+): void;
+
+/**
+ * Run a CSS transition on an element
+ */
+export declare function runTransition(
+  el: Element,
+  name: string,
+  phase: 'enter' | 'leave',
+  onComplete?: () => void
+): void;
+
+/**
+ * Convert a value to a display string
+ */
+export declare function toDisplayString(val: any): string;
+
+/**
+ * Create reactive effects for compiled templates
+ */
+export declare function createReactiveEffect(ctx: any, fn: () => void): void;
+`;
+
   fs.writeFileSync(path.join(distDir, 'reflex.d.ts'), mainDts);
   fs.writeFileSync(path.join(distDir, 'csp', 'index.d.ts'), cspDts);
   fs.writeFileSync(path.join(distDir, 'hydration', 'index.d.ts'), hydrationDts);
   fs.writeFileSync(path.join(distDir, 'scoped-css', 'index.d.ts'), scopedCssDts);
+  fs.writeFileSync(path.join(distDir, 'runtime-helpers.d.ts'), runtimeHelpersDts);
   console.log('Generated TypeScript declarations');
 }
 
@@ -649,6 +708,8 @@ async function build() {
         'hydration/index.iife.js',
         'scoped-css/index.esm.js',
         'scoped-css/index.cjs',
+        'runtime-helpers.esm.js',
+        'runtime-helpers.cjs',
       ];
 
       for (const file of files) {
