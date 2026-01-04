@@ -180,6 +180,18 @@ export interface IRendererAdapter {
   setAttribute(node: VNode | Element, name: string, value: string): void;
 
   /**
+   * Set property value on element (for direct property access like .src, .href)
+   *
+   * SECURITY: Validates value against sink-based security rules.
+   * Dangerous values (javascript: URLs, innerHTML strings) will be blocked.
+   *
+   * @param node - Element node
+   * @param name - Property name
+   * @param value - Property value
+   */
+  setProperty?(node: VNode | Element, name: string, value: any): void;
+
+  /**
    * Remove attribute from element
    * @param node - Element node
    * @param name - Attribute name

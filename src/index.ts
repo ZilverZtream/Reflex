@@ -51,6 +51,15 @@ export {
   RELATIVE_URL_RE
 } from './core/symbols.js';
 
+// Security exports (Trifecta Protocol - Sink-Based Security)
+export {
+  validateSink,
+  getSinkType,
+  isSink,
+  getBlockReason,
+  SINK_TYPES
+} from './core/sinks.js';
+
 // Renderer exports (for pluggable architecture)
 export { DOMRenderer, runTransition as runDOMTransition, SafeHTML } from './renderers/dom.js';
 export { VirtualRenderer, createVirtualRenderer } from './renderers/virtual.js';
