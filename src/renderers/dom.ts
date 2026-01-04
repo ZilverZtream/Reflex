@@ -431,62 +431,64 @@ export const DOMRenderer: IRendererAdapter = {
     node.nodeValue = text;
   },
 
-  setInnerHTML(node: Element, html: SafeHTML): void {
-    // CRITICAL SECURITY FIX (SEC-2026-003 Issue #2): Removed String Support Entirely
+  setInnerHTML(node: Element, html: SafeHTML | string, options?: { force?: boolean }): void {
+    // CRITICAL SECURITY FIX (SEC-2026-003 Issue #2): Strict SafeHTML Enforcement
     //
-    // VULNERABILITY: The previous implementation accepted raw strings with a regex blacklist.
-    // Regex blacklists are fundamentally bypassable using HTML entity encoding:
+    // VULNERABILITY: Regex blacklists are bypassable via HTML entity encoding:
     //   - Input: '<button formaction="&#106;avascript:alert(1)">X</button>'
     //   - Regex /javascript:/i does NOT match "&#106;avascript:"
     //   - Browser decodes &#106; to 'j' BEFORE executing, triggering XSS
     //
-    // Other bypass vectors that regex cannot reliably block:
-    //   - Unicode normalization: "ｊａｖａｓｃｒｉｐｔ:" (fullwidth chars)
-    //   - Case variations: "JaVaScRiPt:" (already handled, but shows the pattern)
-    //   - Nested encoding: "&#x6A;avascript:" (hex entities)
-    //   - NULL byte injection: "java\0script:"
-    //   - Protocol-relative: "//evil.com/xss.js"
-    //   - SVG/MathML context switching
-    //
-    // SOLUTION: The Iron Membrane security model MUST NOT rely on regex blacklists.
-    // Only SafeHTML instances (created via DOMPurify sanitization) are accepted.
-    // This is a BREAKING CHANGE but is required for enterprise security compliance.
+    // SOLUTION: Only SafeHTML instances are accepted by default.
+    // Use { force: true } ONLY for legacy migrations where you have a custom sanitizer.
     //
     // MIGRATION:
     //   1. Install DOMPurify: npm install dompurify @types/dompurify
     //   2. Configure once: SafeHTML.configureSanitizer(DOMPurify);
     //   3. Sanitize input: renderer.setInnerHTML(el, SafeHTML.sanitize(userInput));
     //   4. For trusted static HTML: SafeHTML.unsafe(trustedStaticString)
-    //
-    // Type guard: Reject strings at runtime (TypeScript catch at compile-time)
+    //   5. For legacy sanitizers: renderer.setInnerHTML(el, html, { force: true })
+
+    // Handle SafeHTML instances (preferred path)
+    if (SafeHTML.isSafeHTML(html)) {
+      node.innerHTML = html.toString();
+      return;
+    }
+
+    // Handle raw strings with force option for legacy migrations
     if (typeof html === 'string') {
+      if (options?.force) {
+        // SECURITY WARNING: force=true bypasses SafeHTML validation
+        // The caller is responsible for ensuring content is properly sanitized
+        if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+          console.warn(
+            `Reflex Security: setInnerHTML() called with force=true.\n` +
+            `This bypasses SafeHTML validation. Ensure content is properly sanitized.`
+          );
+        }
+        node.innerHTML = html;
+        return;
+      }
+
       throw new TypeError(
         `Reflex Security: setInnerHTML() no longer accepts raw strings.\n` +
         `Received: string\n\n` +
         `BREAKING CHANGE (SEC-2026-003): Raw strings are rejected to prevent XSS.\n` +
         `The previous regex-based blacklist was bypassable via HTML entity encoding.\n\n` +
-        `Migration:\n` +
-        `  1. Install: npm install dompurify @types/dompurify\n` +
-        `  2. Configure: SafeHTML.configureSanitizer(DOMPurify);\n` +
-        `  3. Use: renderer.setInnerHTML(el, SafeHTML.sanitize(html));\n\n` +
-        `For static trusted strings: SafeHTML.unsafe(staticString)`
+        `Options:\n` +
+        `  1. Use SafeHTML.sanitize(html) for user content\n` +
+        `  2. Use SafeHTML.unsafe(staticString) for trusted static strings\n` +
+        `  3. Use { force: true } for legacy sanitizers (NOT recommended)\n\n` +
+        `Example: renderer.setInnerHTML(el, SafeHTML.sanitize(html));`
       );
     }
 
-    // Validate SafeHTML instance
-    if (!SafeHTML.isSafeHTML(html)) {
-      throw new TypeError(
-        `Reflex Security: setInnerHTML() requires SafeHTML instance.\n` +
-        `Received: ${typeof html}\n\n` +
-        `Migration:\n` +
-        `  1. Install: npm install dompurify @types/dompurify\n` +
-        `  2. Configure: SafeHTML.configureSanitizer(DOMPurify);\n` +
-        `  3. Use: renderer.setInnerHTML(el, SafeHTML.sanitize(html));\n\n` +
-        `For static trusted strings: SafeHTML.unsafe(staticString)`
-      );
-    }
-
-    node.innerHTML = html.toString();
+    // Handle other types
+    throw new TypeError(
+      `Reflex Security: setInnerHTML() requires SafeHTML instance.\n` +
+      `Received: ${typeof html}\n\n` +
+      `Use SafeHTML.sanitize() or SafeHTML.unsafe() to create SafeHTML instances.`
+    );
   },
 
   getAttributes(node: Element): NamedNodeMap {

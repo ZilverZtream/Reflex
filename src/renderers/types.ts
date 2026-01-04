@@ -245,13 +245,24 @@ export interface IRendererAdapter {
    * Set inner HTML of an element
    *
    * SECURITY: Validates content for dangerous patterns.
-   * Dangerous patterns will throw Error with "SECURITY ERROR".
-   * Safe raw strings will warn in development mode.
+   * By default, only SafeHTML instances are accepted.
+   * Raw strings require the { force: true } option for legacy migrations.
    *
    * @param node - Element node
-   * @param html - SafeHTML instance or raw string
+   * @param html - SafeHTML instance (preferred) or raw string (with force option)
+   * @param options - Optional settings
+   * @param options.force - If true, allows raw strings (use only for legacy migrations!)
+   *                        This bypasses SafeHTML validation. The caller is responsible
+   *                        for ensuring the content has been properly sanitized.
+   *
+   * @example
+   * // Preferred: Use SafeHTML
+   * renderer.setInnerHTML(el, SafeHTML.sanitize(userInput));
+   *
+   * // Legacy migration: Force raw string (ensure content is sanitized!)
+   * renderer.setInnerHTML(el, legacySanitizer.clean(input), { force: true });
    */
-  setInnerHTML(node: VNode | Element, html: SafeHTML | string): void;
+  setInnerHTML(node: VNode | Element, html: SafeHTML | string, options?: { force?: boolean }): void;
 
   /**
    * Get all attributes of an element
