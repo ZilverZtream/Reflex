@@ -176,13 +176,45 @@ function genRegularElement(node: ElementNode, context: CodegenContext): string {
   const lines: string[] = [];
   const varName = `el${context.uid++}`;
 
-  // CRITICAL FIX: Detect SVG context
+  // CRITICAL FIX (SEC-2026-003 Issue #5): Proper SVG Namespace Handling
   // SVG elements need createElementNS instead of createElement
-  const SVG_TAGS = ['svg', 'circle', 'ellipse', 'line', 'path', 'polygon', 'polyline',
+  //
+  // There are three categories of tags:
+  // 1. Unambiguous SVG-only tags (path, circle, etc.) - always SVG
+  // 2. Ambiguous tags (a, title, script, style) - depend on parent context
+  // 3. HTML-only tags (div, span, etc.) - always HTML
+  //
+  // The context.isSVG flag is inherited from parent, ensuring ambiguous tags
+  // like <a> inside <svg> get the SVG namespace, while <a> in HTML stays HTML.
+  const SVG_ONLY_TAGS = ['svg', 'circle', 'ellipse', 'line', 'path', 'polygon', 'polyline',
     'rect', 'g', 'defs', 'clipPath', 'mask', 'pattern', 'linearGradient',
     'radialGradient', 'stop', 'text', 'tspan', 'use', 'symbol', 'marker', 'animate',
-    'animateMotion', 'animateTransform', 'set', 'foreignObject', 'image'];
-  const isSVG = node.tag === 'svg' || context.isSVG || SVG_TAGS.includes(node.tag);
+    'animateMotion', 'animateTransform', 'set', 'foreignObject', 'image', 'desc',
+    'metadata', 'switch', 'filter', 'feBlend', 'feColorMatrix', 'feComponentTransfer',
+    'feComposite', 'feConvolveMatrix', 'feDiffuseLighting', 'feDisplacementMap',
+    'feFlood', 'feGaussianBlur', 'feImage', 'feMerge', 'feMergeNode', 'feMorphology',
+    'feOffset', 'feSpecularLighting', 'feTile', 'feTurbulence', 'textPath'];
+
+  // Ambiguous tags exist in both HTML and SVG - use parent context to decide
+  const AMBIGUOUS_TAGS = ['a', 'script', 'style', 'title'];
+
+  // Determine if we're in SVG context:
+  // 1. The tag itself is SVG-only (e.g., 'svg', 'path')
+  // 2. The tag is ambiguous AND we're already in SVG context
+  // 3. We inherited SVG context from parent and tag isn't HTML-only
+  const isSvgOnlyTag = SVG_ONLY_TAGS.includes(node.tag);
+  const isAmbiguous = AMBIGUOUS_TAGS.includes(node.tag);
+  const isSVG = node.tag === 'svg' || isSvgOnlyTag || (context.isSVG && !isHtmlOnlyTag(node.tag));
+
+  // Helper: Check if tag is HTML-only (not valid in SVG)
+  function isHtmlOnlyTag(tag: string): boolean {
+    // These tags are definitely HTML-only and break SVG context
+    const htmlOnlyTags = ['div', 'span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+      'ul', 'ol', 'li', 'table', 'tr', 'td', 'th', 'form', 'input', 'button',
+      'select', 'option', 'textarea', 'header', 'footer', 'nav', 'main',
+      'section', 'article', 'aside'];
+    return htmlOnlyTags.includes(tag);
+  }
 
   // Check if node can be hoisted
   if (node.isStatic && context.options.hoistStatic) {
@@ -204,10 +236,14 @@ function genRegularElement(node: ElementNode, context: CodegenContext): string {
     }
 
     // Set static attributes
+    // CRITICAL SECURITY FIX: Use JSON.stringify for safe string literal generation
+    // The previous implementation used manual quote escaping which was vulnerable to
+    // code injection attacks like: <div title=" \'); alert('XSS'); // ">
+    // JSON.stringify handles backslashes, newlines, quotes, and all special characters
     for (const prop of node.props) {
       if (!prop.isDynamic && prop.value !== null) {
-        const value = prop.value.replace(/'/g, "\\'");
-        lines.push(`  _ren.setAttribute(${varName}, '${prop.name}', '${value}');`);
+        const safeValue = JSON.stringify(prop.value);
+        lines.push(`  _ren.setAttribute(${varName}, ${JSON.stringify(prop.name)}, ${safeValue});`);
       }
     }
 
@@ -272,19 +308,28 @@ function genStaticElement(node: ElementNode, context: CodegenContext): string {
     ? `_ren.createElementNS('http://www.w3.org/2000/svg', '${node.tag}')`
     : `_ren.createElement('${node.tag}')`;
 
+  // CRITICAL SECURITY FIX: Use JSON.stringify for safe string literal generation
+  // Prevents code injection via attribute values like: <div title="'); alert('XSS'); //">
+  const attrCalls = node.props.map(p =>
+    `_ren.setAttribute(el, ${JSON.stringify(p.name)}, ${JSON.stringify(p.value)});`
+  ).join('\n    ');
+
   return `(() => {
     const el = ${createCall};
-    ${node.props.map(p => `_ren.setAttribute(el, '${p.name}', '${p.value}');`).join('\n    ')}
+    ${attrCalls}
     return el;
   })()`;
 }
 
 /**
  * Generate code for a text node
+ * CRITICAL SECURITY FIX: Use JSON.stringify for safe string literal generation
+ * Prevents code injection via text content containing quotes/backslashes
  */
 function genText(node: TextNode, context: CodegenContext): string {
   const varName = `text${context.uid++}`;
-  return `  const ${varName} = _ren.createTextNode('${node.content.replace(/'/g, "\\'")}');\n  _ren.insertBefore(fragment, ${varName});`;
+  const safeContent = JSON.stringify(node.content);
+  return `  const ${varName} = _ren.createTextNode(${safeContent});\n  _ren.insertBefore(fragment, ${varName});`;
 }
 
 /**

@@ -1757,28 +1757,51 @@ export class VirtualRenderer implements IRendererAdapter {
     }
   }
 
-  setInnerHTML(node: VNode, html: SafeHTML): void {
-    // BREAKING CHANGE: Only SafeHTML accepted
-    if (!SafeHTML.isSafeHTML(html)) {
+  setInnerHTML(node: VNode, html: SafeHTML | string, options?: { force?: boolean }): void {
+    // CRITICAL SECURITY FIX: Strict SafeHTML Enforcement with force override
+    //
+    // Handle SafeHTML instances (preferred path)
+    if (SafeHTML.isSafeHTML(html)) {
+      node.innerHTML = html.toString();
+      if (this.debug) {
+        const htmlStr = html.toString();
+        console.log('[VirtualRenderer] setInnerHTML:', node.tagName, htmlStr.slice(0, 50) + '...');
+      }
+      return;
+    }
+
+    // Handle raw strings with force option for legacy migrations
+    if (typeof html === 'string') {
+      if (options?.force) {
+        // SECURITY WARNING: force=true bypasses SafeHTML validation
+        if (this.debug) {
+          console.warn(
+            `[VirtualRenderer] Security: setInnerHTML() called with force=true.\n` +
+            `This bypasses SafeHTML validation. Ensure content is properly sanitized.`
+          );
+        }
+        node.innerHTML = html;
+        return;
+      }
+
       throw new TypeError(
         `Reflex Security: setInnerHTML() requires SafeHTML instance.\n` +
-        `Received: ${typeof html}\n\n` +
+        `Received: string\n\n` +
         `BREAKING CHANGE: Raw strings are no longer accepted.\n\n` +
-        `Migration:\n` +
-        `  1. Install: npm install dompurify @types/dompurify\n` +
-        `  2. Configure: SafeHTML.configureSanitizer(DOMPurify);\n` +
-        `  3. Use: renderer.setInnerHTML(el, SafeHTML.sanitize(html));\n\n` +
-        `For static trusted strings: SafeHTML.unsafe(staticString)`
+        `Options:\n` +
+        `  1. Use SafeHTML.sanitize(html) for user content\n` +
+        `  2. Use SafeHTML.unsafe(staticString) for trusted static strings\n` +
+        `  3. Use { force: true } for legacy sanitizers (NOT recommended)\n\n` +
+        `Example: renderer.setInnerHTML(el, SafeHTML.sanitize(html));`
       );
     }
 
-    // Convert SafeHTML to string and set innerHTML (which parses into child nodes)
-    node.innerHTML = html.toString();
-
-    if (this.debug) {
-      const htmlStr = html.toString();
-      console.log('[VirtualRenderer] setInnerHTML:', node.tagName, htmlStr.slice(0, 50) + '...');
-    }
+    // Handle other types
+    throw new TypeError(
+      `Reflex Security: setInnerHTML() requires SafeHTML instance.\n` +
+      `Received: ${typeof html}\n\n` +
+      `Use SafeHTML.sanitize() or SafeHTML.unsafe() to create SafeHTML instances.`
+    );
   }
 
   getAttributes(node: VNode): Map<string, string> {
