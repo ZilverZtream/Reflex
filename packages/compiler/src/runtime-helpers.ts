@@ -90,6 +90,12 @@ export function createKeyedList<T>(
     // Remove old nodes
     for (let i = 0; i < prevNodes.length; i++) {
       if (!newNodes.includes(prevNodes[i])) {
+        // CRITICAL FIX: Clean up effects before removing from DOM to prevent memory leaks
+        // The ctx._kill method destroys all reactive scopes, effects, and listeners
+        // associated with the node's subtree
+        if (typeof ctx._kill === 'function') {
+          ctx._kill(prevNodes[i]);
+        }
         _ren.removeChild(prevNodes[i]);
       }
     }
@@ -119,8 +125,55 @@ export function createKeyedList<T>(
 }
 
 /**
+ * Compute the Longest Increasing Subsequence (LIS) of an array.
+ * Ported from core runtime for optimal keyed list reconciliation.
+ *
+ * @param {number[]} arr - Array of old indices (-1 for new nodes)
+ * @returns {number[]} Indices in arr that form the LIS
+ */
+function computeLIS(arr: number[]): number[] {
+  const n = arr.length;
+  if (n === 0) return [];
+
+  // result[i] = index in arr of smallest tail of LIS of length i+1
+  const result: number[] = [];
+  // predecessors[i] = previous index in LIS ending at i
+  const predecessors = new Array(n);
+
+  for (let i = 0; i < n; i++) {
+    const val = arr[i];
+    // Skip -1 entries (new nodes have no old position)
+    if (val < 0) continue;
+
+    // Binary search for insertion position
+    let lo = 0, hi = result.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arr[result[mid]] < val) lo = mid + 1;
+      else hi = mid;
+    }
+
+    // Update predecessor chain
+    if (lo > 0) predecessors[i] = result[lo - 1];
+    result[lo] = i;
+  }
+
+  // Reconstruct the LIS by following predecessors
+  let len = result.length;
+  const lis = new Array(len);
+  let idx = result[len - 1];
+  while (len-- > 0) {
+    lis[len] = idx;
+    idx = predecessors[idx];
+  }
+
+  return lis;
+}
+
+/**
  * Reconcile keyed lists using LIS (Longest Increasing Subsequence) algorithm
- * Based on Vue's reconciliation algorithm
+ * FIXED: Now uses real LIS algorithm instead of naive oldIndex === i check
+ * This minimizes DOM moves from O(N) to O(N - LIS_length)
  */
 function reconcileKeyedList(
   oldKeys: any[],
@@ -134,40 +187,61 @@ function reconcileKeyedList(
     oldKeyToIndex.set(oldKeys[i], i);
   }
 
-  // Build key to index map for new list
-  const newKeyToIndex = new Map<any, number>();
-  for (let i = 0; i < newKeys.length; i++) {
-    newKeyToIndex.set(newKeys[i], i);
-  }
-
   // Track which old indices are used
   const used = new Set<number>();
 
-  // First pass: identify keeps and inserts
+  // Build array of old indices for LIS computation
+  const oldIndices: number[] = new Array(newKeys.length);
+
+  // First pass: map new keys to old indices
   for (let i = 0; i < newKeys.length; i++) {
     const key = newKeys[i];
     const oldIndex = oldKeyToIndex.get(key);
 
     if (oldIndex !== undefined) {
-      // Key exists in old list - keep or move
-      operations.push({
-        type: oldIndex === i ? 'keep' : 'move',
-        oldIndex,
-        newIndex: i,
-        key,
-      });
+      oldIndices[i] = oldIndex;
       used.add(oldIndex);
     } else {
+      oldIndices[i] = -1; // New item
+    }
+  }
+
+  // Compute LIS - nodes in LIS don't need to move
+  const lis = computeLIS(oldIndices);
+  const lisSet = new Set(lis);
+
+  // Second pass: generate operations based on LIS
+  for (let i = 0; i < newKeys.length; i++) {
+    const key = newKeys[i];
+    const oldIndex = oldIndices[i];
+
+    if (oldIndex === -1) {
       // New key - insert
       operations.push({
         type: 'insert',
         newIndex: i,
         key,
       });
+    } else if (lisSet.has(i)) {
+      // In LIS - keep (no move needed)
+      operations.push({
+        type: 'keep',
+        oldIndex,
+        newIndex: i,
+        key,
+      });
+    } else {
+      // Not in LIS - move
+      operations.push({
+        type: 'move',
+        oldIndex,
+        newIndex: i,
+        key,
+      });
     }
   }
 
-  // Second pass: identify removes
+  // Third pass: identify removes
   for (let i = 0; i < oldKeys.length; i++) {
     if (!used.has(i)) {
       operations.push({
