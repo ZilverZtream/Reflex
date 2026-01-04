@@ -16,6 +16,7 @@ import type {
 } from './types.js';
 import { RUNTIME_HELPERS } from './types.js';
 import { isComponent, toPascalCase } from './parser.js';
+import { SafeExprParser } from '../../src/csp/SafeExprParser.js';
 
 /**
  * Generate JavaScript code from AST
@@ -159,20 +160,32 @@ function genRegularElement(node: ElementNode, context: CodegenContext): string {
   const lines: string[] = [];
   const varName = `el${context.uid++}`;
 
+  // CRITICAL FIX: Detect SVG context
+  // SVG elements need createElementNS instead of createElement
+  const SVG_TAGS = ['svg', 'circle', 'ellipse', 'line', 'path', 'polygon', 'polyline',
+    'rect', 'g', 'defs', 'clipPath', 'mask', 'pattern', 'linearGradient',
+    'radialGradient', 'stop', 'text', 'tspan', 'use', 'symbol', 'marker', 'animate',
+    'animateMotion', 'animateTransform', 'set', 'foreignObject', 'image'];
+  const isSVG = node.tag === 'svg' || context.isSVG || SVG_TAGS.includes(node.tag);
+
   // Check if node can be hoisted
   if (node.isStatic && context.options.hoistStatic) {
     const hoistId = `_hoisted_${context.hoisted.length}`;
     node.hoistId = hoistId;
 
     // Generate hoisted node creation
-    const hoistedCode = genStaticElement(node, context);
+    const hoistedCode = genStaticElement(node, { ...context, isSVG });
     context.hoisted.push({ id: hoistId, code: hoistedCode });
 
     // Use cloned node in render
     lines.push(`  const ${varName} = _ren.cloneNode(${hoistId}, true);`);
   } else {
-    // Create element
-    lines.push(`  const ${varName} = _ren.createElement('${node.tag}');`);
+    // Create element with proper namespace
+    if (isSVG) {
+      lines.push(`  const ${varName} = _ren.createElementNS('http://www.w3.org/2000/svg', '${node.tag}');`);
+    } else {
+      lines.push(`  const ${varName} = _ren.createElement('${node.tag}');`);
+    }
 
     // Set static attributes
     for (const prop of node.props) {
@@ -192,9 +205,10 @@ function genRegularElement(node: ElementNode, context: CodegenContext): string {
       }
     }
 
-    // Add children
+    // Add children (propagate SVG context)
+    const childContext = { ...context, isSVG };
     for (const child of node.children) {
-      const childCode = genNode(child, context);
+      const childCode = genNode(child, childContext);
       if (childCode) {
         lines.push(childCode);
         // Append child to parent
@@ -237,12 +251,13 @@ function genRegularElement(node: ElementNode, context: CodegenContext): string {
  * Generate code for a static element (for hoisting)
  */
 function genStaticElement(node: ElementNode, context: CodegenContext): string {
-  const parts: string[] = [`_ren.createElement('${node.tag}')`];
+  // CRITICAL FIX: Use createElementNS for SVG elements
+  const createCall = context.isSVG
+    ? `_ren.createElementNS('http://www.w3.org/2000/svg', '${node.tag}')`
+    : `_ren.createElement('${node.tag}')`;
 
-  // Note: For hoisted nodes, we create a template and clone it
-  // This is a simplified version - in production, we'd use document.createElement
   return `(() => {
-    const el = _ren.createElement('${node.tag}');
+    const el = ${createCall};
     ${node.props.map(p => `_ren.setAttribute(el, '${p.name}', '${p.value}');`).join('\n    ')}
     return el;
   })()`;
@@ -279,6 +294,8 @@ function genDirective(node: ElementNode, directive: DirectiveNode, context: Code
       return genShowDirective(node, directive, context);
     case 'effect':
       return genEffectDirective(node, directive, context);
+    case 'model':
+      return genModelDirective(node, directive, context);
     default:
       return '';
   }
@@ -428,6 +445,70 @@ function genEffectDirective(node: ElementNode, directive: DirectiveNode, context
 }
 
 /**
+ * Generate code for m-model directive (two-way binding)
+ * CRITICAL FIX: Implements missing m-model support for form inputs
+ */
+function genModelDirective(node: ElementNode, directive: DirectiveNode, context: CodegenContext): string {
+  const lines: string[] = [];
+
+  // Generate element first
+  const childContext = { ...context, uid: context.uid };
+  const elementCode = genRegularElement(
+    { ...node, directives: node.directives.filter(d => d.name !== 'model') },
+    childContext
+  );
+
+  lines.push(elementCode);
+
+  const varName = `el${childContext.uid - 1}`;
+  const modelExpr = directive.value;
+
+  // Determine input type
+  const typeAttr = node.props.find(p => p.name === 'type');
+  const inputType = typeAttr?.value || 'text';
+
+  // Generate two-way binding based on input type
+  if (inputType === 'checkbox') {
+    // Checkbox: bind to checked property
+    lines.push(`  ctx.createEffect(() => {`);
+    lines.push(`    _ren.setProperty(${varName}, 'checked', !!${resolveExpression(modelExpr, context)});`);
+    lines.push(`  });`);
+    lines.push(`  _ren.addEventListener(${varName}, 'change', (event) => {`);
+    lines.push(`    ${resolveExpression(modelExpr, context)} = event.target.checked;`);
+    lines.push(`  });`);
+  } else if (inputType === 'radio') {
+    // Radio: bind to checked property based on value match
+    const valueAttr = node.props.find(p => p.name === 'value');
+    const radioValue = valueAttr?.value || '';
+    lines.push(`  ctx.createEffect(() => {`);
+    lines.push(`    _ren.setProperty(${varName}, 'checked', ${resolveExpression(modelExpr, context)} === '${radioValue}');`);
+    lines.push(`  });`);
+    lines.push(`  _ren.addEventListener(${varName}, 'change', (event) => {`);
+    lines.push(`    if (event.target.checked) ${resolveExpression(modelExpr, context)} = '${radioValue}';`);
+    lines.push(`  });`);
+  } else if (node.tag === 'select') {
+    // Select: bind to value property
+    lines.push(`  ctx.createEffect(() => {`);
+    lines.push(`    _ren.setProperty(${varName}, 'value', ${resolveExpression(modelExpr, context)});`);
+    lines.push(`  });`);
+    lines.push(`  _ren.addEventListener(${varName}, 'change', (event) => {`);
+    lines.push(`    ${resolveExpression(modelExpr, context)} = event.target.value;`);
+    lines.push(`  });`);
+  } else {
+    // Text input / textarea: bind to value property
+    lines.push(`  ctx.createEffect(() => {`);
+    lines.push(`    _ren.setProperty(${varName}, 'value', ${resolveExpression(modelExpr, context)} ?? '');`);
+    lines.push(`  });`);
+    lines.push(`  _ren.addEventListener(${varName}, 'input', (event) => {`);
+    lines.push(`    ${resolveExpression(modelExpr, context)} = event.target.value;`);
+    lines.push(`  });`);
+  }
+
+  context.uid = childContext.uid;
+  return lines.join('\n');
+}
+
+/**
  * Generate code for a component
  */
 function genComponent(node: ElementNode, context: CodegenContext): string {
@@ -471,7 +552,8 @@ function genComponent(node: ElementNode, context: CodegenContext): string {
 }
 
 /**
- * Resolve expression to JavaScript code
+ * Resolve expression to JavaScript code using AST-based approach
+ * FIXED: Now uses SafeExprParser instead of regex to prevent syntax corruption
  * Distinguishes between state (ctx.s.x) and local scope variables
  */
 function resolveExpression(
@@ -480,51 +562,161 @@ function resolveExpression(
   $event?: string,
   $el?: string
 ): string {
-  // Simple heuristic: if the variable is in scopeVars, use it directly
-  // Otherwise, prefix with ctx.s.
+  // Parse expression into AST using SafeExprParser
+  const parser = new SafeExprParser();
+  let ast;
+  try {
+    ast = parser.parse(expr);
+  } catch (err) {
+    // If parsing fails, fall back to the expression as-is (may be a literal)
+    console.warn(`Failed to parse expression: ${expr}`, err);
+    return expr;
+  }
 
-  // For now, use a simple approach: wrap in a function that checks scope first
-  // In production, we'd use a proper parser to identify identifiers
+  // Generate code from AST
+  return genExpression(ast, context, $event, $el);
+}
 
-  // Check if it's a simple identifier
-  const identifierMatch = expr.match(/^[a-zA-Z_$][a-zA-Z0-9_$]*$/);
-  if (identifierMatch) {
-    const varName = identifierMatch[0];
-    if (context.scopeVars.has(varName)) {
-      return varName;
-    } else {
-      return `ctx.s.${varName}`;
+/**
+ * Generate JavaScript code from expression AST
+ * Handles proper context detection for identifiers:
+ * - Object keys: NOT prefixed (prevents { active: true } -> { ctx.s.active: true })
+ * - Scope vars (m-for variables): NOT prefixed
+ * - State variables: Prefixed with ctx.s.
+ */
+function genExpression(node: any, context: CodegenContext, $event?: string, $el?: string): string {
+  if (!node) return 'undefined';
+
+  switch (node.type) {
+    case 'literal':
+      // String, number, boolean, null, undefined
+      if (typeof node.value === 'string') {
+        return JSON.stringify(node.value);
+      }
+      return String(node.value);
+
+    case 'identifier': {
+      const name = node.name;
+
+      // Magic variables
+      if (name === '$event' && $event) return $event;
+      if (name === '$el' && $el) return $el;
+      if (name.startsWith('$')) return name; // Other magic vars like $refs, $dispatch
+
+      // Scope variables (m-for item, index)
+      if (context.scopeVars.has(name)) {
+        return name;
+      }
+
+      // Safe globals
+      const safeGlobals = ['true', 'false', 'null', 'undefined', 'NaN', 'Infinity',
+        'Math', 'Date', 'Array', 'Number', 'String', 'Boolean', 'JSON', 'Object',
+        'Promise', 'Symbol', 'BigInt', 'Map', 'Set', 'RegExp', 'Error',
+        'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'console'];
+      if (safeGlobals.includes(name)) {
+        return name;
+      }
+
+      // State variable - prefix with ctx.s.
+      return `ctx.s.${name}`;
     }
-  }
 
-  // For complex expressions, we need to replace identifiers
-  // This is a simplified version - in production, use a proper parser
-  let result = expr;
-
-  // Replace known scope vars
-  for (const scopeVar of context.scopeVars) {
-    const regex = new RegExp(`\\b${scopeVar}\\b`, 'g');
-    result = result.replace(regex, scopeVar);
-  }
-
-  // Prefix other identifiers with ctx.s.
-  // This is a naive approach - proper implementation would use AST
-  result = result.replace(/\b([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g, (match, identifier) => {
-    if (context.scopeVars.has(identifier) ||
-        ['true', 'false', 'null', 'undefined', 'this', 'event', 'Math', 'String', 'Number', 'Array', 'Object'].includes(identifier)) {
-      return identifier;
+    case 'member': {
+      const obj = genExpression(node.object, context, $event, $el);
+      if (node.computed) {
+        // Bracket notation: obj[prop]
+        const prop = genExpression(node.property, context, $event, $el);
+        return `${obj}[${prop}]`;
+      } else {
+        // Dot notation: obj.prop
+        // CRITICAL: property is NOT an identifier in scope - it's a literal key
+        return `${obj}.${node.property}`;
+      }
     }
-    return `ctx.s.${identifier}`;
-  });
 
-  if ($event) {
-    result = result.replace(/\$event\b/g, $event);
-  }
-  if ($el) {
-    result = result.replace(/\$el\b/g, $el);
-  }
+    case 'call': {
+      const callee = genExpression(node.callee, context, $event, $el);
+      const args = node.arguments.map((arg: any) => genExpression(arg, context, $event, $el));
+      return `${callee}(${args.join(', ')})`;
+    }
 
-  return result;
+    case 'binary': {
+      const left = genExpression(node.left, context, $event, $el);
+      const right = genExpression(node.right, context, $event, $el);
+      return `(${left} ${node.op} ${right})`;
+    }
+
+    case 'unary': {
+      const arg = genExpression(node.arg, context, $event, $el);
+      if (node.op === 'typeof') {
+        return `typeof ${arg}`;
+      }
+      return `${node.op}${arg}`;
+    }
+
+    case 'ternary': {
+      const condition = genExpression(node.condition, context, $event, $el);
+      const consequent = genExpression(node.consequent, context, $event, $el);
+      const alternate = genExpression(node.alternate, context, $event, $el);
+      return `(${condition} ? ${consequent} : ${alternate})`;
+    }
+
+    case 'array': {
+      const elements = node.elements.map((el: any) => genExpression(el, context, $event, $el));
+      return `[${elements.join(', ')}]`;
+    }
+
+    case 'object': {
+      // CRITICAL FIX: Object literal keys are NOT identifiers in scope
+      // { active: true } should become { active: ctx.s.true } NOT { ctx.s.active: ctx.s.true }
+      const props = node.properties.map((prop: any) => {
+        let key;
+        if (prop.computed) {
+          // Computed property: { [expr]: value }
+          key = `[${genExpression(prop.key, context, $event, $el)}]`;
+        } else if (typeof prop.key === 'string') {
+          // String literal key or identifier key
+          // Check if it needs quoting
+          if (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(prop.key)) {
+            key = prop.key; // Valid identifier - no quotes needed
+          } else {
+            key = JSON.stringify(prop.key); // Needs quotes
+          }
+        } else {
+          key = String(prop.key);
+        }
+
+        if (prop.shorthand) {
+          // Shorthand: { count } -> { count: ctx.s.count }
+          const value = genExpression(prop.value, context, $event, $el);
+          return `${key}: ${value}`;
+        } else {
+          const value = genExpression(prop.value, context, $event, $el);
+          return `${key}: ${value}`;
+        }
+      });
+      return `{ ${props.join(', ')} }`;
+    }
+
+    case 'assignment': {
+      const left = genExpression(node.left, context, $event, $el);
+      const right = genExpression(node.right, context, $event, $el);
+      return `${left} ${node.op} ${right}`;
+    }
+
+    case 'update': {
+      const arg = genExpression(node.arg, context, $event, $el);
+      if (node.prefix) {
+        return `${node.op}${arg}`;
+      } else {
+        return `${arg}${node.op}`;
+      }
+    }
+
+    default:
+      console.warn(`Unknown AST node type: ${node.type}`);
+      return 'undefined';
+  }
 }
 
 /**

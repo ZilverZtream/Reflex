@@ -230,6 +230,12 @@ export interface CodegenContext {
    * Counter for generating unique IDs
    */
   uid: number;
+
+  /**
+   * Whether we're currently inside an SVG context
+   * CRITICAL FIX: Tracks SVG namespace for proper element creation
+   */
+  isSVG?: boolean;
 }
 
 /**
