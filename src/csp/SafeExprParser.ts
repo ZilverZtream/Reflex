@@ -31,6 +31,10 @@ import {
   type FlatScope
 } from '../core/scope-registry.js';
 
+// TRIFECTA PROTOCOL: Import centralized sink validation
+// Ensures Runtime behaves exactly like the Compiler
+import { validateSink } from '../core/sinks.js';
+
 // Symbol for identifying ScopeContainer instances
 const SCOPE_CONTAINER_MARKER = Symbol.for('reflex.ScopeContainer');
 
@@ -1235,12 +1239,13 @@ export class SafeExprParser {
           // This contradicts the strict whitelist used in the 'get' trap.
           // Now: inherited properties must be in SAFE_DOM_PROPERTIES to allow assignment.
 
-          // SECURITY FIX (Issue #3): Explicitly block innerHTML/outerHTML assignments
-          // Prevent XSS bypass: <button @click="$el.innerHTML = '<img src=x onerror=alert(1)>'">
-          if (typeof prop === 'string' && (prop === 'innerHTML' || prop === 'outerHTML')) {
+          // TRIFECTA PROTOCOL: Sink-Based Security
+          // Use the centralized validateSink for consistent security across
+          // Runtime (Web), Compiled (AOT), and Native (App) targets.
+          if (typeof prop === 'string' && !validateSink(prop, rightValue)) {
             throw new Error(
-              `Reflex Security: Cannot assign to '${prop}' - XSS risk. ` +
-              `Use m-html directive with SafeHTML.sanitize() instead.`
+              `Reflex Security: Assignment to dangerous sink '${prop}' blocked. ` +
+              `The value failed sink validation. For innerHTML, use m-html directive with SafeHTML.sanitize() instead.`
             );
           }
 

@@ -17,6 +17,10 @@
 import type { IRendererAdapter, TransitionConfig, VNode } from './types.js';
 import { SafeHTML } from './dom.js';
 
+// TRIFECTA PROTOCOL: Import centralized sink validation
+// Protects the Native Bridge from injection attacks
+import { validateSink, getBlockReason } from '../core/sinks.js';
+
 /** Node type constants (matching DOM) */
 const ELEMENT_NODE = 1;
 const TEXT_NODE = 3;
@@ -1520,6 +1524,18 @@ export class VirtualRenderer implements IRendererAdapter {
   }
 
   setAttribute(node: VNode, name: string, value: string): void {
+    // === THE TRIFECTA GATE ===
+    // Protects the Native Bridge from injection attacks.
+    // Without this validation, a compromised API response could inject
+    // malicious payloads into the Virtual DOM, which might then be sent
+    // over a bridge to iOS/Android (Potential Bridge Pollution or RCE).
+    if (!validateSink(name, value)) {
+      if (this.debug) {
+        console.warn(`[VirtualRenderer] Security: ${getBlockReason(name, value)}`);
+      }
+      return; // Silently drop the write (Sink-Based Denial)
+    }
+
     if (!node.attributes) node.attributes = new Map();
     node.attributes.set(name, value);
 
@@ -1537,6 +1553,28 @@ export class VirtualRenderer implements IRendererAdapter {
 
     if (this.debug) {
       console.log('[VirtualRenderer] setAttribute:', node.tagName, name, '=', value);
+    }
+  }
+
+  /**
+   * Set property value on node (for direct property access like .src, .href)
+   * Also validates against dangerous sinks.
+   */
+  setProperty(node: VNode, name: string, value: any): void {
+    // === THE TRIFECTA GATE ===
+    // Protects the Native Bridge from injection attacks.
+    if (!validateSink(name, value)) {
+      if (this.debug) {
+        console.warn(`[VirtualRenderer] Security: ${getBlockReason(name, value)}`);
+      }
+      return; // Silently drop the write (Sink-Based Denial)
+    }
+
+    // Set as a property on the node
+    (node as any)[name] = value;
+
+    if (this.debug) {
+      console.log('[VirtualRenderer] setProperty:', node.tagName, name, '=', value);
     }
   }
 

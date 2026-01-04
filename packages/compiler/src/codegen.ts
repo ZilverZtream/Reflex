@@ -1,6 +1,22 @@
 /**
  * @reflex/compiler - Code Generator
  * Transforms AST nodes into optimized JavaScript code
+ *
+ * TRIFECTA PROTOCOL - Sink-Based Security
+ * ========================================
+ * This codegen generates simple _ren.setAttribute() and _ren.setProperty() calls.
+ * Security validation is handled CENTRALLY by the renderer's setAttribute/setProperty
+ * methods via the validateSink() function from '@reflex/core/sinks'.
+ *
+ * Benefits:
+ * - Single source of truth for security (the Renderer)
+ * - Smaller bundle size (no sanitization wrappers in generated code)
+ * - Consistent behavior across Runtime and Compiled code
+ *
+ * The renderer automatically blocks:
+ * - javascript: URLs in href, src, action, etc.
+ * - Direct innerHTML/outerHTML assignments (must use SafeHTML)
+ * - CSS injection via expression() or javascript: in url()
  */
 
 import type {

@@ -16,6 +16,9 @@ import type { IRendererAdapter, TransitionConfig, VNode } from './types.js';
 // Import for local use AND re-export for backwards compatibility
 import { SafeHTML } from '../core/safe-html.js';
 
+// TRIFECTA PROTOCOL: Import centralized sink validation
+import { validateSink, getBlockReason } from '../core/sinks.js';
+
 // Re-export for backwards compatibility with code that imports from renderers/dom.js
 export { SafeHTML };
 
@@ -363,7 +366,39 @@ export const DOMRenderer: IRendererAdapter = {
   },
 
   setAttribute(node: Element, name: string, value: string): void {
-    node.setAttribute(name, value);
+    // === THE TRIFECTA GATE ===
+    // Intercepts Runtime Bindings AND Compiled Code
+    // This is the final firewall for all attribute writes.
+    if (!validateSink(name, value)) {
+      if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+        console.warn(`Reflex Security: ${getBlockReason(name, value)}`);
+      }
+      return; // Silently drop the write (Sink-Based Denial)
+    }
+
+    // Handle null values by removing the attribute
+    if (value === null) {
+      node.removeAttribute(name);
+    } else {
+      node.setAttribute(name, value);
+    }
+  },
+
+  /**
+   * Set a DOM property directly (for .src, .href, etc.).
+   * Also validates against dangerous sinks.
+   */
+  setProperty(node: Element, name: string, value: any): void {
+    // === THE TRIFECTA GATE ===
+    // Intercepts direct property access (el.src, el.href, etc.)
+    if (!validateSink(name, value)) {
+      if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+        console.warn(`Reflex Security: ${getBlockReason(name, value)}`);
+      }
+      return; // Silently drop the write (Sink-Based Denial)
+    }
+
+    (node as any)[name] = value;
   },
 
   removeAttribute(node: Element, name: string): void {
