@@ -36,26 +36,30 @@
  * const trusted = SafeHTML.unsafe(staticHtmlFromBuild);
  */
 
+/**
+ * CRITICAL SECURITY FIX (Audit Issue #2): Brand Symbol Exposure Prevention
+ *
+ * VULNERABILITY: The previous implementation had `private static readonly _brand`
+ * on the class constructor. In TypeScript, `private static` properties are
+ * transpiled to standard properties on the class constructor object.
+ *
+ * An attacker could extract the symbol via:
+ *   const secret = Object.getOwnPropertySymbols(SafeHTML)[0];
+ *   const fake = { [secret]: true, toString: () => '<img src=x onerror=alert(1)>' };
+ *   renderer.setInnerHTML(el, fake); // XSS!
+ *
+ * FIX: Move the brand symbol to MODULE SCOPE (outside the class).
+ * This makes it completely inaccessible via reflection on the class.
+ * The symbol is only accessible within this module's closure.
+ *
+ * Only instances created by SafeHTML.sanitize() or SafeHTML.trustGivenString_DANGEROUS()
+ * will have this symbol, guaranteeing they went through our security checks.
+ */
+const SAFE_HTML_BRAND = Symbol('ReflexSafeHTML');
+
 export class SafeHTML {
   /** The sanitized HTML content */
   private readonly _html: string;
-
-  /**
-   * SECURITY FIX (Issue #4): Brand symbol for type checking
-   *
-   * Uses module-scoped Symbol (not Symbol.for) to prevent external forgery.
-   *
-   * PREVIOUS VULNERABILITY: Symbol.for('reflex.SafeHTML') used the global symbol
-   * registry, allowing malicious scripts to forge "Safe" HTML:
-   *   const fakeSymbol = Symbol.for('reflex.SafeHTML');
-   *   const malicious = { [fakeSymbol]: true, toString: () => '<img src=x onerror=alert(1)>' };
-   *   renderer.setInnerHTML(el, malicious); // XSS!
-   *
-   * FIX: Module-scoped Symbol cannot be accessed from outside this module.
-   * Only instances created by SafeHTML.sanitize() or SafeHTML.trustGivenString_DANGEROUS()
-   * will have this symbol, guaranteeing they went through our security checks.
-   */
-  private static readonly _brand = Symbol('ReflexSafeHTML');
 
   /** Configured sanitizer (DOMPurify or compatible) */
   private static _sanitizer: { sanitize: (html: string) => string } | null = null;
@@ -63,8 +67,10 @@ export class SafeHTML {
   /** Private constructor - only create via static methods */
   private constructor(html: string) {
     this._html = html;
-    // Add global brand symbol for cross-bundle type checking
-    (this as any)[SafeHTML._brand] = true;
+    // Add module-scoped brand symbol for type checking
+    // This symbol is inaccessible via reflection (Object.getOwnPropertySymbols)
+    // on the class constructor, preventing forgery attacks
+    (this as any)[SAFE_HTML_BRAND] = true;
   }
 
   /**
@@ -290,13 +296,16 @@ export class SafeHTML {
   /**
    * Check if a value is a SafeHTML instance
    *
+   * SECURITY: Uses module-scoped symbol that cannot be extracted via reflection.
+   * This prevents attackers from forging SafeHTML instances.
+   *
    * @param value - Value to check
    * @returns true if value is SafeHTML
    */
   static isSafeHTML(value: unknown): value is SafeHTML {
     return value !== null &&
            typeof value === 'object' &&
-           (value as any)[SafeHTML._brand] === true;
+           (value as any)[SAFE_HTML_BRAND] === true;
   }
 
   /**

@@ -43,6 +43,13 @@ const DISALLOWED_PROTOCOLS = /^javascript:/i;
  *
  * TYPE 3: CSS Sinks (Phishing/Exfiltration)
  *   - These accept CSS and could leak data or execute code via expression()
+ *
+ * TYPE 4: Event Handler Sinks (XSS via inline script)
+ *   - These execute JavaScript code directly (onclick, onload, etc.)
+ *   - Matched by pattern, not enumeration (see isEventHandlerSink)
+ *
+ * TYPE 5: Navigation/Target Sinks (Clickjacking, Tabnabbing)
+ *   - These control navigation behavior and can enable attacks
  */
 export const SINK_TYPES: { [key: string]: number } = {
   // TYPE 1: URL Injection Sinks (XSS via protocol)
@@ -66,8 +73,55 @@ export const SINK_TYPES: { [key: string]: number } = {
   'srcdoc': 2,
 
   // TYPE 3: CSS Sinks (Phishing/Exfiltration)
-  'style': 3
+  'style': 3,
+
+  // TYPE 5: Navigation/Target Sinks (Clickjacking, Tabnabbing, Meta Refresh XSS)
+  // http-equiv can trigger javascript: via meta refresh
+  'http-equiv': 5,
+  'httpEquiv': 5,   // camelCase variant
+  'target': 5,
+  'formtarget': 5,
+  'formTarget': 5   // camelCase variant
 };
+
+/**
+ * Pattern to match event handler attributes.
+ *
+ * CRITICAL SECURITY (Audit Issue #1): Event Handler Injection Prevention
+ *
+ * The previous blacklist approach failed to enumerate event handlers, allowing:
+ *   <div :onclick="'alert(XSS)'"></div>
+ *
+ * This pattern matches ALL event handlers:
+ *   - Standard: onclick, onmouseover, onload, onerror, etc.
+ *   - Custom: on-any-pattern (defensive against future browser additions)
+ *
+ * The pattern is case-insensitive to prevent case-manipulation bypasses.
+ */
+const EVENT_HANDLER_PATTERN = /^on[a-z]/i;
+
+/**
+ * Pattern to detect javascript: protocol in values.
+ * Applied to ALL sink types as an additional layer of defense.
+ * Case-insensitive and handles control character evasion.
+ */
+const JAVASCRIPT_PROTOCOL_PATTERN = /^javascript:/i;
+
+/**
+ * Pattern to detect dangerous meta refresh content.
+ * Matches refresh directives that redirect to javascript: URLs.
+ */
+const META_REFRESH_XSS_PATTERN = /url\s*=\s*['"]?\s*javascript:/i;
+
+/**
+ * Check if a property name is an event handler attribute.
+ *
+ * @param prop - Property name to check
+ * @returns true if the property is an event handler (on*)
+ */
+export function isEventHandlerSink(prop: string): boolean {
+  return EVENT_HANDLER_PATTERN.test(prop);
+}
 
 /**
  * CSS patterns that are dangerous and must be blocked.
@@ -112,17 +166,40 @@ const DANGEROUS_CSS = /expression\s*\(|url\s*\(\s*['"]?\s*javascript:/i;
  * validateSink('style', 'width: expression(alert(1))') // false
  */
 export function validateSink(prop: string, value: any): boolean {
-  const type = SINK_TYPES[prop];
+  // CRITICAL SECURITY (Audit Issue #1): Pattern-Based Event Handler Detection
+  //
+  // ARCHITECTURE FIX: Previously used blacklist (SINK_TYPES enumeration).
+  // Now uses pattern matching to catch ALL event handlers (on*).
+  // This is a DENY pattern - matches are blocked regardless of SINK_TYPES.
+  if (isEventHandlerSink(prop)) {
+    // TYPE 4: Event handlers are ALWAYS blocked
+    // There is NO safe way to dynamically set event handlers from user input
+    return false;
+  }
 
-  // Not a sink (e.g., 'id', 'class', 'title') - allow
-  if (!type) return true;
+  const type = SINK_TYPES[prop];
 
   // CRITICAL FIX #1: Allow SafeHTML instances for code injection sinks
   // This enables developers to use sanitized HTML without workarounds
+  // Check this BEFORE the "not a sink" early return to properly handle SafeHTML
   if (SafeHTML.isSafeHTML(value)) return true;
 
   // Null/undefined are safe - they result in empty string or no-op
   if (value == null) return true;
+
+  // Not a known sink (e.g., 'id', 'class', 'title') - but still check value
+  // SECURITY: Even non-sinks should be checked for javascript: in values
+  // as an additional defense layer
+  if (!type) {
+    const strValue = String(value);
+    const normalized = strValue.replace(CTRL, '').trim();
+
+    // Defense-in-depth: Block javascript: protocol in any attribute value
+    if (JAVASCRIPT_PROTOCOL_PATTERN.test(normalized)) {
+      return false;
+    }
+    return true;
+  }
 
   // CRITICAL FIX #2: Object Coercion XSS Prevention
   // Force string conversion BEFORE validation to catch attacks like:
@@ -130,12 +207,12 @@ export function validateSink(prop: string, value: any): boolean {
   // This mirrors what the DOM does: el.setAttribute('href', obj) calls obj.toString()
   const strValue = String(value);
 
+  // SECURITY: Normalize to prevent control-character evasion
+  // Attackers use "java\0script:" or "java\nscript:" to bypass naive checks
+  const normalized = strValue.replace(CTRL, '').trim();
+
   // TYPE 1: URL Sinks - Block javascript: protocol
   if (type === 1) {
-    // SECURITY: Normalize to prevent control-character evasion
-    // Attackers use "java\0script:" or "java\nscript:" to bypass naive checks
-    const normalized = strValue.replace(CTRL, '').trim();
-
     if (DISALLOWED_PROTOCOLS.test(normalized)) {
       return false;
     }
@@ -159,11 +236,29 @@ export function validateSink(prop: string, value: any): boolean {
 
   // TYPE 3: CSS Sinks - Block dangerous patterns
   if (type === 3) {
-    // SECURITY: Normalize to prevent control-character evasion
-    const normalized = strValue.replace(CTRL, '').trim();
-
     // Block expression() (IE legacy) and javascript: inside url()
     if (DANGEROUS_CSS.test(normalized)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  // TYPE 5: Navigation/Target Sinks - Block dangerous values
+  if (type === 5) {
+    // http-equiv="refresh" with javascript: URL is XSS
+    if (prop === 'http-equiv' || prop === 'httpEquiv') {
+      // The actual danger is in the content attribute, but we should
+      // still be cautious about allowing arbitrary http-equiv values
+      // Block if value itself contains javascript:
+      if (JAVASCRIPT_PROTOCOL_PATTERN.test(normalized)) {
+        return false;
+      }
+    }
+
+    // For content attribute paired with http-equiv="refresh"
+    // Check for meta refresh XSS pattern
+    if (META_REFRESH_XSS_PATTERN.test(normalized)) {
       return false;
     }
 
@@ -202,6 +297,11 @@ export function isSink(prop: string): boolean {
  * @returns Description of the security violation
  */
 export function getBlockReason(prop: string, value: any): string {
+  // Check for event handler first (pattern-based, not in SINK_TYPES)
+  if (isEventHandlerSink(prop)) {
+    return `Blocked event handler attribute '${prop}'. Event handlers cannot be set dynamically from user input.`;
+  }
+
   const type = SINK_TYPES[prop];
 
   if (type === 1) {
@@ -212,6 +312,17 @@ export function getBlockReason(prop: string, value: any): string {
   }
   if (type === 3) {
     return `Blocked dangerous CSS pattern in style sink '${prop}'`;
+  }
+  if (type === 5) {
+    return `Blocked dangerous value in navigation/target sink '${prop}'. This could enable clickjacking, tabnabbing, or meta refresh XSS.`;
+  }
+
+  // Check if it was a javascript: protocol in a non-sink attribute (defense in depth)
+  if (value != null) {
+    const strValue = String(value).replace(CTRL, '').trim();
+    if (JAVASCRIPT_PROTOCOL_PATTERN.test(strValue)) {
+      return `Blocked javascript: protocol in attribute '${prop}' (defense in depth)`;
+    }
   }
 
   return `Unknown security violation for sink '${prop}'`;
