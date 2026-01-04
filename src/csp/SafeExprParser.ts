@@ -393,7 +393,9 @@ const SAFE_DOM_PROPERTIES: { [key: string]: 1 } = {
   // Content properties (safe for assignment)
   textContent: 1,
   innerText: 1,
-  innerHTML: 1,  // SECURITY: Must be sanitized by DOMPurify when used with m-html
+  // SECURITY FIX (Issue #3): innerHTML and outerHTML removed to prevent XSS
+  // Users were bypassing sanitization with: <button @click="$el.innerHTML = '<img src=x onerror=alert(1)>'">
+  // These properties are now strictly blocked in assignment operations
 
   // Attributes that are commonly set
   id: 1,
@@ -1202,6 +1204,16 @@ export class SafeExprParser {
           // assignment to ANY other inherited property (e.g., toString, valueOf, DOM methods).
           // This contradicts the strict whitelist used in the 'get' trap.
           // Now: inherited properties must be in SAFE_DOM_PROPERTIES to allow assignment.
+
+          // SECURITY FIX (Issue #3): Explicitly block innerHTML/outerHTML assignments
+          // Prevent XSS bypass: <button @click="$el.innerHTML = '<img src=x onerror=alert(1)>'">
+          if (typeof prop === 'string' && (prop === 'innerHTML' || prop === 'outerHTML')) {
+            throw new Error(
+              `Reflex Security: Cannot assign to '${prop}' - XSS risk. ` +
+              `Use m-html directive with SafeHTML.sanitize() instead.`
+            );
+          }
+
           if (!Object.prototype.hasOwnProperty.call(obj, prop)) {
             // For non-own properties, check the whitelist
             if (typeof prop === 'string') {
