@@ -1,113 +1,135 @@
 # Reflex
 
-A security-first reactive framework for building web applications with defense-in-depth XSS protection.
+A security-first reactive framework with unified protection across all rendering targets.
 
-## Security Architecture: The Trifecta Model
+## The Trifecta: Three Engines, One Security Kernel
 
-Reflex implements a unique "Trifecta" security model that provides defense-in-depth protection against XSS and related injection attacks. Security is enforced at three layers:
+Reflex's unique architecture ensures that security is enforced **identically** whether you're rendering to the browser, a native app, or using AOT compilation. All three engines flow through the same Security Kernel:
 
 ```
-    +-------------------+
-    |   Compile Time    |  <- Template validation, expression parsing
-    +-------------------+
-            |
-            v
-    +-------------------+
-    |   Runtime Proxy   |  <- Iron Membrane, element sandboxing
-    +-------------------+
-            |
-            v
-    +-------------------+
-    |   Sink Kernel     |  <- Final validation before DOM writes
-    +-------------------+
+                         ┌─────────────────────┐
+                         │   SECURITY KERNEL   │
+                         │     (sinks.ts)      │
+                         │                     │
+                         │  • URL Validation   │
+                         │  • HTML Sanitization│
+                         │  • CSS Protection   │
+                         │  • Event Blocking   │
+                         └─────────┬───────────┘
+                                   │
+            ┌──────────────────────┼──────────────────────┐
+            │                      │                      │
+            ▼                      ▼                      ▼
+   ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
+   │   WEB ENGINE    │   │   APP ENGINE    │   │ COMPILED ENGINE │
+   │   (DOMRenderer) │   │ (VirtualRenderer)│   │    (AOT)       │
+   │                 │   │                 │   │                 │
+   │  Direct DOM     │   │  Virtual DOM    │   │  Pre-compiled   │
+   │  Browser APIs   │   │  Native/SSR     │   │  Static output  │
+   └─────────────────┘   └─────────────────┘   └─────────────────┘
 ```
 
-### Security Kernel v6.0 ("Zero Trust")
+**Why this matters:**
+- A vulnerability patched in the kernel is fixed for ALL targets
+- No "it works in dev but not in production" security gaps
+- Native apps get the same protection as web apps
+- AOT-compiled code inherits runtime security checks
 
-The latest security kernel (v6.0) implements a Zero Trust architecture with the following key protections:
+## Security Kernel v6.0 ("Zero Trust")
 
-#### 1. URL Injection Protection (Type 1 Sinks)
+### Architecture: ALLOWLIST Over BLOCKLIST
 
-**Architecture: ALLOWLIST (not blocklist)**
+The v6.0 kernel fundamentally changed from blocking known-bad patterns to allowing only known-good patterns:
 
 ```typescript
-// ALLOWED protocols:
-// - http:, https: (web URLs)
-// - mailto:, tel:, sms: (communication)
-// - ftp:, ftps: (file transfer)
-// - Relative URLs: /, ./, ../, #, ?
-// - data:image/* (images only)
+// OLD (Blocklist - INSECURE):
+// Block javascript: → misses vbscript:, file:, ms-settings:, etc.
 
-// BLOCKED (everything else):
-// - javascript: (XSS)
-// - vbscript: (legacy RCE)
-// - file: (local file disclosure)
-// - ms-settings:, git: (system interaction)
-// - data:text/html (phishing)
+// NEW (Allowlist - SECURE):
+// Allow ONLY: http, https, mailto, tel, sms, ftp, relative URLs, data:image/*
+// Everything else is blocked by default
 ```
 
-**Why allowlist?** Blocklists require constant patching as new protocols emerge. The allowlist approach is "secure by default" - unknown protocols are blocked automatically.
+### Sink Classification
 
-#### 2. HTML Injection Protection (Type 2 Sinks)
+The kernel classifies dangerous DOM sinks into 5 types:
 
-Direct assignment to `innerHTML`, `outerHTML`, and `srcdoc` is blocked. All HTML content must go through the `SafeHTML` wrapper:
+| Type | Sinks | Protection |
+|------|-------|------------|
+| **1: URL** | href, src, action, formaction, poster, etc. | Protocol allowlist |
+| **2: HTML** | innerHTML, outerHTML, srcdoc | SafeHTML required |
+| **3: CSS** | style | Block expression(), @import, javascript: |
+| **4: Event** | on* (onclick, on-click, onload, etc.) | Pattern-blocked |
+| **5: Navigation** | target, formtarget, http-equiv | Tabnabbing protection |
+
+### v6.0 Security Fixes
+
+| Issue | Severity | Description | Fix |
+|-------|----------|-------------|-----|
+| #1 | Critical | Iframe Sandbox Escape | Removed `allow-same-origin` from default |
+| #2 | High | Tabnabbing via `formtarget` | Added formtarget to noopener checks |
+| #3 | High | Protocol Smuggling | Switched to ALLOWLIST architecture |
+| #4 | High | CSS Exfiltration via `<link>` | Blocked `<link>` tag creation |
+| #5 | Medium | Event Regex Issues | Fixed false positives/negatives |
+| #6 | Medium | Unvalidated `<style>` | Added @import and pattern validation |
+
+## How the Trifecta Works
+
+### 1. Web Engine (DOMRenderer)
+
+Direct browser DOM manipulation. Every `setAttribute`, `setProperty`, and `setInnerHTML` call passes through the Security Kernel:
 
 ```typescript
-import { SafeHTML } from 'reflex/core';
+// In your template:
+<a :href="userUrl">Click</a>
 
-// User content - sanitized via DOMPurify
-const safe = SafeHTML.sanitize(userInput);
-renderer.setInnerHTML(element, safe);
-
-// Trusted static content
-const trusted = SafeHTML.unsafe('<div class="wrapper">Static</div>');
+// DOMRenderer.setAttribute() calls:
+if (!validateSink('href', userUrl)) {
+  // Blocked - javascript:, vbscript:, file:, etc.
+  return;
+}
+node.setAttribute('href', userUrl);
 ```
 
-#### 3. CSS Injection Protection (Type 3 Sinks)
+### 2. App Engine (VirtualRenderer)
 
-Blocks dangerous CSS patterns that enable code execution or data exfiltration:
-
-- `expression()` - IE legacy JavaScript in CSS
-- `javascript:` in `url()` - Script execution
-- `@import` - External stylesheet loading (CSS exfiltration)
-- `-moz-binding`, `behavior` - Legacy browser exploits
-
-#### 4. Event Handler Protection (Type 4 Sinks)
-
-Pattern-based blocking of all event handler attributes:
+Virtual DOM for native apps and SSR. Same kernel, different output:
 
 ```typescript
-// BLOCKED: onclick, onload, onerror, on-click (Web Components)
-// ALLOWED: only, once, online (common words - no event handler suffix)
+// VirtualRenderer uses identical validation:
+if (!validateSink(prop, value)) {
+  return; // Blocked
+}
+// Then writes to virtual node instead of real DOM
 ```
 
-#### 5. Navigation Protection (Type 5 Sinks)
+### 3. Compiled Engine (AOT)
 
-Prevents tabnabbing and redirect attacks:
-
-- Auto-applies `rel="noopener noreferrer"` when `target="_blank"` is set
-- Also protects `formtarget="_blank"` (HTML5 form target bypass)
-- Validates `http-equiv` and `content` for meta refresh XSS
-
-### Iframe Sandbox Security
-
-Iframes automatically receive secure sandbox defaults:
+Ahead-of-time compilation still uses the kernel at runtime:
 
 ```typescript
-// When setting src on an iframe, Reflex auto-applies:
-sandbox="allow-scripts allow-forms"
+// Compiled output includes kernel calls:
+const compiled = `
+  if (!validateSink('href', ${expr})) return;
+  el.setAttribute('href', ${expr});
+`;
 ```
 
-**Critical:** `allow-same-origin` is intentionally omitted because using it with `allow-scripts` allows sandbox escape. The iframe can access `parent.document`, remove its own sandbox attribute, and reload with full privileges.
+## The Iron Membrane
 
-### The Iron Membrane
+Beyond sink validation, Reflex wraps all user data in a security proxy:
 
-Reflex wraps all user data in a security proxy ("Iron Membrane") that:
+```typescript
+import { createMembrane } from 'reflex/core/symbols';
 
-1. **Blocks prototype pollution**: `__proto__`, `constructor`, `prototype` access denied
-2. **Controls method access**: Only safe methods (map, filter, etc.) are allowed
-3. **Wraps DOM elements**: `$el` access is sandboxed - no access to `ownerDocument`, `parentNode`, etc.
-4. **Validates style assignments**: CSS property writes are checked for dangerous patterns
+// User data is wrapped in protective proxy
+const safeData = createMembrane(userData);
+
+// Blocks:
+// - Prototype pollution: __proto__, constructor, prototype
+// - Unsafe method access: only whitelisted methods allowed
+// - DOM escape: $el wrapped to block ownerDocument, parentNode, etc.
+```
 
 ## Installation
 
@@ -129,96 +151,63 @@ npm install reflex
 </script>
 ```
 
-## Security Audit Findings Addressed (v6.0)
-
-| Issue | Severity | Description | Fix |
-|-------|----------|-------------|-----|
-| #1 | Critical | Iframe Sandbox Escape | Removed `allow-same-origin` from default sandbox |
-| #2 | High | Reverse Tabnabbing via `formtarget` | Added `formtarget` to noopener checks |
-| #3 | High | Protocol Smuggling (Blocklist) | Switched to ALLOWLIST architecture |
-| #4 | High | CSS Exfiltration via `<link>` | Blocked `<link>` tag creation |
-| #5 | Medium | Event Regex False Positives | Refined pattern to allow 'only', 'once' |
-| #6 | Medium | Unvalidated `<style>` Content | Added `@import` and pattern validation |
-
 ## Security Best Practices
 
-### For User-Generated Content
+### User-Generated HTML
 
 ```typescript
 import { SafeHTML } from 'reflex/core';
 
-// Always sanitize user HTML
-const userComment = SafeHTML.sanitize(rawUserInput);
-renderer.setInnerHTML(commentDiv, userComment);
+// Always sanitize - required for Type 2 sinks
+const safe = SafeHTML.sanitize(userInput);
+renderer.setInnerHTML(element, safe);
 ```
 
-### For URLs from User Input
+### User-Provided URLs
 
 ```typescript
-// URLs are automatically validated through the allowlist
-// If a user provides a javascript: URL, it will be silently blocked
-<a :href="userProvidedUrl">Link</a>
+// Automatically validated through the allowlist
+// javascript:, vbscript:, file: etc. are silently blocked
+<a :href="userUrl">Link</a>
 ```
 
-### For Custom Iframe Sandboxing
+### Custom Iframe Sandboxing
 
 ```typescript
-// If you need allow-same-origin (rare), set sandbox explicitly:
-<iframe
-  :src="trustedUrl"
-  sandbox="allow-scripts allow-same-origin allow-forms"
-></iframe>
+// Default: sandbox="allow-scripts allow-forms" (secure)
+<iframe :src="url"></iframe>
 
+// If you NEED same-origin (rare, understand the risk):
+<iframe :src="url" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
 // WARNING: allow-scripts + allow-same-origin = sandbox escape vector
-// Only use this for content you fully trust
-```
-
-### Content Security Policy
-
-Reflex is designed to work with strict CSP:
-
-```
-Content-Security-Policy:
-  default-src 'self';
-  script-src 'self';
-  style-src 'self' 'unsafe-inline';
-  img-src 'self' data:;
 ```
 
 ## API Reference
 
-### SafeHTML
-
-```typescript
-// Sanitize untrusted HTML (uses DOMPurify if configured)
-SafeHTML.sanitize(html: string): SafeHTML
-
-// Mark trusted static content as safe (NO sanitization)
-SafeHTML.unsafe(html: string): SafeHTML
-
-// Configure sanitizer (e.g., DOMPurify)
-SafeHTML.configureSanitizer(sanitizer: ISanitizer): void
-
-// Check if value is SafeHTML instance
-SafeHTML.isSafeHTML(value: any): boolean
-```
-
-### Sink Validation
+### validateSink
 
 ```typescript
 import { validateSink, getSinkType, isSink } from 'reflex/core/sinks';
 
-// Check if a property write is safe
-validateSink('href', 'https://example.com'); // true
-validateSink('href', 'javascript:alert(1)'); // false
+validateSink('href', 'https://example.com');  // true
+validateSink('href', 'javascript:alert(1)');  // false
+validateSink('href', 'vbscript:msgbox(1)');   // false (v6: allowlist)
+validateSink('href', 'file:///etc/passwd');   // false (v6: allowlist)
 
-// Get sink type (1=URL, 2=HTML, 3=CSS, 4=Event, 5=Navigation)
-getSinkType('href'); // 1
-getSinkType('innerHTML'); // 2
+getSinkType('href');      // 1 (URL)
+getSinkType('innerHTML'); // 2 (HTML)
+getSinkType('style');     // 3 (CSS)
+```
 
-// Check if property is a sink
-isSink('onclick'); // true (event handler pattern)
-isSink('className'); // false
+### SafeHTML
+
+```typescript
+import { SafeHTML } from 'reflex/core';
+
+SafeHTML.sanitize(html);           // Sanitize untrusted HTML
+SafeHTML.unsafe(trustedHtml);      // Mark trusted content (no sanitization)
+SafeHTML.isSafeHTML(value);        // Type check
+SafeHTML.configureSanitizer(impl); // Set sanitizer (e.g., DOMPurify)
 ```
 
 ## Architecture
@@ -226,17 +215,14 @@ isSink('className'); // false
 ```
 src/
 ├── core/
-│   ├── sinks.ts       # Security Kernel - sink validation
-│   ├── symbols.ts     # Iron Membrane - proxy sandbox
-│   ├── safe-html.ts   # SafeHTML wrapper
+│   ├── sinks.ts       # THE SECURITY KERNEL - all engines use this
+│   ├── symbols.ts     # Iron Membrane, safe URL patterns
+│   ├── safe-html.ts   # SafeHTML wrapper for Type 2 sinks
 │   └── reactive.ts    # Reactivity system
 ├── renderers/
-│   ├── dom.ts         # DOM Renderer - web target
-│   └── virtual.ts     # Virtual Renderer - SSR/Native
-├── compiler/
-│   └── ...            # AOT compilation
-└── directives/
-    └── ...            # Built-in directives (m-if, m-for, etc.)
+│   ├── dom.ts         # WEB ENGINE - browser target
+│   └── virtual.ts     # APP ENGINE - native/SSR target
+└── compiler/          # COMPILED ENGINE - AOT target
 ```
 
 ## License
@@ -245,4 +231,4 @@ MIT
 
 ## Security Reporting
 
-If you discover a security vulnerability, please report it via [security@example.com](mailto:security@example.com). Do not open public issues for security vulnerabilities.
+Report vulnerabilities to [security@example.com](mailto:security@example.com). Do not open public issues for security concerns.
