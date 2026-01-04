@@ -11,9 +11,17 @@
  *
  * SECURITY MODEL:
  * 1. URL Injection Sinks (Type 1): Block javascript: protocol
- * 2. Code Injection Sinks (Type 2): Strictly blocked (use SafeHTML)
+ * 2. Code Injection Sinks (Type 2): Blocked unless SafeHTML instance
  * 3. CSS Sinks (Type 3): Block expression() and javascript: in url()
+ *
+ * CRITICAL FIX: Object Coercion XSS Prevention
+ * Objects are coerced to strings BEFORE validation because:
+ * - DOM APIs call toString() on objects: el.setAttribute('href', obj) -> obj.toString()
+ * - An attacker can pass { toString: () => 'javascript:alert(1)' }
+ * - Without coercion, typeof === 'object' bypasses all checks
  */
+
+import { SafeHTML } from './safe-html.js';
 
 // Control character regex for normalization (prevents evasion via \0, etc.)
 const CTRL = /[\u0000-\u001F\u007F-\u009F]/g;
@@ -74,6 +82,12 @@ const DANGEROUS_CSS = /expression\s*\(|url\s*\(\s*['"]?\s*javascript:/i;
  * This function is the core of the "Trifecta Gate" - it intercepts all writes
  * to dangerous DOM properties and blocks malicious values.
  *
+ * CRITICAL SECURITY: Object Coercion XSS Prevention
+ * All non-null values are coerced to strings BEFORE validation because:
+ * - DOM APIs implicitly call toString(): el.href = obj -> obj.toString()
+ * - Attacker payload: { toString: () => 'javascript:alert(1)' }
+ * - Without coercion, typeof === 'object' would bypass all checks
+ *
  * @param prop - The property/attribute name being set (e.g., 'href', 'innerHTML')
  * @param value - The value being assigned
  * @returns {boolean} true if safe to proceed, false if blocked
@@ -85,7 +99,13 @@ const DANGEROUS_CSS = /expression\s*\(|url\s*\(\s*['"]?\s*javascript:/i;
  * // XSS attempt - blocked
  * validateSink('href', 'javascript:alert(1)') // false
  *
- * // innerHTML - always blocked (use SafeHTML instead)
+ * // Object coercion attack - blocked
+ * validateSink('href', { toString: () => 'javascript:alert(1)' }) // false
+ *
+ * // innerHTML with SafeHTML - allowed
+ * validateSink('innerHTML', SafeHTML.sanitize('<div>Hello</div>')) // true
+ *
+ * // innerHTML with raw string - blocked
  * validateSink('innerHTML', '<div>Hello</div>') // false
  *
  * // CSS with expression() - blocked
@@ -97,14 +117,24 @@ export function validateSink(prop: string, value: any): boolean {
   // Not a sink (e.g., 'id', 'class', 'title') - allow
   if (!type) return true;
 
-  // Non-string values are generally safe (booleans, numbers, null, undefined)
-  if (typeof value !== 'string') return true;
+  // CRITICAL FIX #1: Allow SafeHTML instances for code injection sinks
+  // This enables developers to use sanitized HTML without workarounds
+  if (SafeHTML.isSafeHTML(value)) return true;
+
+  // Null/undefined are safe - they result in empty string or no-op
+  if (value == null) return true;
+
+  // CRITICAL FIX #2: Object Coercion XSS Prevention
+  // Force string conversion BEFORE validation to catch attacks like:
+  // { toString: () => 'javascript:alert(1)' }
+  // This mirrors what the DOM does: el.setAttribute('href', obj) calls obj.toString()
+  const strValue = String(value);
 
   // TYPE 1: URL Sinks - Block javascript: protocol
   if (type === 1) {
     // SECURITY: Normalize to prevent control-character evasion
     // Attackers use "java\0script:" or "java\nscript:" to bypass naive checks
-    const normalized = value.replace(CTRL, '').trim();
+    const normalized = strValue.replace(CTRL, '').trim();
 
     if (DISALLOWED_PROTOCOLS.test(normalized)) {
       return false;
@@ -119,10 +149,10 @@ export function validateSink(prop: string, value: any): boolean {
     return true;
   }
 
-  // TYPE 2: HTML/Code Sinks - STRICT BLOCK
-  // Never allow string assignment to innerHTML/outerHTML/srcdoc.
-  // User must use renderer.setInnerHTML() with SafeHTML instances,
-  // which bypasses this gate via a specific renderer method.
+  // TYPE 2: HTML/Code Sinks - STRICT BLOCK for raw strings
+  // SafeHTML instances were already allowed above.
+  // Raw string assignment to innerHTML/outerHTML/srcdoc is blocked.
+  // Developers must use SafeHTML.sanitize() to properly sanitize content.
   if (type === 2) {
     return false;
   }
@@ -130,7 +160,7 @@ export function validateSink(prop: string, value: any): boolean {
   // TYPE 3: CSS Sinks - Block dangerous patterns
   if (type === 3) {
     // SECURITY: Normalize to prevent control-character evasion
-    const normalized = value.replace(CTRL, '').trim();
+    const normalized = strValue.replace(CTRL, '').trim();
 
     // Block expression() (IE legacy) and javascript: inside url()
     if (DANGEROUS_CSS.test(normalized)) {

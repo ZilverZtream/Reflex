@@ -49,8 +49,29 @@ const RAW_TEXT_ELEMENTS = new Set(['script', 'style']);
 const ESCAPABLE_RAW_TEXT_ELEMENTS = new Set(['title', 'textarea']);
 
 /**
+ * Regex patterns for HTML parsing.
+ * Using 'y' (sticky) flag to match only at lastIndex position.
+ * This avoids O(N²) memory allocation from repeated slice() calls.
+ *
+ * CRITICAL PERFORMANCE FIX (ReDoS Prevention):
+ * Previous implementation used html.slice(pos).match(/^.../) which:
+ * 1. Creates a new string on every iteration (slice is O(N) copy)
+ * 2. For a 1MB template, this causes O(N²) memory allocation
+ * 3. Can crash the server/renderer with large inputs
+ *
+ * Fix: Use sticky regex with lastIndex to match in-place without copying.
+ * The 'y' flag ensures matches only occur at exactly lastIndex position,
+ * equivalent to anchoring with ^ but without string copying.
+ */
+const TAG_START_RE = /([a-zA-Z][\w-]*)/y;
+const ATTR_RE = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s/>]+)))?/y;
+const WHITESPACE_RE = /\s+/y;
+
+/**
  * Parse an HTML string into a virtual DOM tree.
  * Handles nested elements, attributes, text nodes, and comments.
+ *
+ * PERFORMANCE: Uses sticky regex with lastIndex to avoid O(N²) string copying.
  */
 function parseHTML(html: string): VNode[] {
   const nodes: VNode[] = [];
@@ -72,9 +93,27 @@ function parseHTML(html: string): VNode[] {
     }
   }
 
+  // Helper to match sticky regex at current position
+  function matchAt(regex: RegExp, position: number): RegExpExecArray | null {
+    regex.lastIndex = position;
+    return regex.exec(html);
+  }
+
+  // Helper to skip whitespace
+  function skipWhitespace(): void {
+    WHITESPACE_RE.lastIndex = pos;
+    const wsMatch = WHITESPACE_RE.exec(html);
+    if (wsMatch && wsMatch.index === pos) {
+      pos += wsMatch[0].length;
+    }
+  }
+
   while (pos < len) {
-    // Check for comment
-    if (html.slice(pos, pos + 4) === '<!--') {
+    // Check for comment (using direct character comparison - O(1))
+    if (html.charCodeAt(pos) === 60 && // '<'
+        html.charCodeAt(pos + 1) === 33 && // '!'
+        html.charCodeAt(pos + 2) === 45 && // '-'
+        html.charCodeAt(pos + 3) === 45) { // '-'
       const endComment = html.indexOf('-->', pos + 4);
       if (endComment !== -1) {
         const commentText = html.slice(pos + 4, endComment);
@@ -86,9 +125,9 @@ function parseHTML(html: string): VNode[] {
     }
 
     // Check for tag
-    if (html[pos] === '<') {
+    if (html.charCodeAt(pos) === 60) { // '<'
       // Closing tag
-      if (html[pos + 1] === '/') {
+      if (html.charCodeAt(pos + 1) === 47) { // '/'
         const closeEnd = html.indexOf('>', pos);
         if (closeEnd !== -1) {
           const closingTag = html.slice(pos + 2, closeEnd).trim().toLowerCase();
@@ -103,11 +142,12 @@ function parseHTML(html: string): VNode[] {
         }
       }
 
-      // Opening tag
-      const tagMatch = html.slice(pos).match(/^<([a-zA-Z][\w-]*)/);
-      if (tagMatch) {
+      // Opening tag - use sticky regex
+      TAG_START_RE.lastIndex = pos + 1; // Skip the '<'
+      const tagMatch = TAG_START_RE.exec(html);
+      if (tagMatch && tagMatch.index === pos + 1) {
         const tagName = tagMatch[1].toLowerCase();
-        pos += tagMatch[0].length;
+        pos = TAG_START_RE.lastIndex;
 
         // Parse attributes
         const attrs: [string, string][] = [];
@@ -115,15 +155,20 @@ function parseHTML(html: string): VNode[] {
 
         // Skip whitespace and parse attributes until > or />
         while (pos < len) {
-          // Skip whitespace
-          while (pos < len && /\s/.test(html[pos])) pos++;
+          // Skip whitespace efficiently
+          while (pos < len && (html.charCodeAt(pos) === 32 || // space
+                              html.charCodeAt(pos) === 9 ||  // tab
+                              html.charCodeAt(pos) === 10 || // newline
+                              html.charCodeAt(pos) === 13)) { // carriage return
+            pos++;
+          }
 
           // Check for end of tag
-          if (html[pos] === '>') {
+          if (html.charCodeAt(pos) === 62) { // '>'
             pos++;
             break;
           }
-          if (html.slice(pos, pos + 2) === '/>') {
+          if (html.charCodeAt(pos) === 47 && html.charCodeAt(pos + 1) === 62) { // '/>'
             selfClosing = true;
             pos += 2;
             break;
@@ -155,14 +200,16 @@ function parseHTML(html: string): VNode[] {
           // CRITICAL FIX: Use ([^\s/>]+) for unquoted values instead of ([^\s>]+)
           // Previously, unquoted values consumed the trailing slash in self-closing tags
           // e.g., <div val=1/> would capture "1/" as the value, breaking the /> detection
-          const attrMatch = html.slice(pos).match(/^([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s/>]+)))?/);
-          if (attrMatch) {
+          //
+          // PERFORMANCE FIX: Use sticky regex to avoid O(N²) string copying
+          const attrMatch = matchAt(ATTR_RE, pos);
+          if (attrMatch && attrMatch.index === pos) {
             const attrName = attrMatch[1];
             // Use raw attribute value - NO backslash unescaping (HTML spec compliant)
             // HTML entities will be decoded separately if needed
             const attrValue = attrMatch[2] ?? attrMatch[3] ?? attrMatch[4] ?? '';
             attrs.push([attrName, attrValue]);
-            pos += attrMatch[0].length;
+            pos = ATTR_RE.lastIndex;
           } else {
             pos++; // Skip invalid character
           }
@@ -244,8 +291,23 @@ function parseHTML(html: string): VNode[] {
       // CRITICAL FIX: If '<' is not followed by a valid tag, treat it as text content
       // Previously, this would skip the '<' entirely, losing data (e.g., "1 < 2" became "1  2")
       // Now we find the next potential tag and include the '<' in the text content
-      const nextPotentialTag = html.slice(pos + 1).search(/<(?:[a-zA-Z/!]|$)/);
-      const textEnd = nextPotentialTag === -1 ? len : pos + 1 + nextPotentialTag;
+      //
+      // PERFORMANCE FIX: Use charCodeAt loop instead of slice().search() to avoid O(N²) copying
+      let textEnd = len;
+      for (let i = pos + 1; i < len; i++) {
+        const code = html.charCodeAt(i);
+        if (code === 60) { // '<'
+          const nextCode = html.charCodeAt(i + 1);
+          // Check if followed by letter (a-zA-Z), '/', or '!'
+          if ((nextCode >= 65 && nextCode <= 90) ||   // A-Z
+              (nextCode >= 97 && nextCode <= 122) ||  // a-z
+              nextCode === 47 ||                       // /
+              nextCode === 33) {                       // !
+            textEnd = i;
+            break;
+          }
+        }
+      }
       const text = html.slice(pos, textEnd);
 
       if (text) {
@@ -390,12 +452,29 @@ function createVNode(
     // CRITICAL FIX: innerHTML must parse HTML content into childNodes
     // Previously only templates had this behavior, causing "ghost content" bug
     // where m-html would set innerHTML but childNodes remained empty
+    //
+    // SECURITY FIX: Validate with sink-based security before parsing
+    // This prevents SSR XSS where malicious HTML like <img src=x onerror=alert(1)>
+    // would be parsed into the virtual tree and sent to clients
     Object.defineProperty(node, 'innerHTML', {
       get() {
         // Serialize childNodes back to HTML string
         return node.childNodes.map(child => serializeVNode(child)).join('');
       },
       set(html: string) {
+        // SECURITY: Validate through sink-based security
+        // Blocks raw strings to innerHTML - must use SafeHTML.sanitize()
+        // This prevents SSR injection where malicious HTML becomes part of the response
+        if (typeof html === 'string' && !validateSink('innerHTML', html)) {
+          if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+            console.warn(
+              `[VirtualRenderer] Security: Blocked unsafe innerHTML assignment.\n` +
+              `Use SafeHTML.sanitize(html) for user content or SafeHTML.trustGivenString_DANGEROUS() for static templates.`
+            );
+          }
+          return; // Silently block - sink-based denial
+        }
+
         // Clear existing childNodes
         node.childNodes = [];
         node.firstChild = null;
@@ -1398,8 +1477,19 @@ export class VirtualRenderer implements IRendererAdapter {
       node.content.isConnected = false;
 
       // Define innerHTML setter to parse content using real HTML parser
+      // SECURITY FIX: Validate with sink-based security before parsing
       Object.defineProperty(node, 'innerHTML', {
         set(html: string) {
+          // SECURITY: Validate through sink-based security
+          if (typeof html === 'string' && !validateSink('innerHTML', html)) {
+            if (typeof process === 'undefined' || process.env?.NODE_ENV !== 'production') {
+              console.warn(
+                `[VirtualRenderer] Security: Blocked unsafe template innerHTML assignment.`
+              );
+            }
+            return; // Silently block - sink-based denial
+          }
+
           // Parse HTML string into virtual DOM nodes
           node.content!.childNodes = [];
           const parsedNodes = parseHTML(html);
