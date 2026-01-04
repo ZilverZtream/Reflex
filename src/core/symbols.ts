@@ -18,6 +18,9 @@
  * - The default action is DENY, not ALLOW
  */
 
+// Import sink validation for style/dataset proxy protection
+import { validateSink, getBlockReason } from './sinks.js';
+
 // === INTERNAL SYMBOLS ===
 // Using Symbol.for() for symbols that need to be shared across module boundaries
 // Using Symbol() for truly private symbols
@@ -618,7 +621,29 @@ export function createElementMembrane(element: any): any {
         });
       }
 
-      // For style, classList, dataset, etc., return directly (they're safe)
+      // CRITICAL SECURITY FIX (Audit Issue #3): Wrap style object in protective proxy
+      //
+      // VULNERABILITY: The style property returns a CSSStyleDeclaration object.
+      // Direct property assignment on this object bypasses validateSink:
+      //   $el.style.backgroundImage = 'url("javascript:alert(1)")';
+      //
+      // FIX: Wrap the style object in a proxy that validates property assignments.
+      if (keyStr === 'style' && value && typeof value === 'object') {
+        return createStyleMembrane(value);
+      }
+
+      // CRITICAL SECURITY FIX (Audit Issue #6): Wrap dataset object in protective proxy
+      //
+      // VULNERABILITY: The dataset property returns a DOMStringMap object.
+      // While less immediately dangerous than style, arbitrary property pollution
+      // could interfere with third-party libraries or app logic.
+      //
+      // FIX: Wrap the dataset object in a proxy that validates assignments.
+      if (keyStr === 'dataset' && value && typeof value === 'object') {
+        return createDatasetMembrane(value);
+      }
+
+      // For classList, etc., return directly (they're safe - only add/remove operations)
       return value;
     },
 
@@ -649,6 +674,189 @@ export function createElementMembrane(element: any): any {
 
   // Cache the membrane
   elementMembraneCache.set(element, membrane);
+
+  return membrane;
+}
+
+// === STYLE MEMBRANE: CSS Injection Protection ===
+
+/**
+ * WeakMap to cache style membranes
+ */
+const styleMembraneCache = new WeakMap<object, any>();
+
+/**
+ * Dangerous CSS property patterns that could enable XSS or data exfiltration.
+ *
+ * These patterns catch CSS-based injection vectors:
+ * - javascript: URLs in properties like backgroundImage
+ * - expression() for legacy IE JavaScript execution
+ * - -moz-binding for Firefox XUL binding injection (legacy)
+ * - behavior for IE HTC behavior injection (legacy)
+ */
+const DANGEROUS_CSS_VALUE_PATTERN = /javascript:|expression\s*\(|-moz-binding|behavior\s*:/i;
+
+/**
+ * Creates a security membrane around a CSSStyleDeclaration object.
+ *
+ * CRITICAL SECURITY (Audit Issue #3): Raw Style Object Exposure
+ *
+ * VULNERABILITY: The style property returns a CSSStyleDeclaration.
+ * Direct property assignment bypasses validateSink:
+ *   $el.style.backgroundImage = 'url("javascript:alert(1)")';
+ *
+ * FIX: Wrap in a proxy that validates all property assignments.
+ *
+ * @param {CSSStyleDeclaration} style - The style object to wrap
+ * @returns {Proxy} Proxied style object with security enforcement
+ */
+function createStyleMembrane(style: CSSStyleDeclaration): any {
+  // Return cached membrane if it exists
+  const cached = styleMembraneCache.get(style);
+  if (cached) {
+    return cached;
+  }
+
+  const membrane = new Proxy(style, {
+    get(target, key) {
+      const value = Reflect.get(target, key);
+
+      // Bind methods to the original style object
+      if (typeof value === 'function') {
+        return function(...args: any[]) {
+          // For setProperty, validate the value
+          if (key === 'setProperty' && args.length >= 2) {
+            const [propName, propValue] = args;
+            if (!validateStyleValue(propName, propValue)) {
+              throw new Error(
+                `Reflex Security: Blocked dangerous CSS value for property '${propName}'. ` +
+                `Value contains javascript:, expression(), or other dangerous patterns.`
+              );
+            }
+          }
+          return value.apply(target, args);
+        };
+      }
+
+      return value;
+    },
+
+    set(target, key, value) {
+      const keyStr = typeof key === 'symbol' ? key.toString() : String(key);
+
+      // Validate the CSS value before setting
+      if (!validateStyleValue(keyStr, value)) {
+        throw new Error(
+          `Reflex Security: Blocked dangerous CSS value for property '${keyStr}'. ` +
+          `Value contains javascript:, expression(), or other dangerous patterns.`
+        );
+      }
+
+      return Reflect.set(target, key, value);
+    }
+  });
+
+  // Cache the membrane
+  styleMembraneCache.set(style, membrane);
+
+  return membrane;
+}
+
+/**
+ * Validates a CSS property value for dangerous patterns.
+ *
+ * @param {string} property - The CSS property name
+ * @param {any} value - The value being set
+ * @returns {boolean} true if safe, false if blocked
+ */
+function validateStyleValue(property: string, value: any): boolean {
+  // Null/undefined are safe (they reset the property)
+  if (value == null) return true;
+
+  const strValue = String(value);
+
+  // Block dangerous CSS patterns
+  if (DANGEROUS_CSS_VALUE_PATTERN.test(strValue)) {
+    return false;
+  }
+
+  // Use the sinks module validation for 'style' sink type
+  // This catches expression() and javascript: in url()
+  if (!validateSink('style', strValue)) {
+    return false;
+  }
+
+  return true;
+}
+
+// === DATASET MEMBRANE: Data Attribute Protection ===
+
+/**
+ * WeakMap to cache dataset membranes
+ */
+const datasetMembraneCache = new WeakMap<object, any>();
+
+/**
+ * Creates a security membrane around a DOMStringMap (dataset) object.
+ *
+ * CRITICAL SECURITY (Audit Issue #6): Raw Dataset Object Exposure
+ *
+ * VULNERABILITY: The dataset property returns a DOMStringMap.
+ * While less immediately dangerous than style, arbitrary property pollution
+ * could interfere with third-party libraries or app logic that relies on
+ * data attributes for state or configuration.
+ *
+ * FIX: Wrap in a proxy that validates assignments and prevents pollution.
+ *
+ * @param {DOMStringMap} dataset - The dataset object to wrap
+ * @returns {Proxy} Proxied dataset object with security enforcement
+ */
+function createDatasetMembrane(dataset: DOMStringMap): any {
+  // Return cached membrane if it exists
+  const cached = datasetMembraneCache.get(dataset);
+  if (cached) {
+    return cached;
+  }
+
+  const membrane = new Proxy(dataset, {
+    get(target, key) {
+      return Reflect.get(target, key);
+    },
+
+    set(target, key, value) {
+      const keyStr = typeof key === 'symbol' ? key.toString() : String(key);
+
+      // Block setting dangerous property names that could be prototype pollution vectors
+      if (keyStr === '__proto__' || keyStr === 'constructor' || keyStr === 'prototype') {
+        throw new Error(
+          `Reflex Security: Cannot set dataset property '${keyStr}'. ` +
+          `This could lead to prototype pollution attacks.`
+        );
+      }
+
+      // Validate the value for dangerous patterns
+      if (value != null) {
+        const strValue = String(value);
+
+        // Block javascript: protocol in data attribute values
+        // Some libraries may use data attributes to construct URLs
+        if (/^javascript:/i.test(strValue.trim())) {
+          throw new Error(
+            `Reflex Security: Blocked javascript: protocol in dataset property '${keyStr}'.`
+          );
+        }
+      }
+
+      return Reflect.set(target, key, value);
+    },
+
+    deleteProperty(target, key) {
+      return Reflect.deleteProperty(target, key);
+    }
+  });
+
+  // Cache the membrane
+  datasetMembraneCache.set(dataset, membrane);
 
   return membrane;
 }
