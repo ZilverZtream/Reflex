@@ -1139,6 +1139,9 @@ export const ReactivityMixin = {
         // Increment version after batch operation completes
         meta.v++;
 
+        // Capture new length after operation
+        const newLength = rawTarget.length;
+
         // TASK 12.8: Single trigger after mutation completes
         // Queue ITERATE and length triggers for structural changes
         // This fires ONCE after the entire push/splice/etc completes
@@ -1146,6 +1149,26 @@ export const ReactivityMixin = {
         if (!ks) self.pendingTriggers.set(meta, ks = new Set());
         ks.add(ITERATE);
         ks.add('length');
+
+        // CRITICAL FIX (Issue #5): Array Truncation in wrapArrayMethod
+        // When splice removes items or length is reduced, we must trigger watchers
+        // on deleted indices. Since we call on raw target (bypassing set trap),
+        // we need to manually detect truncation here.
+        //
+        // Example: arr = [1,2,3,4,5]; arr.splice(2, 3) removes [3,4,5]
+        // We need to trigger watchers on indices 2, 3, 4
+        if (newLength < oldLength) {
+          // Iterate only over existing dependency keys in meta.d (O(D) not O(N))
+          // This prevents DoS on large arrays by only triggering watched indices
+          for (const [key, depSet] of meta.d) {
+            if (typeof key !== 'string') continue;
+            const idx = Number(key);
+            // Check if this is a numeric array index that was deleted
+            if (Number.isInteger(idx) && idx >= newLength && idx < oldLength && depSet.size > 0) {
+              ks.add(key);
+            }
+          }
+        }
 
         // CRITICAL FIX (SEC-2026-003 Issue #4): Reactivity Blindness for push/pop
         //

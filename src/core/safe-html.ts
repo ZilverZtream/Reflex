@@ -40,8 +40,22 @@ export class SafeHTML {
   /** The sanitized HTML content */
   private readonly _html: string;
 
-  /** Brand symbol for type checking - uses global symbol registry for cross-bundle compatibility */
-  private static readonly _brand = Symbol.for('reflex.SafeHTML');
+  /**
+   * SECURITY FIX (Issue #4): Brand symbol for type checking
+   *
+   * Uses module-scoped Symbol (not Symbol.for) to prevent external forgery.
+   *
+   * PREVIOUS VULNERABILITY: Symbol.for('reflex.SafeHTML') used the global symbol
+   * registry, allowing malicious scripts to forge "Safe" HTML:
+   *   const fakeSymbol = Symbol.for('reflex.SafeHTML');
+   *   const malicious = { [fakeSymbol]: true, toString: () => '<img src=x onerror=alert(1)>' };
+   *   renderer.setInnerHTML(el, malicious); // XSS!
+   *
+   * FIX: Module-scoped Symbol cannot be accessed from outside this module.
+   * Only instances created by SafeHTML.sanitize() or SafeHTML.trustGivenString_DANGEROUS()
+   * will have this symbol, guaranteeing they went through our security checks.
+   */
+  private static readonly _brand = Symbol('ReflexSafeHTML');
 
   /** Configured sanitizer (DOMPurify or compatible) */
   private static _sanitizer: { sanitize: (html: string) => string } | null = null;
